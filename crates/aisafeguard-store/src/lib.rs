@@ -70,6 +70,16 @@ pub struct AiRunRow {
     pub summary: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntelRow {
+    pub source: String,
+    pub kind: String,
+    pub value: String,
+    pub confidence: String,
+    pub first_seen: i64,
+    pub expires_ts: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TopIp {
     pub ip: String,
@@ -162,6 +172,21 @@ CREATE TABLE IF NOT EXISTS exposure (
     id   INTEGER PRIMARY KEY AUTOINCREMENT,
     ts   INTEGER NOT NULL,
     json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS intel (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    source     TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    value      TEXT NOT NULL UNIQUE,
+    confidence TEXT NOT NULL,
+    first_seen INTEGER NOT NULL,
+    expires_ts INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS fed_members (
+    node      TEXT PRIMARY KEY,
+    last_seen INTEGER NOT NULL
 );
 "#;
 
@@ -814,6 +839,82 @@ impl Store {
                 rusqlite::Error::QueryReturnedNoRows => Ok(None),
                 other => Err(Error::Store(other.to_string())),
             })
+    }
+
+    // ---------- 威胁情报 ----------
+
+    /// upsert：同 value 更新来源/置信度/过期时间，first_seen 保留最初值
+    pub fn upsert_intel(&self, entries: &[(String, String, String, String, i64, i64)]) -> Result<usize> {
+        let conn = self.lock()?;
+        let mut n = 0;
+        for (source, kind, value, confidence, first_seen, expires_ts) in entries {
+            conn.execute(
+                "INSERT INTO intel (source, kind, value, confidence, first_seen, expires_ts)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(value) DO UPDATE SET
+                   source = excluded.source, kind = excluded.kind,
+                   confidence = excluded.confidence, expires_ts = excluded.expires_ts",
+                params![source, kind, value, confidence, first_seen, expires_ts],
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    pub fn active_intel(&self, now: i64) -> Result<Vec<IntelRow>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT source, kind, value, confidence, first_seen, expires_ts
+                 FROM intel WHERE expires_ts > ?1 ORDER BY confidence, value",
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![now], |r| {
+                Ok(IntelRow {
+                    source: r.get(0)?,
+                    kind: r.get(1)?,
+                    value: r.get(2)?,
+                    confidence: r.get(3)?,
+                    first_seen: r.get(4)?,
+                    expires_ts: r.get(5)?,
+                })
+            })
+            .map_err(|e| Error::Store(e.to_string()))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| Error::Store(e.to_string()))
+    }
+
+    pub fn prune_intel(&self, now: i64) -> Result<usize> {
+        self.lock()?
+            .execute("DELETE FROM intel WHERE expires_ts <= ?1", params![now])
+            .map_err(|e| Error::Store(e.to_string()))
+    }
+
+    // ---------- 组织协同 ----------
+
+    pub fn upsert_fed_member(&self, node: &str, ts: i64) -> Result<()> {
+        self.lock()?
+            .execute(
+                "INSERT INTO fed_members (node, last_seen) VALUES (?1, ?2)
+                 ON CONFLICT(node) DO UPDATE SET last_seen = excluded.last_seen",
+                params![node, ts],
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn list_fed_members(&self) -> Result<Vec<(String, i64)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT node, last_seen FROM fed_members ORDER BY last_seen DESC")
+            .map_err(|e| Error::Store(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(|e| Error::Store(e.to_string()))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| Error::Store(e.to_string()))
     }
 
     // ---------- AI 调用审计 ----------

@@ -15,6 +15,8 @@ pub struct AppConfig {
     pub honeypot: HoneypotConfig,
     pub ai: AiConfig,
     pub detect: DetectConfig,
+    pub intel: IntelConfig,
+    pub fed: FedConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,6 +164,72 @@ impl Default for DetectConfig {
             window_secs: 60,
             ttl_secs: 1800,
         }
+    }
+}
+
+/// 威胁情报（0.3 v1：abuse.ch Feodo C2 + 本地蜜罐源）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct IntelConfig {
+    /// 默认关闭：情报拉取是对外网络请求，用户显式开启
+    pub enabled: bool,
+    /// 高置信度 C2 情报自动封禁（TTL + 内网保护）
+    pub auto_block: bool,
+    pub interval_secs: u64,
+    /// 情报源地址（默认 abuse.ch Feodo C2；可指向自托管/镜像源，测试友好）
+    pub feed_url: String,
+}
+
+impl Default for IntelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            auto_block: true,
+            interval_secs: 21600, // 6h
+            feed_url: "https://feodotracker.abuse.ch/downloads/ipblocklist.txt".into(),
+        }
+    }
+}
+
+/// 组织协同骨架（0.3，设计见 docs/NGFW_EVOLUTION.md §6）。
+/// v1 用组织共享令牌鉴权；mTLS 每节点证书为后续加固项。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FedConfig {
+    pub enabled: bool,
+    /// off | coordinator | agent
+    pub role: String,
+    /// 节点名（上报时标识自己，[a-zA-Z0-9_-]）
+    pub node: String,
+    /// agent 角色：协调者地址，如 http://192.168.1.10:7420
+    pub coordinator: String,
+    pub interval_secs: u64,
+}
+
+impl Default for FedConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            role: "off".into(),
+            node: String::new(),
+            coordinator: String::new(),
+            interval_secs: 60,
+        }
+    }
+}
+
+impl FedConfig {
+    pub fn effective_token(&self) -> String {
+        // 组织令牌只走环境变量 AISAFEGUARD_FED_TOKEN——它是能向全网注入
+        // 情报的凭据，和 AI Key 一样不进配置文件。
+        std::env::var("AISAFEGUARD_FED_TOKEN")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_default()
+    }
+
+    pub fn valid_role(&self) -> bool {
+        matches!(self.role.as_str(), "off" | "coordinator" | "agent")
     }
 }
 

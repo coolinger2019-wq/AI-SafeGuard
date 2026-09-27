@@ -7,6 +7,7 @@
 //! 阈值每次 observe 传入，配置改动即时生效，无需重启。
 
 pub mod exposure;
+pub mod intel;
 
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;

@@ -23,6 +23,11 @@ struct AppState {
 
 pub async fn serve(engine: Arc<EngineHandle>) {
     let port = engine.config().api.port;
+    let fed_coordinator = {
+        let cfg = engine.config();
+        cfg.fed.enabled && cfg.fed.role == "coordinator"
+    };
+    let fed_engine = engine.clone();
     let state = AppState { engine };
     let app = Router::new()
         .route("/api/status", get(status))
@@ -35,12 +40,21 @@ pub async fn serve(engine: Arc<EngineHandle>) {
         .route("/api/stats", get(stats))
         .route("/api/exposure", get(get_exposure))
         .route("/api/exposure/scan", post(scan_exposure))
+        .route("/api/intel", get(get_intel))
+        .route("/api/intel/refresh", post(refresh_intel))
         .route("/api/config", get(get_config).post(put_config))
         .route("/api/ai/key", get(ai_key_present).post(ai_key_set).delete(ai_key_delete))
         .route("/api/ai/runs", get(ai_runs))
         .route("/api/ai/analyze", post(ai_analyze))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
         .with_state(state);
+
+    // 组织协同路由：独立鉴权（组织令牌），仅 coordinator 角色挂载
+    let app = if fed_coordinator {
+        app.merge(crate::fed::fed_router(fed_engine))
+    } else {
+        app
+    };
 
     match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
         Ok(listener) => {
@@ -209,6 +223,22 @@ async fn scan_exposure(State(s): State<AppState>) -> Response {
         }
         Err(e) => err_resp(e),
     }
+}
+
+async fn get_intel(State(s): State<AppState>) -> Response {
+    match s.engine.store.active_intel(aisafeguard_core::now_ts()) {
+        Ok(rows) => Json(rows).into_response(),
+        Err(e) => err_resp(e),
+    }
+}
+
+async fn refresh_intel(State(s): State<AppState>) -> Response {
+    let eng = s.engine.clone();
+    s.engine.rt.spawn(async move {
+        let cfg = eng.config().intel;
+        crate::engine::run_intel_refresh(&eng, &cfg).await;
+    });
+    Json(json!({ "ok": true, "message": "情报刷新已开始" })).into_response()
 }
 
 async fn stats(State(s): State<AppState>) -> Response {

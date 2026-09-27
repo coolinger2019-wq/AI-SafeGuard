@@ -479,12 +479,39 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
         .flatten()
         .filter(|snap| now_ts() - snap.ts < 1800 && !snap.entries.is_empty())
         .map(|snap| serde_json::to_string(&snap.entries).unwrap_or_default());
+    // 观察到的来源 IP 与活跃情报的交集 → <intel> 段
+    let intel_json = match eng.store.active_intel(now_ts()) {
+        Ok(rows) => {
+            let observed: std::collections::HashSet<&str> = stats
+                .top_ips
+                .iter()
+                .map(|t| t.ip.as_str())
+                .chain(hits.iter().map(|h| h.remote_ip.as_str()))
+                .collect();
+            let matched: Vec<&aisafeguard_store::IntelRow> = rows
+                .iter()
+                .filter(|r| observed.contains(r.value.as_str()))
+                .take(20)
+                .collect();
+            if matched.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_string(&matched).unwrap_or_default())
+            }
+        }
+        Err(_) => None,
+    };
 
     let client = AiClient::new(&cfg.ai.base_url, &cfg.ai.model, &key);
     let result = client
         .chat(
             aisafeguard_ai::SYSTEM_PROMPT,
-            &aisafeguard_ai::build_user_prompt(&stats_json, &events_json, exposure_json.as_deref()),
+            &aisafeguard_ai::build_user_prompt(
+                &stats_json,
+                &events_json,
+                exposure_json.as_deref(),
+                intel_json.as_deref(),
+            ),
         )
         .await;
 
@@ -667,4 +694,131 @@ impl Console for EmbeddedConsole {
         });
         rx
     }
+}
+
+/// 威胁情报定时任务（0.3 v1）：拉取 Feodo C2 + 合并本地蜜罐源，
+/// 高置信度 C2 自动封禁（TTL 3 天 + 内网保护），全程审计。
+pub fn spawn_intel_task(eng: &Arc<EngineHandle>) {
+    let eng = Arc::clone(eng);
+    let rt = eng.rt.clone();
+    rt.spawn(async move {
+        // 启动后延迟 20s 先跑一轮（避免抢占启动窗口）
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        loop {
+            let cfg = eng.config().intel;
+            if cfg.enabled {
+                run_intel_refresh(&eng, &cfg).await;
+            }
+            let interval = cfg.interval_secs.clamp(600, 86400);
+            tokio::time::sleep(Duration::from_secs(interval)).await;
+        }
+    });
+}
+
+pub async fn run_intel_refresh(eng: &Arc<EngineHandle>, cfg: &aisafeguard_core::config::IntelConfig) {
+    let now = now_ts();
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(90))
+        .build()
+        .expect("HTTP client 构建失败");
+    let mut entries: Vec<aisafeguard_detect::intel::IntelEntry> = Vec::new();
+
+    // 1) 情报源（默认 Feodo C2，高置信度；feed_url 可覆盖）
+    match aisafeguard_detect::intel::fetch_blocklist(&http, &cfg.feed_url).await {
+        Ok(ips) => {
+            for ip in ips {
+                entries.push(aisafeguard_detect::intel::IntelEntry {
+                    source: "feodo_c2".into(),
+                    kind: "c2".into(),
+                    value: ip,
+                    confidence: "high".into(),
+                    first_seen: now,
+                    expires_ts: now + 3 * 86400,
+                });
+            }
+        }
+        Err(e) => {
+            tracing::warn!("情报拉取失败（离线或源不可达，跳过本轮）: {e}");
+            // 源不可达不产生空情报覆盖
+            return;
+        }
+    }
+
+    // 2) 本地蜜罐源（最近 7 天命中过的来源，仅标注，不自动封禁）
+    if let Ok(hits) = eng.store.recent_honeypot_hits(2000) {
+        let mut seen = std::collections::HashSet::new();
+        for h in hits {
+            if h.remote_ip.is_empty() || h.remote_ip == "unknown" || !seen.insert(h.remote_ip.clone()) {
+                continue;
+            }
+            entries.push(aisafeguard_detect::intel::IntelEntry {
+                source: "local_honeypot".into(),
+                kind: "scan_source".into(),
+                value: h.remote_ip,
+                confidence: "local".into(),
+                first_seen: now,
+                expires_ts: now + 7 * 86400,
+            });
+        }
+    }
+
+    let upserts: Vec<(String, String, String, String, i64, i64)> = entries
+        .iter()
+        .map(|e| {
+            (
+                e.source.clone(),
+                e.kind.clone(),
+                e.value.clone(),
+                e.confidence.clone(),
+                e.first_seen,
+                e.expires_ts,
+            )
+        })
+        .collect();
+    let n = eng.store.upsert_intel(&upserts).unwrap_or(0);
+    let _ = eng.store.prune_intel(now);
+
+    // 3) 高置信度 C2 自动封禁（TTL 3 天，内网保护，已封跳过）
+    let mut blocked = 0;
+    if cfg.auto_block {
+        let existing: std::collections::HashSet<String> = eng
+            .store
+            .list_rules()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.remote_ip.parse::<IpAddr>().is_ok())
+            .map(|r| r.remote_ip)
+            .collect();
+        for e in &entries {
+            if e.confidence != "high" || e.kind != "c2" {
+                continue;
+            }
+            let Ok(ip) = e.value.parse::<IpAddr>() else { continue };
+            if aisafeguard_core::is_protected_ip(ip) || existing.contains(&e.value) {
+                continue;
+            }
+            let spec = BlockSpec {
+                direction: Direction::In,
+                protocol: Protocol::Any,
+                remote_ip: Some(ip),
+                local_port: None,
+                note: format!("威胁情报自动封禁（{} / TTL 3 天）", e.source),
+            };
+            if eng
+                .add_block_ex(&spec, "intel", Some(now + 3 * 86400))
+                .is_ok()
+            {
+                blocked += 1;
+            }
+        }
+    }
+
+    let active = eng.store.active_intel(now).map(|v| v.len()).unwrap_or(0);
+    eng.bus.publish(SecurityEvent::engine(
+        "info",
+        format!(
+            "威胁情报更新：入库 {n} 条（Feodo C2 {}），活跃 {active}，自动封禁 {blocked}",
+            entries.iter().filter(|e| e.source == "feodo_c2").count()
+        ),
+    ));
 }

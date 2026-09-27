@@ -41,14 +41,15 @@
 
 > 按"传感器/执行器分离 + 快/慢双路径"演进：防火墙 trait 只做执行器，检测能力全部落在新 crate `aisafeguard-detect`，经事件总线接入。
 
-- [ ] **检测平台 MVP**：`aisafeguard-detect`（capture/reasm/inspect 分层）——WinDivert(Windows)/nflog(Linux) 可疑流采样捕获、TCP 流重组、流统计表
+- [ ] **检测平台 MVP**（0.3 第二批单独立项：WinDivert 驱动分发/LGPL 许可审查/杀软误报处理需要专门一轮）——`aisafeguard-detect`（capture/reasm/inspect 分层）——WinDivert(Windows)/nflog(Linux) 可疑流采样捕获、TCP 流重组、流统计表
 - [ ] **快路径引擎扩展**：端口扫描 / SYN flood / 暴破速率内置检测器（延续 0.2 频次引擎），全部带 TTL 自动解封与内网保护
-- [ ] **威胁情报管道 v1**：abuse.ch Feodo/URLhaus + 本地蜜罐源；高置信度自动下发，其余仅标注进 AI 上下文；含来源评估记录 [A.5.23]
+- [x] **威胁情报管道 v1** [A.5.23]：Feodo C2 源（`feed_url` 可换自托管/镜像源）+ 本地蜜罐源；高置信度自动封禁（TTL 3 天+内网保护），本地/fed 源仅标注进 AI 上下文；`GET /api/intel`、`POST /api/intel/refresh`；6h 定时拉取，源不可达优雅跳过
 - [ ] **数据面（Windows）**：WFP callout 驱动或 WinDivert；ebpf-for-windows 成熟后试点评估（Aya 用户态加载器绑定 Linux bpf() 系统调用，不能直接用于 Windows）
 - [ ] **数据面（Linux）**：XDP + Aya 实现 `XdpBackend`——AI 封禁决策写入 eBPF map，内核微秒级生效（`Firewall` trait 已预留该扩展位）；蜜罐升级为 XDP_REDIRECT 诱导模式：对已标记的扫描源，把发往真实服务端口的流量重定向到蜜罐端口
 - [ ] **AI 深度介入**：处置 playbook（AI 生成、人工审核、灰度执行）；误报反馈学习；对产品自身 API 的攻击面自检；AI 输入接入流统计与情报标注
-- [ ] **多主机控制台（组织协同骨架，完全体见 §6 / 0.4）**：协调者 + agent——节点注册审批（mTLS 每节点证书）、事件上报、情报下发、AI 建议推送（接收方本地复验、仅慢路径）四条链路；协调者失联时各节点独立运行；跨主机访问控制 [A.5.15]
+- [x] **多主机控制台（组织协同骨架，完全体见 §6 / 0.4）**：协调者 + agent——事件上报（时钟窗校验+100 条/批）、情报双向同步（fed 来源仅标注不自动封禁、内网地址上报前置拒收防投毒）、AI 建议推送（接收方本地复验、仅慢路径）；协调者失联各节点独立运行。鉴权 v1=组织令牌（环境变量），mTLS 每节点证书为 0.3 后续加固 [A.5.15]
 - [ ] 发布物代码签名 + 更新清单签名 [A.8.24]
+- [x] Linux systemd 服务化：`service install-systemd`（unit 写入 + daemon-reload + enable --now，数据目录 /var/lib/aisafeguard；systemd 未运行时照写 unit 并提示）——WSL 实测 active
 - [ ] 日志远程转发（syslog/SIEM）[A.8.15]
 - [ ] 报表导出与告警通知（webhook / 邮件）
 

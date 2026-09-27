@@ -1,5 +1,6 @@
 mod api;
 mod console;
+mod fed;
 mod engine;
 mod gui;
 #[cfg(windows)]
@@ -11,7 +12,60 @@ mod service {
     }
 
     pub fn unsupported() -> anyhow::Result<()> {
-        anyhow::bail!("服务化当前仅支持 Windows")
+        anyhow::bail!("Windows 服务管理当前仅支持 Windows")
+    }
+
+    pub fn install_systemd() -> anyhow::Result<()> {
+        super::install_systemd_unit()
+    }
+}
+
+/// Linux systemd 服务安装：写 unit（数据目录 /var/lib/aisafeguard）+ 启用自启动。
+/// systemd 未运行（如未启用 systemd 的 WSL）时照写 unit 并提示。
+#[cfg_attr(windows, allow(dead_code))] // Windows 上该命令在编译期就拒绝
+fn install_systemd_unit() -> anyhow::Result<()> {
+    let exe = std::env::current_exe()?;
+    let unit = format!(
+        "[Unit]
+Description=AI-SafeGuard Engine
+After=network.target
+
+[Service]
+ExecStart={} --headless --data-dir /var/lib/aisafeguard
+Restart=on-failure
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+",
+        exe.display(),
+    );
+    std::fs::create_dir_all("/var/lib/aisafeguard")?;
+    std::fs::write("/etc/systemd/system/aisafeguard.service", unit)?;
+    let running = std::process::Command::new("systemctl")
+        .args(["is-system-running"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "running")
+        .unwrap_or(false);
+    if !running {
+        println!("unit 文件已写入 /etc/systemd/system/aisafeguard.service");
+        println!("⚠ systemd 未运行：启用后执行 sudo systemctl daemon-reload && sudo systemctl enable --now aisafeguard");
+        return Ok(());
+    }
+    let ok = std::process::Command::new("systemctl")
+        .args(["daemon-reload"])
+        .status()?
+        .success()
+        && std::process::Command::new("systemctl")
+            .args(["enable", "--now", "aisafeguard"])
+            .status()?
+            .success();
+    if ok {
+        println!("✓ 服务已安装并启动（systemctl status aisafeguard 查看）");
+        Ok(())
+    } else {
+        anyhow::bail!("systemctl 启用失败，请检查 systemd 日志")
     }
 }
 mod remote;
@@ -71,11 +125,12 @@ fn main() -> anyhow::Result<()> {
             "service" => {
                 i += 1;
                 match args.get(i).map(|s| s.as_str()) {
-                    Some(w @ ("install" | "uninstall" | "start" | "stop")) => {
+                    Some(w @ ("install" | "uninstall" | "start" | "stop" | "install-systemd")) => {
                         command = Some((format!("service-{w}"), None))
                     }
                     _ => {
-                        eprintln!("用法: aisafeguard service install|uninstall|start|stop");
+                        eprintln!("用法: aisafeguard service install|uninstall|start|stop (Windows)");
+                        eprintln!("      aisafeguard service install-systemd        (Linux，需 root)");
                         std::process::exit(2);
                     }
                 }
@@ -97,14 +152,19 @@ fn main() -> anyhow::Result<()> {
         match cmd.as_str() {
             "verify-log" => return cmd_verify_log(resolve_cfg(cfg_path, data_dir)?.1),
             "export-events" => return cmd_export_events(resolve_cfg(cfg_path, data_dir)?, arg),
-            "service-install" | "service-uninstall" | "service-start" | "service-stop" => {
+            "service-install" | "service-uninstall" | "service-start" | "service-stop"
+            | "service-install-systemd" => {
                 #[cfg(windows)]
                 {
                     let r = match cmd.as_str() {
                         "service-install" => service::install(),
                         "service-uninstall" => service::uninstall(),
                         "service-start" => service::start(),
-                        _ => service::stop(),
+                        "service-stop" => service::stop(),
+                        _ => {
+                            eprintln!("service install-systemd 仅支持 Linux");
+                            std::process::exit(2);
+                        }
                     };
                     match r {
                         Ok(()) => println!("✓ 服务操作成功: {}", &cmd["service-".len()..]),
@@ -115,7 +175,19 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
                 #[cfg(not(windows))]
-                return service::unsupported();
+                {
+                    let r = match cmd.as_str() {
+                        "service-install-systemd" => install_systemd_unit(),
+                        _ => service::unsupported(),
+                    };
+                    return match r {
+                        Ok(()) => Ok(()),
+                        Err(e) => {
+                            eprintln!("✗ {e}");
+                            std::process::exit(1);
+                        }
+                    };
+                }
                 #[cfg(windows)]
                 return Ok(());
             }
@@ -306,6 +378,13 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
     engine::spawn_detect_task(&engine);
     engine::spawn_expiry_janitor(&engine);
 
+    // 威胁情报（默认关闭，[intel].enabled 开启）
+    if cfg.intel.enabled {
+        engine::spawn_intel_task(&engine);
+    } else {
+        bus.publish(SecurityEvent::engine("info", "威胁情报未启用（[intel].enabled）"));
+    }
+
     // 启动时把 DB 中已启用的来源 IP 封禁同步回防火墙
     // （nftables 的 set 是易失的；Windows COM 规则持久，resync 为空实现）
     if let Ok(rules) = engine.store.list_rules() {
@@ -332,6 +411,41 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
     if cfg.api.enabled {
         let engine = engine.clone();
         rt.spawn(async move { api::serve(engine).await });
+    }
+
+    // 组织协同（0.3 骨架）：coordinator 挂 /fed 路由，agent 起上报任务
+    if cfg.fed.enabled {
+        if !cfg.fed.valid_role() || cfg.fed.node.is_empty() {
+            bus.publish(SecurityEvent::engine(
+                "error",
+                format!("组织协同配置无效：role={} node={:?}", cfg.fed.role, cfg.fed.node),
+            ));
+        } else {
+            match cfg.fed.role.as_str() {
+                "coordinator" => {
+                    bus.publish(SecurityEvent::engine(
+                        "info",
+                        format!("组织协同：本节点为协调者（{}）", cfg.fed.node),
+                    ));
+                    // 路由在 api::serve 内按配置挂载
+                }
+                "agent" => {
+                    if cfg.fed.coordinator.is_empty() || cfg.fed.effective_token().is_empty() {
+                        bus.publish(SecurityEvent::engine(
+                            "error",
+                            "组织协同：agent 需要 coordinator 地址与组织令牌",
+                        ));
+                    } else {
+                        bus.publish(SecurityEvent::engine(
+                            "info",
+                            format!("组织协同：agent {} → {}", cfg.fed.node, cfg.fed.coordinator),
+                        ));
+                        fed::spawn_fed_agent_task(&engine);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     bus.publish(SecurityEvent::engine(

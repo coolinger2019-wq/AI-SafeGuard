@@ -2,6 +2,32 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.3.0] - 2026-09-28
+
+按 ROADMAP 0.3 推进（检测平台 MVP 因 WinDivert 驱动分发/许可审查单独立项，见 0.3 第二批）。
+
+### 新增
+
+- **威胁情报管道 v1** [A.5.23]：Feodo C2 源拉取（6h 定时，`feed_url` 可换自托管源）+ 本地蜜罐源合并；
+  高置信度 C2 自动封禁（TTL 3 天 + 内网保护 + 幂等跳过），本地/fed 源仅标注进 AI 提示词（`<intel>` 段）；
+  `GET /api/intel`、`POST /api/intel/refresh`；TTL 过期清理
+- **组织协同骨架**（docs/NGFW_EVOLUTION.md §6）：协调者/agent 双角色；
+  事件上报（时钟窗 ±1h 校验、100 条/批上限）、情报双向同步（fed 来源仅标注、
+  内网地址上报前置拒收防投毒）、AI 建议推送（接收方本地复验、仅慢路径、10 条/批）；
+  鉴权 v1 = 组织令牌（环境变量 AISAFEGUARD_FED_TOKEN，配置文件不承载）；
+  协调者失联各节点独立运行
+- **Linux systemd 服务化**：`service install-systemd` 写 unit + enable --now
+  （数据目录 /var/lib/aisafeguard），WSL 实测 active
+- AI 分析输入扩展：暴露面快照（30 分钟内有效）与情报命中随统计一并送评
+
+### 实测（WSL2 Ubuntu 24.04 + Windows 11 双平台）
+
+- 情报：本地假源确定性闭环（拉取→入库→nft set 自动封禁→幂等跳过）；
+  Windows 真实 Feodo 拉取 5 条 C2 入库
+- 协同：双实例（协调者+agent）事件上报（fed:node 前缀可区分）、成员表、
+  情报上报内网拒收、建议复验（合法入库/内网拒绝）、无令牌 401
+- systemd：`service install-systemd` 后 systemctl is-active = active
+
 ## [0.2.0] - 2026-09-28
 
 ISO 27001 合规加固版（对照矩阵见 docs/COMPLIANCE.md）+ 快路径检测 + Linux 后端。
