@@ -1,0 +1,16 @@
+[package]
+name = "aisafeguard-firewall"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+aisafeguard-core.workspace = true
+serde.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows_firewall = "0.8"
+
+[lints]
+workspace = true

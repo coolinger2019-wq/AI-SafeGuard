@@ -1,0 +1,13 @@
+# 构建产物
+/target
+/target-new
+*.exe
+*.pdb
+
+# 运行数据（本地 API token / 数据库 / 日志绝不入库）
+api-token
+*.db
+*.db-wal
+*.db-shm
+*.log
+*.jsonl

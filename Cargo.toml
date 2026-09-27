@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/aisafeguard-core",
+    "crates/aisafeguard-store",
+    "crates/aisafeguard-firewall",
+    "crates/aisafeguard-honeypot",
+    "crates/aisafeguard-ai",
+    "crates/aisafeguard-detect",
+    "crates/aisafeguard-app",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+aisafeguard-core = { path = "crates/aisafeguard-core" }
+aisafeguard-store = { path = "crates/aisafeguard-store" }
+aisafeguard-firewall = { path = "crates/aisafeguard-firewall" }
+aisafeguard-honeypot = { path = "crates/aisafeguard-honeypot" }
+aisafeguard-ai = { path = "crates/aisafeguard-ai" }
+aisafeguard-detect = { path = "crates/aisafeguard-detect" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "time", "io-util", "signal"] }
+toml = "0.9"
+thiserror = "2"
+dirs = "6"
+chrono = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+rusqlite = { version = "0.37", features = ["bundled"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
+sha2 = "0.10"
+axum = "0.8"
+eframe = "0.36"
+egui = "0.36"
+egui_extras = "0.36"
+uuid = { version = "1", features = ["v4"] }
+anyhow = "1"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[profile.release]
+lto = "thin"
+strip = true
