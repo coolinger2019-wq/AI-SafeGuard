@@ -56,8 +56,8 @@ impl AisafeApp {
         ui.add_space(6.0);
         if ui
             .add(
-                egui::Button::new(RichText::new("添加封禁规则").color(Color32::WHITE))
-                    .fill(ACCENT)
+                egui::Button::new(RichText::new("添加封禁规则").color(on_accent()))
+                    .fill(accent())
                     .corner_radius(CornerRadius::same(6)),
             )
             .clicked()
@@ -107,17 +107,17 @@ impl AisafeApp {
                         });
                         row.col(|ui| {
                             let (text, color) = match r.origin.as_str() {
-                                "ai" => ("AI", PURPLE),
-                                _ => ("手动", TEXT_DIM),
+                                "ai" => ("AI", purple()),
+                                _ => ("手动", text_dim()),
                             };
                             ui.label(RichText::new(text).size(12.0).color(color));
                         });
                         row.col(|ui| {
-                            ui.label(RichText::new(fmt_ts(r.created_ts)).size(11.0).color(TEXT_DIM));
+                            ui.label(RichText::new(fmt_ts(r.created_ts)).size(11.0).color(text_dim()));
                         });
                         row.col(|ui| {
                             let rid = r.id;
-                            if ui.add(egui::Button::new(RichText::new("删除").size(12.0).color(DANGER)).fill(Color32::TRANSPARENT)).clicked() {
+                            if ui.add(egui::Button::new(RichText::new("删除").size(12.0).color(danger())).fill(Color32::TRANSPARENT)).clicked() {
                                 match self.eng.remove_rule(rid) {
                                     Ok(()) => self.set_toast(format!("规则 #{rid} 已删除")),
                                     Err(e) => self.set_toast(format!("删除失败: {e}")),

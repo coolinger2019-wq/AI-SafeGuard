@@ -41,8 +41,9 @@
 
 > 按"传感器/执行器分离 + 快/慢双路径"演进：防火墙 trait 只做执行器，检测能力全部落在新 crate `aisafeguard-detect`，经事件总线接入。
 
-- [ ] **检测平台 MVP**（0.3 第二批单独立项：WinDivert 驱动分发/LGPL 许可审查/杀软误报处理需要专门一轮）——`aisafeguard-detect`（capture/reasm/inspect 分层）——WinDivert(Windows)/nflog(Linux) 可疑流采样捕获、TCP 流重组、流统计表
-- [ ] **快路径引擎扩展**：端口扫描 / SYN flood / 暴破速率内置检测器（延续 0.2 频次引擎），全部带 TTL 自动解封与内网保护
+- [x] **检测平台 MVP（Windows，0.3 第二批）**：`aisafeguard-detect` 新增 capture / reasm / flow / inspect 分层——WinDivert 被动采样捕获（静态编入；SNIFF 嗅探：内核照常转发、句柄只取副本；缺驱动/无提权优雅降级）、TCP 流重组（乱序/重传/环绕，含结构化模糊测试）、流统计表（元数据与计数，红线不存载荷）、内置端口扫描 / SYN flood 检测器；实机验证指南 docs/WINDOWS-CAPTURE-TESTING.md（WinDivert64.sys 需从官方渠道获取后置于程序目录）
+- [ ] **检测平台（Linux）**：nflog/afpacket 采样捕获（`CaptureSource` trait 已预留平台扩展位，Linux 后端与实机验证待补）
+- [x] **快路径引擎扩展**：端口扫描 / SYN flood / 暴破速率内置检测器（暴破延续 0.2 频次引擎；扫描与 SYN flood 由采样捕获驱动），全部带 TTL 自动解封与内网保护，触发器映射表有容量上限防伪造源耗尽
 - [x] **威胁情报管道 v1** [A.5.23]：Feodo C2 源（`feed_url` 可换自托管/镜像源）+ 本地蜜罐源；高置信度自动封禁（TTL 3 天+内网保护），本地/fed 源仅标注进 AI 上下文；`GET /api/intel`、`POST /api/intel/refresh`；6h 定时拉取，源不可达优雅跳过
 - [ ] **数据面（Windows）**：WFP callout 驱动或 WinDivert；ebpf-for-windows 成熟后试点评估（Aya 用户态加载器绑定 Linux bpf() 系统调用，不能直接用于 Windows）
 - [ ] **数据面（Linux）**：XDP + Aya 实现 `XdpBackend`——AI 封禁决策写入 eBPF map，内核微秒级生效（`Firewall` trait 已预留该扩展位）；蜜罐升级为 XDP_REDIRECT 诱导模式：对已标记的扫描源，把发往真实服务端口的流量重定向到蜜罐端口

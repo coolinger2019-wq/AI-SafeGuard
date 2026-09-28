@@ -54,6 +54,7 @@ AI-SafeGuard 是一个用 Rust 编写的模块化终端安全软件。0.1 版本
 | `aisafeguard-firewall` | `Firewall` trait + Windows 实现（`windows_firewall` crate，COM） | 非平台 fallback 返回明确错误；提权检测不依赖系统语言 |
 | `aisafeguard-honeypot` | TCP 蜜罐监听器：ssh / http / telnet / generic 四种行为 | 并发上限 64、读写超时、payload 截断清洗 |
 | `aisafeguard-ai` | OpenAI 兼容客户端（默认 GLM 端点）、系统提示词、建议 schema 校验 | 纯函数校验，可单测 |
+| `aisafeguard-detect` | 快路径检测：蜜罐频次引擎（端口扫描/暴破）、威胁情报管道、暴露面盘点；0.3 起含采样捕获 `capture` / 流重组 `reasm` / 流表 `flow` / 采样管线 `inspect`（Windows WinDivert） | 只发事件不碰防火墙；流表只存元数据；载荷仅判可疑时截断留存 |
 | `aisafeguard-app` | 引擎装配 `EngineHandle`、本地 REST API、egui 界面、入口 | GUI 与 API 共用同一 EngineHandle 契约 |
 
 ## 自身安全设计（0.1 已落实）
@@ -87,5 +88,7 @@ AI-SafeGuard 是一个用 Rust 编写的模块化终端安全软件。0.1 版本
 | 存储 | rusqlite(bundled) | sled 停止维护；sqlx 编译重 |
 | 异步/网络 | tokio + axum 0.8 | 标准组合 |
 | AI | reqwest 直连 OpenAI 兼容端点（默认 `https://open.bigmodel.cn/api/paas/v4`，GLM） | 不引 SDK，30 行内的协议面自己可控 |
+| 流量采样捕获（0.3.1） | WinDivert 2.2.2（`windivert` crate，`static` 特性静态编入用户态库；`.sys` 由用户从官方渠道放置，缺文件优雅降级） | Npcap——商业许可与驱动安装负担；WFP callout——需自研签名驱动，远超当前范围；原始套接字——Windows 上无网络层过滤能力 |
+| 包解析（0.3.1） | `etherparse`（纯 Rust、零 unsafe 面、被 windivert 复用） | 手写 IP/TCP 解析——边界条件重造轮子 |
 
 中文字体：eframe 默认字体不含 CJK，启动时按序加载系统字体 `msyh.ttc → simhei.ttf`，不往仓库塞字体文件。

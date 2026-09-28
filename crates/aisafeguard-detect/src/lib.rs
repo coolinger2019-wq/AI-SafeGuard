@@ -6,8 +6,12 @@
 //! 不碰防火墙、不碰存储——执行与留痕由上层（engine）完成。
 //! 阈值每次 observe 传入，配置改动即时生效，无需重启。
 
+pub mod capture;
 pub mod exposure;
+pub mod flow;
+pub mod inspect;
 pub mod intel;
+pub mod reasm;
 
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
@@ -135,6 +139,7 @@ mod tests {
             bruteforce_hits: 4,
             window_secs: 60,
             ttl_secs: 1800,
+            capture: Default::default(),
         }
     }
 

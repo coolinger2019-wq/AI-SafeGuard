@@ -11,9 +11,10 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.2"
 edition = "2024"
 license = "MIT"
+authors = ["coolinger (vibe coding)"]
 
 [workspace.dependencies]
 aisafeguard-core = { path = "crates/aisafeguard-core" }
@@ -36,6 +37,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 keyring = { version = "3", default-features = false, features = ["windows-native"] }
 sha2 = "0.10"
+etherparse = "0.18"
 axum = "0.8"
 eframe = "0.36"
 egui = "0.36"

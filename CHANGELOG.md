@@ -2,6 +2,73 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.3.2] - 2026-09-28
+
+界面外观批次：多套配色方案 + 全局字号缩放（按 ui.md 规范落地），并补齐版权信息。
+
+### 新增
+
+- **界面主题系统**（`gui/theme.rs`，按 ui.md §2/§3 落地，映射说明见 ui.md §8）：
+  四套配色自由切换——深邃蓝（默认深色）/ 浅色办公 / 暖色护眼（低蓝光）/ 高对比（无障碍）；
+  全部控件改走语义取色（Primary/Success/Warning/Error + 中性色），不再有散落的硬编码色值
+- **全局字号缩放**：配置 `[ui].font_scale`（0.85–1.6），默认 **1.15 舒适档**
+  （正文约 16.7px，原默认偏小）；设置页滑杆 + 紧凑/舒适/大/特大预设，即时预览
+- **设置 → 界面外观**：主题卡片（含色卡预览与说明）+ 字号控制；主题/字号保存后持久化，
+  重启保持；主题名非法时回退默认方案不打不开界面
+- 单测：主题标识往返与非法回退、字号归一化（NaN/越界）、四套方案对比度护栏
+  （正文/辅助/主色文字三组亮度差，防"看不见的字"）
+
+### 变更
+
+- `[ui]` 新增配置节：`theme`（deep_blue | light | warm | contrast）、`font_scale`
+- GUI 配色常量（ACCENT/TEXT_DIM/BG_* 等 11 个）全部移除，改为主题语义取色函数
+
+### 版权
+
+- LICENSE / README / Cargo.toml authors / `--version` 输出 / GUI 设置页"关于"
+  统一标注 **coolinger · vibe coding**（MIT License）
+
+## [0.3.1] - 2026-09-28
+
+按 ROADMAP 0.3 推进第二批：检测平台 MVP（Windows）——真实流量采样捕获 + 流重组 + 内置检测器。
+
+### 新增
+
+- **检测平台 MVP（Windows）**：`aisafeguard-detect` 新增四层结构——
+  `capture`（WinDivert 被动采样捕获；control 模式仅抓 TCP 纯 SYN 元数据，full 模式抓全 TCP 段启用流重组取证；
+  包只拷贝进有界队列、不吸收不注回（SNIFF 嗅探：内核照常转发，句柄只拿副本），捕获线程异常不影响主机网络；缺驱动/无提权/被杀软拦截都降级为可读状态与事件）、
+  `flow`（5 元组流统计表：计数与元数据，容量上限 + 空闲回收，红线不存载荷）、
+  `reasm`（TCP 流重组：乱序缓存、重传去重、32 位环绕感知、上限截断）、
+  `inspect`（采样管线：etherparse 解析 + 端口扫描 / SYN flood 内置检测器 + full 模式载荷摘要取证）
+- **快路径引擎扩展**：端口扫描 / SYN flood 检测器接入与蜜罐频次引擎同一自动封禁出口
+  （Detection 事件含 rule_id：builtin.tcp_scan / builtin.syn_flood；TTL 自动解封 + 内网保护 + 全链路审计）；
+  检测器映射表设容量上限，伪造源 IP 洪泛下内存有界
+- **配置** `[detect.capture]`：enabled（默认关闭）/ mode（control | full）/ 扫描与 flood 阈值 / 窗口 / 流表容量；
+  GUI 设置页新增采样捕获开关、模式选择与运行状态展示；`GET /api/status` 返回 capture 状态（enabled/active/backend/mode/note）
+- **WinDivert 静态编入**：windivert 0.7.0-beta（`static` feature，MSVC 从 vendored 源码编译）——
+  进程加载不依赖任何 DLL，仅开启捕获时才需要在 exe 旁放置官方签名 WinDivert64.sys；LGPL 合规说明见 deny.toml 与 docs/COMPLIANCE.md
+- 文档：docs/WINDOWS-CAPTURE-TESTING.md（驱动获取与实机验证清单）
+
+### 实测（Windows 11）
+
+- 捕获降级：headless 引擎开启捕获（无 WinDivert64.sys）→ 进程正常运行，状态与事件输出
+  "缺少 WinDivert64.sys 驱动文件（需与程序同目录）"，其余功能不受影响
+- 检测链路：本机连接 3 个蜜罐端口 → Detection 事件（scan，含证据摘要）+
+  内网保护跳过自动封禁留痕
+- 封禁落地：API 添加 TEST-NET-3 地址规则 → Windows 防火墙真实生成入站阻止规则（netsh 核验）→
+  API 删除 → 防火墙规则同步移除
+- 单元/集成：reasm 乱序/重传/环绕/上限单测 + 2 万轮结构化模糊测试（断言重组结果恒为源序列前缀）；
+  检测器窗口与冷却语义单测；engine 封禁链路 4 项集成测试（mock 防火墙：封禁+TTL 记账、内网保护零封禁、
+  auto_block 关闭、空规则拒绝）
+- CI 门禁：cargo test --workspace（17 个测试目标）、clippy -D warnings 全绿
+
+### 已知限制
+
+- WinDivert64.sys（官方签名驱动）需用户自行从官方渠道获取放入程序目录；本开发环境网络不可达官方源，
+  真实驱动 E2E 按 docs/WINDOWS-CAPTURE-TESTING.md 的清单在联网环境执行
+- Linux 采样捕获（nflog/afpacket）未实现：`CaptureSource` trait 已预留扩展位，Linux 上开启捕获会明确报"暂无后端"
+- 捕获开关/模式修改需重启生效（与蜜罐/API 端口同一约定）
+
 ## [0.3.0] - 2026-09-28
 
 按 ROADMAP 0.3 推进（检测平台 MVP 因 WinDivert 驱动分发/许可审查单独立项，见 0.3 第二批）。

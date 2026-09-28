@@ -13,14 +13,14 @@ impl AisafeApp {
                 chip(
                     ui,
                     if ai.enabled { "AI 已启用" } else { "AI 未启用" },
-                    if ai.enabled { OK } else { TEXT_DIM },
+                    if ai.enabled { ok() } else { text_dim() },
                 );
                 chip(
                     ui,
                     &format!("Key: {}", ai.key_source),
-                    if ai.key_source == "未配置" { WARN } else { TEXT_DIM },
+                    if ai.key_source == "未配置" { warn() } else { text_dim() },
                 );
-                chip(ui, &ai.model, ACCENT);
+                chip(ui, &ai.model, accent());
                 chip(
                     ui,
                     &if ai.auto_apply {
@@ -28,7 +28,7 @@ impl AisafeApp {
                     } else {
                         "自动应用关闭".to_string()
                     },
-                    if ai.auto_apply { WARN } else { TEXT_DIM },
+                    if ai.auto_apply { warn() } else { text_dim() },
                 );
             });
         }
@@ -38,13 +38,13 @@ impl AisafeApp {
             let running = ai.as_ref().map(|a| a.running).unwrap_or(false);
             let resp = ui.add_enabled(
                 !running,
-                egui::Button::new(RichText::new("立即分析").color(Color32::WHITE))
-                    .fill(ACCENT)
+                egui::Button::new(RichText::new("立即分析").color(on_accent()))
+                    .fill(accent())
                     .corner_radius(CornerRadius::same(6)),
             );
             if running {
                 ui.spinner();
-                ui.label(RichText::new("分析中…").color(TEXT_DIM));
+                ui.label(RichText::new("分析中…").color(text_dim()));
             }
             if resp.clicked() {
                 if self.eng.trigger_analysis() {
@@ -57,14 +57,14 @@ impl AisafeApp {
                 ui.label(
                     RichText::new(format!("自动分析间隔 {} 秒", ai.analyze_interval_secs))
                         .size(12.0)
-                        .color(TEXT_DIM),
+                        .color(text_dim()),
                 );
             }
         });
         ui.label(
             RichText::new("分析内容仅为 24h 聚合统计与最近 20 条截断记录；建议需人工确认，蜜罐数据按不可信输入隔离。")
                 .size(11.0)
-                .color(TEXT_DIM),
+                .color(text_dim()),
         );
 
         ui.add_space(14.0);
@@ -80,7 +80,7 @@ impl AisafeApp {
                         snap.entries.len()
                     ))
                     .size(12.0)
-                    .color(TEXT_DIM),
+                    .color(text_dim()),
                 );
                 egui::CollapsingHeader::new(egui::RichText::new("监听清单").size(13.0))
                     .id_salt("exposure-list")
@@ -97,7 +97,7 @@ impl AisafeApp {
                             );
                         }
                         if snap.entries.len() > 30 {
-                            ui.label(RichText::new(format!("…其余 {} 项", snap.entries.len() - 30)).size(11.0).color(TEXT_DIM));
+                            ui.label(RichText::new(format!("…其余 {} 项", snap.entries.len() - 30)).size(11.0).color(text_dim()));
                         }
                     });
             }
@@ -105,7 +105,7 @@ impl AisafeApp {
                 ui.label(
                     RichText::new("尚未扫描。扫描会枚举本机监听端口与归属进程，并作为下次 AI 分析的输入。")
                         .size(13.0)
-                        .color(TEXT_DIM),
+                        .color(text_dim()),
                 );
             }
         }
@@ -144,13 +144,13 @@ impl AisafeApp {
         if pending.is_empty() {
             ui.label(
                 RichText::new("暂无待处理建议。蜜罐捕获到攻击行为后，点击「立即分析」生成封禁建议。")
-                    .color(TEXT_DIM)
+                    .color(text_dim())
                     .size(13.0),
             );
         }
         for p in &pending {
             Frame::new()
-                .fill(BG_CARD)
+                .fill(bg_card())
                 .corner_radius(CornerRadius::same(8))
                 .inner_margin(Margin::same(12))
                 .stroke(Stroke::new(1.0, severity_color(&p.severity)))
@@ -172,9 +172,9 @@ impl AisafeApp {
                             if ui
                                 .add(
                                     egui::Button::new(
-                                        RichText::new("应用封禁").color(Color32::WHITE),
+                                        RichText::new("应用封禁").color(on_accent()),
                                     )
-                                    .fill(DANGER)
+                                    .fill(danger())
                                     .corner_radius(CornerRadius::same(6))
                                     .min_size(egui::vec2(96.0, 26.0)),
                                 )
@@ -192,11 +192,11 @@ impl AisafeApp {
                             }
                         });
                     });
-                    ui.label(RichText::new(&p.reason).size(13.0).color(TEXT_DIM));
+                    ui.label(RichText::new(&p.reason).size(13.0).color(text_dim()));
                     ui.label(
                         RichText::new(format!("#{} · {} · {}", p.id, p.model, fmt_ts(p.created_ts)))
                             .size(11.0)
-                            .color(TEXT_DIM),
+                            .color(text_dim()),
                     );
                 });
             ui.add_space(8.0);
@@ -205,14 +205,14 @@ impl AisafeApp {
         ui.add_space(10.0);
         section(ui, "运行记录");
         if self.cache.runs.is_empty() {
-            ui.label(RichText::new("尚无 AI 分析记录。").color(TEXT_DIM).size(13.0));
+            ui.label(RichText::new("尚无 AI 分析记录。").color(text_dim()).size(13.0));
         }
         for r in &self.cache.runs {
             ui.horizontal(|ui| {
                 ui.label(
-                    RichText::new(if r.ok { "✓" } else { "✗" }).color(if r.ok { OK } else { DANGER }),
+                    RichText::new(if r.ok { "✓" } else { "✗" }).color(if r.ok { ok() } else { danger() }),
                 );
-                ui.label(RichText::new(fmt_ts(r.ts)).size(12.0).color(TEXT_DIM));
+                ui.label(RichText::new(fmt_ts(r.ts)).size(12.0).color(text_dim()));
                 ui.label(RichText::new(&r.summary).size(12.0));
             });
         }

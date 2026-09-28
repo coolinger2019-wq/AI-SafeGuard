@@ -2,18 +2,20 @@
 
 用 Rust 编写的模块化终端安全软件。**蜜罐诱捕 → 事件流水线 → 快路径频次检测 / AI 慢路径分析 → 防火墙处置** 的端到端闭环，带本地图形界面。
 
-> 当前版本 **0.2**（ISO 27001 合规加固版，进行中）。设计文档见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，路线图见 [docs/ROADMAP.md](docs/ROADMAP.md)，ISO 27001 对照见 [docs/COMPLIANCE.md](docs/COMPLIANCE.md)，NGFW/分布式演进见 [docs/NGFW_EVOLUTION.md](docs/NGFW_EVOLUTION.md)。
+> 当前版本 **0.3.1**（检测平台 MVP：真实流量采样捕获 + 流重组 + 内置检测器）。设计文档见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，路线图见 [docs/ROADMAP.md](docs/ROADMAP.md)，ISO 27001 对照见 [docs/COMPLIANCE.md](docs/COMPLIANCE.md)，NGFW/分布式演进见 [docs/NGFW_EVOLUTION.md](docs/NGFW_EVOLUTION.md)。
 
 ## 当前功能
 
 - **蜜罐**：SSH / HTTP / Telnet / 通用 四种低交互 TCP 监听器，记录来源与首包，假响应逼真，自身有并发/超时/截断三重防护
 - **快路径检测**：频次引擎自动判定端口扫描 / 暴力探测，触发即产出 Detection 事件；自动封禁带 TTL 到期自动解封，内网/回环地址永不自动封禁
+- **流量采样捕获**（Windows，默认关闭）：WinDivert 嗅探模式被动观测真实流量（内核照常转发、句柄只取副本，不吸收不注回），内置端口扫描 / SYN flood 检测器走同一自动封禁出口；control 模式只看 SYN 元数据，full 模式带 TCP 流重组取证；缺驱动/无提权只降级不报错（[实机验证清单](docs/WINDOWS-CAPTURE-TESTING.md)）
 - **防火墙**：Windows = COM API 管理 `aisafeguard-blk-*` 规则；Linux = nftables（`inet aisafeguard` 表 + 集合元素，启动自动重灌）。两端都只管理自己创建的内容
 - **主机暴露面盘点**：枚举监听端口与归属进程，AI 评估对外暴露风险（"自动分析功能接口"第一步）
 - **AI 助手**（慢路径）：OpenAI 兼容端点（默认智谱 GLM，内网可指向本地推理），把 24h 攻击统计、暴露面快照喂给 LLM，产出**严格校验**的封禁建议；默认人工确认，可选自动应用（带严重度阈值）
 - **完整性**：事件表链式 SHA-256 哈希，`aisafeguard verify-log` 离线校验篡改；解析路径有结构化模糊测试护栏
 - **凭据管理**：AI Key 与 API token 存 Windows 凭据管理器，配置文件不承载任何秘密
 - **图形界面**（egui）：仪表盘 / 事件流水 / 防火墙 / 蜜罐 / AI 助手 / 设置
+- **界面主题**：4 套配色自由切换（深邃蓝 / 浅色办公 / 暖色护眼 / 高对比无障碍）+ 全局字号缩放（默认“舒适”档），设置页即时预览、保存后保持；规范见 [ui.md](ui.md)
 - **威胁情报**：Feodo C2 源 + 本地蜜罐源，高置信度自动封禁，命中随 AI 分析送评
 - **组织协同**（骨架）：协调者/agent 双角色，事件上报、情报同步、AI 建议推送（本地复验、仅慢路径）
 - **本地 API**：`127.0.0.1` + Bearer token，供脚本与未来的远程控制台使用
@@ -65,10 +67,23 @@ scan_distinct_ports = 5     # 60 秒内触达 ≥5 个不同蜜罐端口 = 端�
 bruteforce_hits = 10        # 同一蜜罐 60 秒内命中 ≥10 次 = 暴力探测
 ttl_secs = 1800             # 自动封禁 30 分钟后自动解封
 
+[detect.capture]
+enabled = false             # 真实流量采样捕获（WinDivert，需管理员/服务模式，重启生效）
+mode = "control"            # control = 仅 TCP SYN 元数据；full = 全 TCP 段 + 流重组取证
+scan_distinct_ports = 15    # 窗口内对不同目标端口发 SYN 的判定阈值
+syn_flood_rate = 100        # 同一 (来源, 目标:端口) 窗口内 SYN 数判定阈值
+window_secs = 60
+flow_idle_secs = 120
+flow_table_cap = 65536
+
 [honeypot]
 enabled = true
 # 默认监听 2222(ssh) 8081(http) 2323(telnet) 1337(generic)
 # 要监听 22/80/23 等标准端口改这里（需管理员，重启生效）
+
+[ui]
+theme = "deep_blue"   # deep_blue | light | warm | contrast（高对比）
+font_scale = 1.15     # 全局字号缩放 0.85–1.6，默认 1.15（舒适档）
 ```
 
 ## 本地 API
@@ -112,11 +127,15 @@ crates/
   aisafeguard-firewall   防火墙 trait + Windows COM 实现
   aisafeguard-honeypot   TCP 蜜罐监听器
   aisafeguard-ai         LLM 客户端 + 建议 schema 校验
-  aisafeguard-detect     快路径频次检测（扫描/暴破判定）
+  aisafeguard-detect     快路径检测（频次引擎 / 情报管道 / 暴露面盘点 / 采样捕获）
   aisafeguard-app        引擎装配 / REST API / egui 界面 / 入口
-docs/               架构 / 路线图 / 合规对照 / NGFW 演进 / Linux 测试指南 / 弯路记录
+docs/               架构 / 路线图 / 合规对照 / NGFW 演进 / Windows 捕获验证 / Linux 测试指南 / 弯路记录
 ```
 
-## 已知限制（0.2 进行中）
+## 已知限制（0.3.2）
 
-蜜罐与 API 配置改动需重启；服务模式与内嵌模式并存，服务 token 文件依赖 ProgramData 默认 ACL（0.3 收紧为命名管道）；仅 Windows（nftables/pf 后端计划中）；Linux 无凭据管理器后端（Key 请用环境变量）。详见架构文档。
+蜜罐、API 与采样捕获的配置改动需重启；服务模式与内嵌模式并存，服务 token 文件依赖 ProgramData 默认 ACL（后续收紧为命名管道）；流量采样捕获目前仅 Windows（Linux nflog 后端计划中，CaptureSource trait 已预留），WinDivert64.sys 需自行从官方渠道获取放入程序目录；Linux 无凭据管理器后端（Key 请用环境变量）；防火墙封禁规则为 IP 粒度，L7/应用层识别在路线图 0.4。详见架构文档。
+
+---
+
+© 2026 **coolinger** · vibe coding · MIT License · UI 规范见 [ui.md](ui.md)

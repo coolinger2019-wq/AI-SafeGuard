@@ -9,6 +9,14 @@ aisafeguard-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
+etherparse.workspace = true
+tracing.workspace = true
+
+# WinDivert 采样捕获（仅 Windows）。static = WinDivert 用户态库静态编入 exe（进程加载
+# 零额外文件），运行期仅当开启捕获时才需要在 exe 旁放置官方签名的 WinDivert64.sys，
+# 缺文件/缺管理员权限由上层优雅降级（检测平台 MVP，见 docs/NGFW_EVOLUTION.md §2.2）。
+[target.'cfg(windows)'.dependencies]
+windivert = { version = "0.7.0-beta.4", default-features = false, features = ["static"] }
 
 [lints]
 workspace = true

@@ -17,6 +17,28 @@ pub struct AppConfig {
     pub detect: DetectConfig,
     pub intel: IntelConfig,
     pub fed: FedConfig,
+    pub ui: UiConfig,
+}
+
+/// 界面外观（GUI 设置页可切换，保存后即时生效并保持）。
+/// 配色方案与字号缩放的具体定义在 aisafeguard-app 的 gui/theme.rs
+/// （core 不依赖 GUI，这里只做持久化；主题名写错时界面回退默认方案）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UiConfig {
+    /// deep_blue（默认深色）| light | warm | contrast（高对比）
+    pub theme: String,
+    /// 全局字号缩放，0.85–1.6，默认 1.15（正文约 16.7px，舒适档）
+    pub font_scale: f32,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            theme: "deep_blue".into(),
+            font_scale: 1.15,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,6 +174,8 @@ pub struct DetectConfig {
     pub window_secs: i64,
     /// 自动封禁 TTL（秒），到期自动解封。
     pub ttl_secs: i64,
+    /// 采样捕获（检测平台 MVP，0.3 第二批）：真实流量观测。
+    pub capture: CaptureConfig,
 }
 
 impl Default for DetectConfig {
@@ -163,7 +187,49 @@ impl Default for DetectConfig {
             bruteforce_hits: 10,
             window_secs: 60,
             ttl_secs: 1800,
+            capture: CaptureConfig::default(),
         }
+    }
+}
+
+/// 真实流量采样捕获（0.3 第二批，设计见 docs/NGFW_EVOLUTION.md §2.2/§3）。
+/// 采集说明：control 模式只采集 TCP 纯 SYN 包头（元数据，无载荷）；
+/// full 模式采集完整 TCP 段用于流重组取证，载荷仅在被判定可疑时随证据截断留存。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CaptureConfig {
+    /// 默认关闭：捕获需要驱动/提权，且是对本机网络面的行为，用户显式开启
+    pub enabled: bool,
+    /// control = 仅 TCP 纯 SYN（默认，只看元数据）| full = 全 TCP 段（启用流重组取证）
+    pub mode: String,
+    /// 端口扫描判定：window_secs 内对 ≥ scan_distinct_ports 个不同目标端口发 SYN
+    pub scan_distinct_ports: u32,
+    /// SYN flood 判定：同一 (来源, 目标 IP:端口) window_secs 内 ≥ syn_flood_rate 个 SYN
+    pub syn_flood_rate: u32,
+    pub window_secs: i64,
+    /// 流表空闲回收（秒）
+    pub flow_idle_secs: i64,
+    /// 流表容量上限（超限驱逐最旧流）
+    pub flow_table_cap: u32,
+}
+
+impl Default for CaptureConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: "control".into(),
+            scan_distinct_ports: 15,
+            syn_flood_rate: 100,
+            window_secs: 60,
+            flow_idle_secs: 120,
+            flow_table_cap: 65536,
+        }
+    }
+}
+
+impl CaptureConfig {
+    pub fn valid_mode(&self) -> bool {
+        matches!(self.mode.as_str(), "control" | "full")
     }
 }
 

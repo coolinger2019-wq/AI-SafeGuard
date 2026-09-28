@@ -101,6 +101,7 @@ fn main() -> anyhow::Result<()> {
             "--print-token" => print_token = true,
             "--version" => {
                 println!("aisafeguard {VERSION}");
+                println!("© 2026 coolinger · vibe coding · MIT License");
                 return Ok(());
             }
             "--config" => {
@@ -366,6 +367,7 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
         bus: bus.clone(),
         firewall: firewall.clone(),
         detect: Arc::new(aisafeguard_detect::FreqEngine::new()),
+        capture: Arc::new(engine::CaptureState::default()),
         rt: rt.handle().clone(),
         started: Instant::now(),
         ai_running: Arc::new(AtomicBool::new(false)),
@@ -377,6 +379,9 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
     // 快路径频次检测 + TTL 自动解封
     engine::spawn_detect_task(&engine);
     engine::spawn_expiry_janitor(&engine);
+
+    // 采样捕获（检测平台 MVP，默认关闭；不可用时只降级并留痕）
+    engine::spawn_capture_task(&engine);
 
     // 威胁情报（默认关闭，[intel].enabled 开启）
     if cfg.intel.enabled {

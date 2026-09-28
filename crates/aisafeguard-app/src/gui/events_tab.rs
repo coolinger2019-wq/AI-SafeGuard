@@ -18,7 +18,7 @@ impl AisafeApp {
             ui.label(
                 RichText::new(format!("{} 条", self.cache.events.len()))
                     .size(12.0)
-                    .color(TEXT_DIM),
+                    .color(text_dim()),
             );
         });
         ui.add_space(10.0);
@@ -42,7 +42,7 @@ impl AisafeApp {
                 for ev in &rows {
                     body.row(22.0, |mut row| {
                         row.col(|ui| {
-                            ui.label(RichText::new(fmt_ts(ev.ts)).size(12.0).color(TEXT_DIM));
+                            ui.label(RichText::new(fmt_ts(ev.ts)).size(12.0).color(text_dim()));
                         });
                         row.col(|ui| {
                             ui.label(RichText::new(&ev.kind).size(12.0).color(event_color(&ev.kind)));
@@ -69,7 +69,7 @@ impl AisafeApp {
         ui.label(
             RichText::new("完整 payload（截断存储）可通过本地 API 查看：GET /api/events")
                 .size(11.0)
-                .color(TEXT_DIM),
+                .color(text_dim()),
         );
     }
 }

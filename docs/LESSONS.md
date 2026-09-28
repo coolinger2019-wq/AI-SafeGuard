@@ -57,3 +57,15 @@
 - **/proc/net 的地址是小端字节序**：v4 是 4 字节反序（"0100007F" → 127.0.0.1），v6 是 4 组小端 u32。用 `u32::from_str_radix` 后必须 `to_le_bytes()` 再转 `IpAddr`——直接 `Ipv4Addr::from(u32)` 是大端，出来就是 "1.0.0.127"。样本驱动单测把这坑钉死了。
 - **采集器路径手误**（/proc/tcp vs /proc/net/tcp）单测测不到（解析函数拿的是文本）——平台 I/O 层薄薄一层，靠真机 E2E 兜底。这类"拼路径"代码放最小化的一行里。
 - 伪造 /proc 树的测试在 Windows 上不可行（read_link 语义不同），把 inode 提取抽成纯函数单独测、map 测试用手工构造——平台差异的 I/O 与纯逻辑分离，是跨平台测试的核心手法。
+
+## 0.3 第二批 · 检测平台 MVP（2026-09-28）
+
+- **受限网络下的依赖获取路径**：本机只有部分国内镜像可达（crates.io / static.crates.io / github / rust-lang 全不通）。cargo 用 `~/.cargo/config.toml` 的 sparse 源替换指向阿里云镜像（`sparse+https://mirrors.aliyun.com/crates.io-index/`，已验证可下载）；rustup 用 `RUSTUP_DIST_SERVER=https://mirrors.aliyun.com/rustup` 升级工具链（egui 0.36 要 rustc ≥1.95，本机原 1.94）。下次换机器先测这三条通路再动工。
+- **WinDivert 集成方式：static 而不是 vendored DLL**。windivert-sys 的 `vendored` 特性只编译出 DLL 并按 import lib 链接——WinDivert.dll 缺失是**进程加载失败**（STATUS_DLL_NOT_FOUND），一个可选功能把整个程序拖死；`static` 把用户态库静态编入 exe，只有真正开启捕获才需要旁边放 `.sys`，缺文件时 WinDivertOpen 返回可映射的错误。教训：可选能力的运行期依赖绝不能放在**加载期**。
+- **vendored 源码不含驱动二进制**：WinDivert 2.x 的官方 DLL 里嵌的是驱动，但 crate vendored 的是纯 C 源码，编译产物不嵌入 `WinDivert64.sys`（内核态编译需 WDK）——所以运行期必须放官方签名 `.sys`，且版本要与静态编入的源码一致（2.2.2）。
+- **流重组的锚点必须是 SYN 的 ISN+1，不是"第一段数据"**。单测里先发数据段再发更早的数据段时暴露：锚在乱序先到的段上，后来补齐的"前缀"会被当旧段丢弃，重组出中段子串。修法是 full 模式观测到 SYN 时 `seed(ISN+1)`。这也是"生产语义定锚点"的通用教训。
+- **模糊测试的输入构造必须先对齐生产语义**（第二轮又栽在这）：随机把重复段插到分片数组**头部**，锚点就成了中段，断言"重组结果=源序列前缀"必挂——fuzz 挂了先怀疑 harness 而不是被测代码。
+- **检测器映射表要有容量上限**：伪造源 IP 的 SYN 洪泛能无限制造新键（`HashMap<源IP, …>`），10 秒一次的 sweep 也兜不住。到达上限后只更新已跟踪来源、拒收新键——内存有界，且攻击者换源等于放弃被跟踪，降级方向正确。
+- **WinDivert 的 SNIFF 标志语义要读驱动源码确认：它是"不吸收、只给副本"，不是"发送时不改校验和"**。初版按"recv→注回"写，读 vendored 驱动源码才发现 SNIFF 模式下驱动不设 BLOCK/ABSORB（`windivert.c` 网络层 classify 末尾 `if (!sniff_mode)`），匹配包**同时**走协议栈与用户态句柄——再 `send()` 就是重复注入（SYN 发两遍、full 模式全量重复）。正确姿势：嗅探模式只收不发，天然"捕获线程死了也不影响网络"，比注回模式少一类故障面。教训：第三方 C 库的标志语义别按记忆写，`vendor/` 里有源码就直接读。
+- **单机 E2E 够不着的分支要用可注入依赖补测试**：本机所有流量源必是回环/私网（内网保护会拦下封禁分支），真实自动封禁无法在单机触发。把封禁出口抽成 `apply_block(fw, store, bus, …)` + `DetectionSink`，用 mock 防火墙断言"公网 IP 封禁+TTL 记账 / 内网零封禁 / 开关关闭 / 空规则拒绝"，再用真实 Windows 防火墙跑一遍 API 加删规则验证后端本身。
+- WinDivert 的过滤表达式大小写不敏感（`tcp.Syn == 1 and tcp.Ack == 0`）；纯 SYN 判定要在过滤器里排掉 SYN-ACK（`Ack == 0`），否则回包方向也会被当成扫描样本。
