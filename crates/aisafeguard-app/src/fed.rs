@@ -513,6 +513,43 @@ pub fn expected_ok(
     }
 }
 
+/// `fed audit <out.json>`（0.4.0 C4）：协同审计导出——成员表、吊销表、
+/// 窗口内协同上报统计与最近协同事件样例。需读数据目录（含 DB）。
+pub fn cmd_audit(data_dir: &Path, out: &Path, window_secs: i64) -> anyhow::Result<()> {
+    let db = data_dir.join("aisafeguard.db");
+    let store = aisafeguard_store::Store::open(&db)?;
+    let now = now_ts();
+    let members: Vec<serde_json::Value> = store
+        .list_fed_members()?
+        .into_iter()
+        .map(|(node, cert_fp, last_seen)| {
+            serde_json::json!({ "node": node, "cert_fp": cert_fp, "last_seen": last_seen })
+        })
+        .collect();
+    let revocations: Vec<serde_json::Value> = std::fs::read(revocations_path(data_dir))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    // 最近协同事件（fed: 前缀 listener）
+    let recent = store.recent_events(50, None).unwrap_or_default();
+    let fed_events: Vec<serde_json::Value> = recent
+        .iter()
+        .filter(|e| e.listener.starts_with("fed:") || e.summary.contains("[fed]"))
+        .map(|e| serde_json::json!({ "ts": e.ts, "kind": e.kind, "listener": e.listener, "remote_ip": e.remote_ip, "summary": e.summary }))
+        .collect();
+    let doc = serde_json::json!({
+        "exported_ts": now,
+        "window_secs": window_secs,
+        "members": members,
+        "revocations": revocations,
+        "recent_fed_events": fed_events,
+    });
+    std::fs::write(out, serde_json::to_string_pretty(&doc)?)?;
+    println!("✓ 协同审计已导出 {}（成员 {} · 吊销 {} · 近期协同事件 {}）",
+        out.display(), members.len(), revocations.len(), fed_events.len());
+    Ok(())
+}
+
 /// `fed expect <node> <fp>`：预登记节点指纹（签发后、节点上线前执行）。
 pub fn cmd_expect(data_dir: &Path, node: &str, fp: &str) -> anyhow::Result<()> {
     if !valid_node_name(node) {

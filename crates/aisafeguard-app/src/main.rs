@@ -156,6 +156,16 @@ fn main() -> anyhow::Result<()> {
                             }
                         }
                     }
+                    Some("audit") => {
+                        i += 1;
+                        match args.get(i) {
+                            Some(out) => command = Some(("fed-audit".into(), Some(out.clone()))),
+                            None => {
+                                eprintln!("用法: aisafeguard fed audit <out.json> [窗口秒=604800]");
+                                std::process::exit(2);
+                            }
+                        }
+                    }
                     Some("expect") => {
                         i += 1;
                         match (args.get(i), args.get(i + 1)) {
@@ -170,7 +180,7 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                     _ => {
-                        eprintln!("用法: aisafeguard fed init-ca | issue-cert <node> [--san ...] | revoke <node|fp> [原因] | expect <node> <fp>");
+                        eprintln!("用法: aisafeguard fed init-ca | issue-cert <node> [--san ...] | revoke <node|fp> [原因] | expect <node> <fp> | audit <out.json>");
                         std::process::exit(2);
                     }
                 }
@@ -278,6 +288,15 @@ fn main() -> anyhow::Result<()> {
                         std::process::exit(1);
                     }
                 }
+            }
+            "fed-audit" => {
+                let Some(out) = arg else {
+                    eprintln!("用法: aisafeguard fed audit <out.json>");
+                    std::process::exit(2);
+                };
+                let data_dir = resolve_cfg(cfg_path, data_dir)?.0.data_dir();
+                return fed::cmd_audit(&data_dir, Path::new(&out), 604_800)
+                    .map_err(|e| anyhow::anyhow!("{e}"));
             }
             "fed-expect" => {
                 let Some(joined) = arg else {
