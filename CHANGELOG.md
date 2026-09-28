@@ -18,6 +18,10 @@
   产出标准 JA3 raw 与 md5（md-5 crate）；非 TLS/截断/ServerHello 返回 None
   不阻断；已知向量测试（手工构造 ClientHello → raw `771,47,10-11,29,0` +
   md5 精确断言）；模糊语义同 parse_http_hint
+- **规则子集规范一页纸（F1）**：`docs/RULESET_SUBSET.md` v1 冻结——白名单
+  关键字（alert/content/nocase/有限 pcre/flow/threshold/sid/msg/classtype）、
+  classtype→severity 映射表、加载治理（整包拒绝/max_rules/文件哈希）、匹配
+  语义与 v1 边界重申；超集关键字加载失败不半生效
 - **新 crate `aisafeguard-l7`（E1）**：HTTP 解析从蜜罐 crate 抽取为独立基座——
   蜜罐与采样 full 模式共用同一解析；`HttpHint` 版本化 schema（E2，
   schema_version=1：method/path 前缀/host/UA/可疑 UA）；`sanitize` /
