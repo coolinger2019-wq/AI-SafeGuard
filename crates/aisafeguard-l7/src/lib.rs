@@ -95,8 +95,18 @@ pub fn http_tags(text: &str) -> Vec<String> {
         return Vec::new();
     };
     let mut tags = vec![format!("http:{}", hint.method)];
+    // 0.4 文案：path 标签取前 2 段前缀（HttpHint.path 是完整路径，两者用途不同）
     if !hint.path.is_empty() {
-        tags.push(format!("path:{}", hint.path));
+        let prefix: String = hint
+            .path
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .take(2)
+            .map(|s| format!("/{s}"))
+            .collect();
+        if !prefix.is_empty() {
+            tags.push(format!("path:{prefix}"));
+        }
     }
     for kw in &hint.ua_suspect {
         tags.push(format!("ua-suspect:{kw}"));
