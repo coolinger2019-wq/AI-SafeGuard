@@ -2,6 +2,20 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.5.0] - 2026-09-29（开发中）
+
+按 ROADMAP-0.5 Batch E（解析与 L7 复用）启动。
+
+### 新增
+
+- **新 crate `aisafeguard-l7`（E1）**：HTTP 解析从蜜罐 crate 抽取为独立基座——
+  蜜罐与采样 full 模式共用同一解析；`HttpHint` 版本化 schema（E2，
+  schema_version=1：method/path 前缀/host/UA/可疑 UA）；`sanitize` /
+  `request_summary` / `http_request_complete` 迁入；不依赖 firewall（依赖图
+  禁止规则/解析侧触达执行器）；蜜罐与 capture evidence 的 [L7] 标签改走新
+  crate（E3：0.4 标签格式原样保留）；确定性模糊测试（2 万轮不 panic +
+  path 上限断言）+ 原有测试迁移
+
 ## [0.4.0] - 2026-09-29
 
 按 ROADMAP-0.4 Batch A（装得上、跑得稳）完成第一批：配置热更新契约、

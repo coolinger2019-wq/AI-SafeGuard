@@ -3,7 +3,6 @@
 pub mod config;
 pub mod error;
 pub mod event;
-pub mod l7;
 pub mod secrets;
 
 use std::net::IpAddr;

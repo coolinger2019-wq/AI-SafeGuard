@@ -161,7 +161,7 @@ dependencies = [
 
 [[package]]
 name = "aisafeguard-ai"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aisafeguard-core",
  "reqwest",
@@ -172,13 +172,14 @@ dependencies = [
 
 [[package]]
 name = "aisafeguard-app"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aisafeguard-ai",
  "aisafeguard-core",
  "aisafeguard-detect",
  "aisafeguard-firewall",
  "aisafeguard-honeypot",
+ "aisafeguard-l7",
  "aisafeguard-store",
  "aisafeguard-xdp",
  "anyhow",
@@ -209,7 +210,7 @@ dependencies = [
 
 [[package]]
 name = "aisafeguard-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "dirs",
@@ -223,7 +224,7 @@ dependencies = [
 
 [[package]]
 name = "aisafeguard-detect"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aisafeguard-core",
  "etherparse",
@@ -237,7 +238,7 @@ dependencies = [
 
 [[package]]
 name = "aisafeguard-firewall"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aisafeguard-core",
  "serde",
@@ -247,16 +248,24 @@ dependencies = [
 
 [[package]]
 name = "aisafeguard-honeypot"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aisafeguard-core",
+ "aisafeguard-l7",
  "tokio",
  "tracing",
 ]
 
 [[package]]
+name = "aisafeguard-l7"
+version = "0.5.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "aisafeguard-store"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aisafeguard-core",
  "rusqlite",
@@ -268,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "aisafeguard-xdp"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aisafeguard-core",
  "aisafeguard-firewall",

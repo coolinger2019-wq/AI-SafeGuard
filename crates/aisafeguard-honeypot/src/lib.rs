@@ -10,6 +10,7 @@ use std::time::Duration;
 use aisafeguard_core::config::{HoneypotConfig, ListenerConfig};
 use aisafeguard_core::event::{EventBus, SecurityEvent};
 use aisafeguard_core::now_ts;
+use aisafeguard_l7 as l7;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Semaphore};
@@ -145,7 +146,7 @@ async fn ssh_session(s: &mut TcpStream) -> Result<(String, String), std::io::Err
     s.write_all(b"SSH-2.0-OpenSSH_9.6\r\n").await?;
     let (n, buf) = read_with_timeout(s, READ_TIMEOUT).await?;
     let text = sanitize(&buf[..n], MAX_PAYLOAD);
-    let summary = first_line(&text).unwrap_or_else(|| "SSH banner 已发送，等待客户端报文".into());
+    let summary = l7::first_line(&text).unwrap_or_else(|| "SSH banner 已发送，等待客户端报文".into());
     Ok((summary, text))
 }
 
@@ -153,7 +154,7 @@ async fn telnet_session(s: &mut TcpStream) -> Result<(String, String), std::io::
     s.write_all(b"Welcome to Ubuntu 22.04 LTS\r\nlogin: ").await?;
     let (n, buf) = read_with_timeout(s, READ_TIMEOUT).await?;
     let text = sanitize(&buf[..n], MAX_PAYLOAD);
-    let summary = first_line(&text)
+    let summary = l7::first_line(&text)
         .map(|l| format!("尝试登录: {l}"))
         .unwrap_or_else(|| "登录提示已发送".into());
     Ok((summary, text))
@@ -182,8 +183,8 @@ async fn http_session(s: &mut TcpStream) -> Result<(String, String), std::io::Er
     let text = sanitize(&buf, MAX_PAYLOAD);
     let summary = format!(
         "{}{}",
-        request_summary(&text, "空 HTTP 请求"),
-        aisafeguard_core::l7::tags_suffix(&aisafeguard_core::l7::http_tags(&text))
+        l7::request_summary(&text, "空 HTTP 请求"),
+        l7::tags_suffix(&l7::http_tags(&text))
     );
     Ok((summary, text))
 }
@@ -233,16 +234,7 @@ pub fn http_request_complete(buf: &[u8]) -> bool {
 
 /// 清洗后的首行摘要（≤160 字符），任何字节输入都不会 panic。
 pub fn request_summary(text: &str, fallback: &str) -> String {
-    first_line(text).unwrap_or_else(|| fallback.to_string())
-}
-
-fn first_line(text: &str) -> Option<String> {
-    let line = text.lines().next()?.trim();
-    if line.is_empty() {
-        None
-    } else {
-        Some(line.chars().take(160).collect())
-    }
+    l7::request_summary(text, fallback)
 }
 
 #[cfg(test)]

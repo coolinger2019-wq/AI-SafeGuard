@@ -774,7 +774,7 @@ pub fn spawn_capture_task(eng: &Arc<EngineHandle>) {
                             if cap_cfg.mode == "full" {
                                 let snippet = pipeline.payload_snippet(&d.key);
                                 // 轻量 L7 标签（0.4.0 B2）：full 模式流前缀可识别时进证据
-                                let l7 = aisafeguard_core::l7::tags_suffix(&aisafeguard_core::l7::http_tags(&snippet));
+                                let l7 = aisafeguard_l7::tags_suffix(&aisafeguard_l7::http_tags(&snippet));
                                 evidence.push_str(&l7);
                                 if !snippet.is_empty() {
                                     evidence.push_str(&format!("；载荷摘要: {snippet}"));

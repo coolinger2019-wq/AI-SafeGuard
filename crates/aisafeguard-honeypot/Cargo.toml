@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 aisafeguard-core.workspace = true
+aisafeguard-l7.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
