@@ -9,6 +9,11 @@
 
 ### 新增
 
+- **轻量 L7 标签（B2）**：`aisafeguard_core::l7::http_tags`——HTTP 请求行方法
+  （白名单）、path 前 2 段前缀（去查询串）、可疑 UA（sqlmap/nikto/nmap 等
+  克制名单）三类标签，解析失败返回空绝不 panic（2 万轮确定性模糊测试钉住）；
+  蜜罐 HTTP 会话 summary 追加 ` [L7 …]` 后缀（进事件与 AI 提示词 events 段）；
+  捕获 full 模式检测证据同步追加。定位是标签不是完整指纹/语义解析（0.5）
 - **误报端口粒度（B4）**：`fp_feedback` 加 `local_port` 列（ALTER 兼容）——
   反馈可带端口（缺省 = 按 IP 整体抑制）；`active_fp` 匹配规则：IP 级记录
   抑制任何处置，端口级记录仅抑制同端口处置（来源级检测不被端口级记录抑制）；

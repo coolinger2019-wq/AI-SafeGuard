@@ -180,7 +180,11 @@ async fn http_session(s: &mut TcpStream) -> Result<(String, String), std::io::Er
     )
     .await?;
     let text = sanitize(&buf, MAX_PAYLOAD);
-    let summary = request_summary(&text, "空 HTTP 请求");
+    let summary = format!(
+        "{}{}",
+        request_summary(&text, "空 HTTP 请求"),
+        aisafeguard_core::l7::tags_suffix(&aisafeguard_core::l7::http_tags(&text))
+    );
     Ok((summary, text))
 }
 
