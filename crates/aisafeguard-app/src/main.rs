@@ -368,7 +368,58 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
         .enable_all()
         .build()?;
     let bus = EventBus::new(2048);
-    let firewall = aisafeguard_firewall::create_backend();
+    // 防火墙执行器：平台后端兜底；Linux 上 [xdp].enabled 时叠加 XDP 快速层
+    // （组合执行器：全部规则 nftables 兜底，IP 级入站规则镜像进 eBPF map 微秒级生效）
+    let firewall: std::sync::Arc<dyn aisafeguard_firewall::Firewall> = {
+        let base = aisafeguard_firewall::create_backend();
+        #[cfg(target_os = "linux")]
+        {
+            if cfg.xdp.enabled {
+                use aisafeguard_xdp::composite::{CompositeFirewall, XdpMode};
+                if !cfg.xdp.valid_mode() {
+                    bus.publish(SecurityEvent::engine(
+                        "error",
+                        format!("XDP 模式非法：{}（可用 skb | native），快速层未启用", cfg.xdp.mode),
+                    ));
+                    base
+                } else {
+                    let composite = CompositeFirewall::new(base);
+                    let mode = XdpMode::parse(&cfg.xdp.mode).unwrap_or(XdpMode::Skb);
+                    match composite.attach_fast(&cfg.xdp.iface, mode) {
+                        Ok(()) => {
+                            tracing::info!(
+                                "XDP 快速执行层已附加（{} / {} 模式）",
+                                cfg.xdp.iface,
+                                mode.as_str()
+                            );
+                            bus.publish(SecurityEvent::engine(
+                                "info",
+                                format!(
+                                    "XDP 快速执行层已附加（{} / {} 模式）：IP 级入站封禁内核直丢",
+                                    cfg.xdp.iface,
+                                    mode.as_str()
+                                ),
+                            ));
+                        }
+                        Err(e) => {
+                            tracing::error!("XDP 快速执行层未启用: {e}");
+                            bus.publish(SecurityEvent::engine(
+                                "error",
+                                format!("XDP 快速执行层未启用（nftables 兜底不受影响）: {e}"),
+                            ));
+                        }
+                    }
+                    std::sync::Arc::new(composite)
+                }
+            } else {
+                base
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            base
+        }
+    };
     let token = load_or_create_token(&data_dir)?;
 
     // 事件流水 → SQLite（含哈希链计算，失败只记日志不拖垮总线）

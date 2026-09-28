@@ -2,7 +2,7 @@
 
 用 Rust 编写的模块化终端安全软件。**蜜罐诱捕 → 事件流水线 → 快路径频次检测 / AI 慢路径分析 → 防火墙处置** 的端到端闭环，带本地图形界面。
 
-> 当前版本 **0.3.6**（检测平台 MVP + AI 深度介入 v1 + 事件外发 + 组织协同 mTLS，Windows + Linux）。设计文档见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，路线图见 [docs/ROADMAP.md](docs/ROADMAP.md)，ISO 27001 对照见 [docs/COMPLIANCE.md](docs/COMPLIANCE.md)，NGFW/分布式演进见 [docs/NGFW_EVOLUTION.md](docs/NGFW_EVOLUTION.md)。
+> 当前版本 **0.3.7**（检测平台 MVP + AI 深度介入 v1 + 事件外发 + 组织协同 mTLS + XDP 快速执行层，Windows + Linux）。设计文档见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，路线图见 [docs/ROADMAP.md](docs/ROADMAP.md)，ISO 27001 对照见 [docs/COMPLIANCE.md](docs/COMPLIANCE.md)，NGFW/分布式演进见 [docs/NGFW_EVOLUTION.md](docs/NGFW_EVOLUTION.md)。
 
 ## 当前功能
 
@@ -10,6 +10,7 @@
 - **快路径检测**：频次引擎自动判定端口扫描 / 暴力探测，触发即产出 Detection 事件；自动封禁带 TTL 到期自动解封，内网/回环地址永不自动封禁
 - **流量采样捕获**（Windows + Linux，默认关闭）：被动观测真实流量（Windows = WinDivert 嗅探模式，Linux = AF_PACKET；均只取副本、不吸收不注回，AF_PACKET 不开混杂模式），内置端口扫描 / SYN flood 检测器走同一自动封禁出口；control 模式只看 SYN 元数据，full 模式带 TCP 流重组取证；缺驱动/无提权只降级不报错（[Windows 实机验证清单](docs/WINDOWS-CAPTURE-TESTING.md)）
 - **防火墙**：Windows = COM API 管理 `aisafeguard-blk-*` 规则；Linux = nftables（`inet aisafeguard` 表 + 集合元素，启动自动重灌）。两端都只管理自己创建的内容
+- **XDP 快速执行层**（Linux，默认关闭）：nftables 之上的加速层——IP 级入站封禁规则镜像进 eBPF map，内核收包路径直接丢弃（微秒级生效）；nftables 永远兜底，附加失败自动降级；eBPF 程序内嵌于主程序，无需目标机工具链
 - **主机暴露面盘点**：枚举监听端口与归属进程，AI 评估对外暴露风险（"自动分析功能接口"第一步）
 - **AI 助手**（慢路径）：OpenAI 兼容端点（默认智谱 GLM，内网可指向本地推理），把 24h 攻击统计、暴露面快照喂给 LLM，产出**严格校验**的封禁建议；默认人工确认，可选自动应用（带严重度阈值）
 - **完整性**：事件表链式 SHA-256 哈希，`aisafeguard verify-log` 离线校验篡改；解析路径有结构化模糊测试护栏

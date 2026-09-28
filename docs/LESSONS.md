@@ -139,3 +139,32 @@
 - **跨进程身份的"绑定"要防抢注**：node↔证书指纹用 TOFU（首见登记）就有抢注窗口——
   先写明风险边界（需先持有 CA 签发证书 + 时序窗口）与恢复路径（管理员删成员记录），
   把彻底解法（吊销列表、quorum 印证）挂到 0.4，比假装没有这个窗口诚实。
+
+## 0.3 第七批 · XDP 数据面（2026-09-28）
+
+- **`include_bytes!` 的数据是 1 字节对齐的，object crate 的零拷贝 ELF 解析会报
+  "Invalid ELF header size or alignment"**：同一份 .o，`load_file`（磁盘）成功、
+  `load(嵌入字节)` 失败、单测（不同编译图）又成功——三重迷惑行为。修法一行：
+  传给 aya 前 `to_vec()` 拷进堆（分配器保证对齐）。教训：错误消息点名 "alignment"
+  时先查数据的对齐而不是解析逻辑；跨编译图行为不一致时，比对两棵依赖树之外还要
+  想到**数据段的布局差异**（LTO 变换 include_bytes 所在编译单元的布局）。
+- **调试"应该不可能"的问题，做同进程对照实验最快**：嵌入字节失败后，在 attach 的
+  错误分支里顺手 `load_file` 同一磁盘文件——一次重编就分清了"字节坏/环境坏"（结论：
+  字节好、解析路径坏）。比反复读 object crate 源码猜快得多。
+- **`bash -c`（非登录 shell）没有 cargo，且失败是静默的**：`wsl -u root -- bash -c
+  'cargo build ... | grep ...'` 时 cargo not found 被 grep 过滤吞掉、退出码被管道
+  掩盖，后续命令拿旧二进制跑测试——"改了没生效"的假象。本项目 WSL 会话一律
+  `bash -lc`（登录 shell）；构建命令别把 cargo 的输出/退出码交给管道链。
+- **"命令成功 + 验证无变化"要先怀疑二进制没重编**：`cargo build | grep error;
+  cargo build | tail -1` 的双 build 模式里，第二个 build 的 "Finished 0.18s" 会
+  让人误以为刚才编过——其实编译发生在第一个（输出被 grep 吃掉）。验证产物新旧
+  用 `cargo build -v`（Fresh 字样）或直接改运行时可见的日志输出。
+- **bpf-linker 版本与系统 LLVM 强绑定**：最新 0.11 要 llvm-sys 231（LLVM 23），
+  Ubuntu 24.04 apt 只有 LLVM 19——按 crates-index 的依赖声明反查版本（0.9.13 ↔
+  llvm-sys 191），`LLVM_SYS_191_PREFIX=/usr/lib/llvm-19 cargo install
+  bpf-linker --version 0.9.13`。换机器先装 `llvm-19-dev libclang-19-dev` 再装
+  bpf-linker，eBPF 构建需 nightly + rust-src + `-Z build-std=core`。
+- **eBPF 子 crate 的工程形态**：独立 `[workspace]`（空表脱离主 workspace，主树
+  stable/它要 nightly）、产物 .o 提交入库 + sha256 校验文件、主程序
+  include_bytes 嵌入——目标机零工具链依赖，构建脚本 `ebpf/build.sh` 只在改
+  ebpf 源码后跑。快路径程序的红线：解析失败一律 PASS（快速层绝不拖垮转发）。

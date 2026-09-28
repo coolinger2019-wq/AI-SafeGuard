@@ -105,7 +105,7 @@
 | 阶段 | 内容 | 验收标准 |
 |---|---|---|
 | 0.2（随 P1） | `SecurityEvent::Detection` 变体占位；频次引擎 v1（端口扫描/暴破速率）；nftables 后端带 `ct` 模板 | 单测：扫描器连 5 端口 → Detection 事件 + 自动封禁 + TTL 解封 |
-| 0.3 | `aisafeguard-detect` MVP：WinDivert/nflog 采样捕获 + TCP 重组 + 端口扫描/SYN flood/暴破检测器；情报管道 v1（Feodo + 本地蜜罐源）；TTL 自动解封<br>**状态（0.3.3）**：Windows 侧（capture/flow/reasm/inspect 分层 + WinDivert 静态集成 + 降级路径，实机核对见 docs/WINDOWS-CAPTURE-TESTING.md）与 Linux 侧（AF_PACKET 采样捕获，交叉类型检查已过、实机 E2E 清单见 docs/LINUX-TESTING.md §12）均已完成；nflog 方案弃用（无 iptables 集成需求） | E2E：nmap 扫描 → 秒级自动封 → TTL 后恢复；Feodo 列表 IP 连接 → 命中事件 + 自动封 |
+| 0.3 | `aisafeguard-detect` MVP：WinDivert/nflog 采样捕获 + TCP 重组 + 端口扫描/SYN flood/暴破检测器；情报管道 v1（Feodo + 本地蜜罐源）；TTL 自动解封<br>**状态（0.3.3）**：Windows 侧（capture/flow/reasm/inspect 分层 + WinDivert 静态集成 + 降级路径，实机核对见 docs/WINDOWS-CAPTURE-TESTING.md）与 Linux 侧（AF_PACKET 采样捕获，交叉类型检查已过、实机 E2E 清单见 docs/LINUX-TESTING.md §12）均已完成；nflog 方案弃用（无 iptables 集成需求）<br>**数据面 Linux（0.3.7）**：XDP + Aya 组合执行层已落地——nftables 兜底 + IP 级入站规则镜像进 eBPF map 内核直丢，实机验证含"删 nft 表后 XDP 独立丢包" | E2E：nmap 扫描 → 秒级自动封 → TTL 后恢复；Feodo 列表 IP 连接 → 命中事件 + 自动封；XDP 封禁在 nftables 缺席时独立生效 |
 | 0.4 | L7 指纹（JA3/JA4 + HTTP 解析复用）；Suricata 规则子集引擎；eBPF 流表；情报 → XDP map 联动；AI 输入接入流统计 | E2E：特定 TLS 指纹命中规则 → 处置留痕；AI 报告引用流统计与情报标注 |
 | 远期 | AF_XDP 全流量深检、文件/载荷还原、ML 异常评分、WFP callout（驱动签名成本可接受时） | — |
 

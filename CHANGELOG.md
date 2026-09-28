@@ -2,6 +2,55 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.3.7] - 2026-09-28
+
+按 ROADMAP 0.3 推进第七批：数据面 Linux——XDP + Aya 快速执行层
+（`Firewall` trait 预留的扩展位落地，设计见 docs/NGFW_EVOLUTION.md §2.4）。
+
+### 新增
+
+- **新 crate `aisafeguard-xdp`**：组合防火墙（`CompositeFirewall`）——nftables
+  永远兜底，满足「入站 + Any 协议 + 无端口限定 + IPv4」的规则**额外**镜像进
+  eBPF map（`BLOCKLIST`，LruHashMap 65536），XDP 程序在内核收包路径按源地址
+  直接 `XDP_DROP`——微秒级生效，无需用户态参与。细粒度协议/端口/出站/IPv6
+  规则不镜像（XDP 是 IP 级全端口入站丢弃，镜像会放大语义）
+- **eBPF 程序**（`aisafeguard-xdp/ebpf/`）：`#[xdp]` 入口解析失败一律放行
+  （快速层绝不拖垮正常转发，封禁语义由 nftables 兜底保证）；nightly +
+  bpf-linker 0.9.13（LLVM 19）独立构建（脱离主 workspace，`ebpf/build.sh`），
+  产物 `objects/aisafeguard_xdp.o`（1400 字节）**提交入库**，运行时
+  `include_bytes!` 嵌入——单二进制分发不依赖目标机工具链
+- **降级语义**：附加失败（无 CAP_BPF、网卡不支持）只留 error 事件，组合层
+  退化为纯 nftables；`remove` 双层都清（base 失败不阻断加速层清理，
+  防止 map 残留"nft 看不见的封禁"）；`resync` 以期望集对账增删 map
+- 配置 `[xdp]`（enabled/iface/mode=skb|native，默认关闭；仅 Linux 编译）
+- 单测：镜像资格判定（方向/协议/端口/IPv6 各分支）、嵌入对象可解析（Linux）
+- 可行性专项先行：WSL2 内核 6.6（CONFIG_BPF_SYSCALL/JIT/XDP_SOCKETS 全 y）+
+  nightly + rust-src + bpf-linker 0.9.13（对应 llvm-sys 191；最新版要 LLVM 23）
+  + LLVM 19 dev 包（apt）——spike 先验证 lo 上 XDP_DROP/解封全链路再进实现
+
+### 变更
+
+- 无接口变化：`Firewall` trait 不动，XDP 是 create_backend 之上的组合层
+- main.rs 装配点：Linux + `[xdp].enabled` 时用组合层替换裸 nftables 后端
+
+### 已知限制
+
+- SKB 模式（generic XDP）在收包路径软中断点生效；native 模式需网卡驱动支持
+  （virtio_net/内核 6.6 支持），微秒级路径需实测生产网卡
+- eBPF 程序/地图 pinned 到进程生命周期：引擎退出即卸载（nftables 集合同理易失，
+  启动 resync 重灌）
+- XDP map 无直接观测口（bpftool 可查，产品内暂未暴露计数）
+
+### 实测（WSL2 Ubuntu 24.04，2026-09-28）
+
+- 附加验证：`ip -d link show lo` 出现 xdpgeneric 标记
+- 双写封禁 127.0.0.2：nft set 与 XDP map 同时生效（ping 全丢）；API 解封 →
+  map 同步删除（ping 恢复）；伪造源 SYN 突发 → engine 自动封禁（同一组合出口），
+  TTL 到期 janitor 自动解封
+- **XDP 独立丢包证明**：封禁生效后手动删除整个 nftables 表 → ping 仍被丢
+  （内核 eBPF 在丢包，与用户态无关）；API 解封仍能清 map 恢复连通
+- 调试过程中发现并修复 `include_bytes!` 对齐坑（见 LESSONS 第七批）
+
 ## [0.3.6] - 2026-09-28
 
 按 ROADMAP 0.3 推进第六批：组织协同 mTLS 每节点证书加固 [A.5.15]——

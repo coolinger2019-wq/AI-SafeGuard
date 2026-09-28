@@ -161,7 +161,7 @@ dependencies = [
 
 [[package]]
 name = "aisafeguard-ai"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "aisafeguard-core",
  "reqwest",
@@ -172,7 +172,7 @@ dependencies = [
 
 [[package]]
 name = "aisafeguard-app"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "aisafeguard-ai",
  "aisafeguard-core",
@@ -180,6 +180,7 @@ dependencies = [
  "aisafeguard-firewall",
  "aisafeguard-honeypot",
  "aisafeguard-store",
+ "aisafeguard-xdp",
  "anyhow",
  "axum",
  "base64 0.22.1",
@@ -208,7 +209,7 @@ dependencies = [
 
 [[package]]
 name = "aisafeguard-core"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "chrono",
  "dirs",
@@ -222,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "aisafeguard-detect"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "aisafeguard-core",
  "etherparse",
@@ -236,7 +237,7 @@ dependencies = [
 
 [[package]]
 name = "aisafeguard-firewall"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "aisafeguard-core",
  "serde",
@@ -246,7 +247,7 @@ dependencies = [
 
 [[package]]
 name = "aisafeguard-honeypot"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "aisafeguard-core",
  "tokio",
@@ -255,13 +256,23 @@ dependencies = [
 
 [[package]]
 name = "aisafeguard-store"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "aisafeguard-core",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
+ "tracing",
+]
+
+[[package]]
+name = "aisafeguard-xdp"
+version = "0.3.7"
+dependencies = [
+ "aisafeguard-core",
+ "aisafeguard-firewall",
+ "aya",
  "tracing",
 ]
 
@@ -396,6 +407,12 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "assert_matches"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b34d609dfbaf33d6889b2b7106d3ca345eacad44200913df5ba02bfd31d2ba9"
 
 [[package]]
 name = "async-broadcast"
@@ -627,6 +644,37 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+]
+
+[[package]]
+name = "aya"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d18bc4e506fbb85ab7392ed993a7db4d1a452c71b75a246af4a80ab8c9d2dd50"
+dependencies = [
+ "assert_matches",
+ "aya-obj",
+ "bitflags 2.13.2",
+ "bytes",
+ "libc",
+ "log",
+ "object",
+ "once_cell",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "aya-obj"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c51b96c5a8ed8705b40d655273bc4212cbbf38d4e3be2788f36306f154523ec7"
+dependencies = [
+ "bytes",
+ "core-error",
+ "hashbrown 0.15.5",
+ "log",
+ "object",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -906,6 +954,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
 dependencies = [
  "crossbeam-utils",
+]
+
+[[package]]
+name = "core-error"
+version = "0.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "efcdb2972eb64230b4c50646d8498ff73f5128d196a90c7236eec4cbe8619b8f"
+dependencies = [
+ "version_check",
 ]
 
 [[package]]
@@ -1830,6 +1887,8 @@ version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash 0.1.5",
 ]
 
@@ -2937,6 +2996,18 @@ dependencies = [
  "objc2 0.5.2",
  "objc2-core-location",
  "objc2-foundation 0.2.2",
+]
+
+[[package]]
+name = "object"
+version = "0.36.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62948e14d923ea95ea2c7c86c71013138b66525b86bdc08d2dcc262bdb497b87"
+dependencies = [
+ "crc32fast",
+ "hashbrown 0.15.5",
+ "indexmap",
+ "memchr",
 ]
 
 [[package]]

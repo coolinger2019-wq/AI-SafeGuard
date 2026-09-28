@@ -4,6 +4,7 @@ members = [
     "crates/aisafeguard-core",
     "crates/aisafeguard-store",
     "crates/aisafeguard-firewall",
+    "crates/aisafeguard-xdp",
     "crates/aisafeguard-honeypot",
     "crates/aisafeguard-ai",
     "crates/aisafeguard-detect",
@@ -11,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.6"
+version = "0.3.7"
 edition = "2024"
 license = "MIT"
 authors = ["coolinger (vibe coding)"]
@@ -20,6 +21,7 @@ authors = ["coolinger (vibe coding)"]
 aisafeguard-core = { path = "crates/aisafeguard-core" }
 aisafeguard-store = { path = "crates/aisafeguard-store" }
 aisafeguard-firewall = { path = "crates/aisafeguard-firewall" }
+aisafeguard-xdp = { path = "crates/aisafeguard-xdp" }
 aisafeguard-honeypot = { path = "crates/aisafeguard-honeypot" }
 aisafeguard-ai = { path = "crates/aisafeguard-ai" }
 aisafeguard-detect = { path = "crates/aisafeguard-detect" }

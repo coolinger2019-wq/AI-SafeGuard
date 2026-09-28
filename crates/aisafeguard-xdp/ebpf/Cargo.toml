@@ -1,0 +1,24 @@
+[package]
+name = "aisafeguard-xdp-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+# 空 workspace 表：脱离主 workspace（eBPF 目标需要 nightly + build-std，主树是 stable）
+[workspace]
+
+# 注意：本 crate 故意不在主 workspace 里——eBPF 目标（tier3 + build-std）
+# 需要 nightly 工具链，主 workspace 用 stable。构建走 build.sh，产物
+# objects/aisafeguard_xdp.o 提交入库（运行时 include_bytes 嵌入主程序）。
+
+[dependencies]
+aya-ebpf = { version = "0.1", default-features = false }
+
+[[bin]]
+name = "aisafeguard-xdp-ebpf"
+path = "src/main.rs"
+
+[profile.dev]
+opt-level = 3
+[profile.release]
+lto = true
+panic = "abort"

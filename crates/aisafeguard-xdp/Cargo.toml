@@ -1,0 +1,18 @@
+[package]
+name = "aisafeguard-xdp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+aisafeguard-firewall.workspace = true
+aisafeguard-core.workspace = true
+# eBPF 加载只在 Linux；其余平台本 crate 是空壳（组合防火墙仅在 Linux 装配）
+[target.'cfg(target_os = "linux")'.dependencies]
+tracing.workspace = true
+aya = { version = "0.13", default-features = false }
+
+[lints]
+workspace = true
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+aya = { version = "0.13", default-features = false }

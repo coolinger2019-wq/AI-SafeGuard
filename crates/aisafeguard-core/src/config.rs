@@ -15,6 +15,7 @@ pub struct AppConfig {
     pub honeypot: HoneypotConfig,
     pub ai: AiConfig,
     pub detect: DetectConfig,
+    pub xdp: XdpConfig,
     pub intel: IntelConfig,
     pub fed: FedConfig,
     pub syslog: SyslogConfig,
@@ -240,6 +241,36 @@ impl Default for CaptureConfig {
 impl CaptureConfig {
     pub fn valid_mode(&self) -> bool {
         matches!(self.mode.as_str(), "control" | "full")
+    }
+}
+
+/// XDP 快速执行层（0.3.7，仅 Linux；设计见 docs/NGFW_EVOLUTION.md）。
+/// nftables 永远兜底，XDP 只镜像「入站 + Any 协议 + 无端口 + IPv4」的封禁规则，
+/// 内核收包路径直接丢弃（微秒级生效）。附加失败自动降级为纯 nftables。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct XdpConfig {
+    /// 默认关闭：需要 root/CAP_BPF，且是对本机数据面的行为，用户显式开启
+    pub enabled: bool,
+    /// 附加 XDP 程序的网卡
+    pub iface: String,
+    /// skb（generic XDP，所有网卡可用）| native（驱动级，更快，需网卡驱动支持）
+    pub mode: String,
+}
+
+impl Default for XdpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            iface: "eth0".into(),
+            mode: "skb".into(),
+        }
+    }
+}
+
+impl XdpConfig {
+    pub fn valid_mode(&self) -> bool {
+        matches!(self.mode.as_str(), "skb" | "native")
     }
 }
 
