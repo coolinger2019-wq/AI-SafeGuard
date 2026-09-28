@@ -700,11 +700,8 @@ pub async fn serve_coordinator(engine: Arc<EngineHandle>) -> Result<(), String> 
                 .map(|c| cert_fp_of(c.as_ref()))
                 .unwrap_or_default();
             // 吊销检查（0.4.0 C1）：立即生效（每次连接读文件），命中拒连并留审计事件
-            if load_revocations(&data_dir).contains(&cert_fp) {
-                bus.publish(SecurityEvent::engine(
-                    "warn",
-                    format!("协同连接被拒：证书 {} 已吊销", &cert_fp[..16.min(cert_fp.len())]),
-                ));
+            if let Err(reason) = check_not_revoked(&data_dir, &cert_fp) {
+                bus.publish(SecurityEvent::engine("warn", format!("协同连接被拒：{reason}")));
                 return;
             }
             // Router 直接实现 tower Service<Request<Incoming>>，TowerToHyperService 适配

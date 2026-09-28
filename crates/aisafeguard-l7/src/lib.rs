@@ -204,7 +204,7 @@ pub fn parse_ja3(data: &[u8]) -> Option<Ja3> {
     // cipher suites
     let cs_len = be16(body, off)? as usize;
     off += 2;
-    if off + cs_len > body.len() || cs_len % 2 != 0 {
+    if off + cs_len > body.len() || !cs_len.is_multiple_of(2) {
         return None;
     }
     let ciphers: Vec<u16> = (0..cs_len / 2)

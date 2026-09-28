@@ -134,6 +134,11 @@ impl CapturePipeline {
         self.flood.retain(|_, q| !q.is_empty());
     }
 
+    /// 原始重组流前缀（0.5.0 E6：L7/JA3 解析用，不清洗——调用方只读判断）
+    pub fn stream_bytes(&self, key: &FlowKey) -> Option<Vec<u8>> {
+        self.reasm.get(key).map(|r| r.stream().to_vec())
+    }
+
     /// 载荷证据摘要（full 模式）：重组流的有序前缀 → 清洗 → 截断。
     pub fn payload_snippet(&self, key: &FlowKey) -> String {
         self.reasm

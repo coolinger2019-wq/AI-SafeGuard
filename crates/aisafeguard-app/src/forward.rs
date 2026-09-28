@@ -302,6 +302,8 @@ mod tests {
             confidence: "high".into(),
             evidence: "60 秒内对 4 个不同目标端口发送 SYN（采样捕获）".into(),
             rule_id: Some("builtin.tcp_scan".into()),
+            http_hint: None,
+            tls_fingerprint: None,
         }
     }
 

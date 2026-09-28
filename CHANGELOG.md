@@ -8,6 +8,11 @@
 
 ### 新增
 
+- **统一事件字段（E6）**：`SecurityEvent::Detection` 新增 `http_hint`
+  （HttpHint JSON）与 `tls_fingerprint`（JA3 md5）可选字段——capture full
+  模式命中时从重组流前缀解析填充；events 表加 `http_hint`/`tls_fp` 列
+  （ALTER 兼容），EventRow 与 `/api/events`、导出 JSONL、AI 提示词 events
+  段自动携带；蜜罐入口的 hint 继续以 [L7] 后缀在 summary 中
 - **JA3 客户端指纹（E4）**：`aisafeguard_l7::parse_ja3`——TLS record →
   ClientHello 解析（版本/密码套件/扩展列表/supported_groups/ec_point_formats），
   产出标准 JA3 raw 与 md5（md-5 crate）；非 TLS/截断/ServerHello 返回 None

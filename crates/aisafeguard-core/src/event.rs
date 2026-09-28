@@ -1,6 +1,9 @@
 use serde::Serialize;
 use tokio::sync::broadcast;
 
+// Detection 变体携带 L7 提示（0.5.0 E6）——aisafeguard-l7 是无依赖纯解析 crate
+use aisafeguard_l7::HttpHint;
+
 /// 统一安全事件。所有模块只通过事件总线对话，互不直接依赖。
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -50,6 +53,12 @@ pub enum SecurityEvent {
         confidence: String,
         evidence: String,
         rule_id: Option<String>,
+        /// HTTP 提示（0.5.0 E6：full 捕获流重组可解析时出现）
+        #[serde(skip_serializing_if = "Option::is_none")]
+        http_hint: Option<HttpHint>,
+        /// JA3 客户端指纹 md5（0.5.0 E6：TLS ClientHello 可见时出现）
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tls_fingerprint: Option<String>,
     },
     Engine {
         ts: i64,

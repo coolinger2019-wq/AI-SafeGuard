@@ -25,6 +25,10 @@ pub struct EventRow {
     pub remote_port: u16,
     pub summary: String,
     pub payload: String,
+    /// HTTP 提示 JSON（0.5.0 E6，Detection 且 full 捕获可解析时非空）
+    pub http_hint: String,
+    /// JA3 md5（0.5.0 E6，TLS ClientHello 可见时非空）
+    pub tls_fp: String,
     pub prev_hash: String,
     pub hash: String,
 }
@@ -146,6 +150,8 @@ CREATE TABLE IF NOT EXISTS events (
     remote_port INTEGER NOT NULL DEFAULT 0,
     summary     TEXT NOT NULL DEFAULT '',
     payload     TEXT NOT NULL DEFAULT '',
+    http_hint   TEXT NOT NULL DEFAULT '',
+    tls_fp      TEXT NOT NULL DEFAULT '',
     prev_hash   TEXT NOT NULL DEFAULT '',
     hash        TEXT NOT NULL DEFAULT ''
 );
@@ -304,6 +310,8 @@ impl Store {
             "ALTER TABLE fed_members ADD COLUMN cert_fp TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE rules ADD COLUMN tag TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE fp_feedback ADD COLUMN local_port INTEGER",
+            "ALTER TABLE events ADD COLUMN http_hint TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE events ADD COLUMN tls_fp TEXT NOT NULL DEFAULT ''",
         ] {
             let _ = conn.execute(sql, []); // 列已存在时报错，忽略
         }
@@ -370,7 +378,7 @@ impl Store {
     // ---------- 事件 ----------
 
     pub fn insert_event(&self, ev: &SecurityEvent) -> Result<()> {
-        let (listener, remote_ip, remote_port, payload) = match ev {
+        let (listener, remote_ip, remote_port, payload, http_hint, tls_fp) = match ev {
             SecurityEvent::HoneypotHit {
                 listener,
                 remote_ip,
@@ -382,11 +390,33 @@ impl Store {
                 remote_ip.clone(),
                 *remote_port as i64,
                 payload.clone(),
+                String::new(),
+                String::new(),
             ),
-            SecurityEvent::Detection { src_ip, .. } => {
-                (String::new(), src_ip.clone(), 0, String::new())
-            }
-            _ => (String::new(), String::new(), 0, String::new()),
+            SecurityEvent::Detection {
+                src_ip,
+                http_hint,
+                tls_fingerprint,
+                ..
+            } => (
+                String::new(),
+                src_ip.clone(),
+                0,
+                String::new(),
+                http_hint
+                    .as_ref()
+                    .map(|h| serde_json::to_string(h).unwrap_or_default())
+                    .unwrap_or_default(),
+                tls_fingerprint.clone().unwrap_or_default(),
+            ),
+            _ => (
+                String::new(),
+                String::new(),
+                0,
+                String::new(),
+                String::new(),
+                String::new(),
+            ),
         };
         let summary = ev.summary();
         let ts = ev.ts();
@@ -399,9 +429,9 @@ impl Store {
             canonical_event(ts, kind, &listener, &remote_ip, remote_port, &summary, &payload);
         let hash = chain_hash(&prev_hash, &canonical);
         conn.execute(
-            "INSERT INTO events (ts, kind, listener, remote_ip, remote_port, summary, payload, prev_hash, hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![ts, kind, listener, remote_ip, remote_port, summary, payload, prev_hash, hash],
+            "INSERT INTO events (ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, prev_hash, hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, prev_hash, hash],
         )
         .map_err(|e| Error::Store(e.to_string()))?;
         Ok(())
@@ -411,11 +441,11 @@ impl Store {
         let conn = self.lock()?;
         let sql = match ip_filter {
             Some(_) => {
-                "SELECT id, ts, kind, listener, remote_ip, remote_port, summary, payload, prev_hash, hash
+                "SELECT id, ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, prev_hash, hash
                  FROM events WHERE remote_ip LIKE ?1 ORDER BY id DESC LIMIT ?2"
             }
             None => {
-                "SELECT id, ts, kind, listener, remote_ip, remote_port, summary, payload, prev_hash, hash
+                "SELECT id, ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, prev_hash, hash
                  FROM events ORDER BY id DESC LIMIT ?2"
             }
         };
@@ -434,8 +464,10 @@ impl Store {
                         remote_port: r.get::<_, i64>(5)? as u16,
                         summary: r.get(6)?,
                         payload: r.get(7)?,
-                        prev_hash: r.get(8)?,
-                        hash: r.get(9)?,
+                        http_hint: r.get(8)?,
+                        tls_fp: r.get(9)?,
+                        prev_hash: r.get(10)?,
+                        hash: r.get(11)?,
                     })
                 },
             )
@@ -540,7 +572,7 @@ impl Store {
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, ts, kind, listener, remote_ip, remote_port, summary, payload, prev_hash, hash
+                "SELECT id, ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, prev_hash, hash
                  FROM events WHERE kind = 'honeypot_hit' ORDER BY id DESC LIMIT ?1",
             )
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -555,8 +587,10 @@ impl Store {
                     remote_port: r.get::<_, i64>(5)? as u16,
                     summary: r.get(6)?,
                     payload: r.get(7)?,
-                    prev_hash: r.get(8)?,
-                    hash: r.get(9)?,
+                    http_hint: r.get(8)?,
+                    tls_fp: r.get(9)?,
+                    prev_hash: r.get(10)?,
+                    hash: r.get(11)?,
                 })
             })
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -601,7 +635,7 @@ impl Store {
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, ts, kind, listener, remote_ip, remote_port, summary, payload, prev_hash, hash
+                "SELECT id, ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, prev_hash, hash
                  FROM events ORDER BY id",
             )
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -616,8 +650,10 @@ impl Store {
                     remote_port: r.get::<_, i64>(5)? as u16,
                     summary: r.get(6)?,
                     payload: r.get(7)?,
-                    prev_hash: r.get(8)?,
-                    hash: r.get(9)?,
+                    http_hint: r.get(8)?,
+                    tls_fp: r.get(9)?,
+                    prev_hash: r.get(10)?,
+                    hash: r.get(11)?,
                 })
             })
             .map_err(|e| Error::Store(e.to_string()))?;

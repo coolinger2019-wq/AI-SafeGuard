@@ -212,6 +212,7 @@ dependencies = [
 name = "aisafeguard-core"
 version = "0.5.0"
 dependencies = [
+ "aisafeguard-l7",
  "chrono",
  "dirs",
  "keyring",

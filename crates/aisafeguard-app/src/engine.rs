@@ -584,6 +584,8 @@ fn handle_detection(
     evidence: &str,
     rule_id: Option<&str>,
     dcfg: &DetectConfig,
+    hint: Option<aisafeguard_l7::HttpHint>,
+    tls_fp: Option<String>,
 ) {
     let src = ip.to_string();
     sink.bus.publish(SecurityEvent::Detection {
@@ -593,6 +595,8 @@ fn handle_detection(
         confidence: "high".into(),
         evidence: evidence.to_string(),
         rule_id: rule_id.map(str::to_string),
+        http_hint: hint,
+        tls_fingerprint: tls_fp,
     });
     if !dcfg.auto_block {
         return;
@@ -668,7 +672,7 @@ pub fn spawn_detect_task(eng: &Arc<EngineHandle>) {
                     };
                     let cfg = eng.config().detect;
                     for d in eng.detect.observe(now_ts(), ip, &listener, port, &cfg) {
-                        handle_detection(&DetectionSink { fw: &*eng.firewall, store: &eng.store, bus: &eng.bus, fp_suppress_secs: eng.config().ai.fp_suppress_secs as i64 }, d.kind, ip, &d.evidence, None, &cfg);
+                        handle_detection(&DetectionSink { fw: &*eng.firewall, store: &eng.store, bus: &eng.bus, fp_suppress_secs: eng.config().ai.fp_suppress_secs as i64 }, d.kind, ip, &d.evidence, None, &cfg, None, None);
                     }
                 }
                 Ok(_) => {}
@@ -781,7 +785,22 @@ pub fn spawn_capture_task(eng: &Arc<EngineHandle>) {
                                 }
                             }
                             let dcfg = eng.config().detect;
-                            handle_detection(&DetectionSink { fw: &*eng.firewall, store: &eng.store, bus: &eng.bus, fp_suppress_secs: eng.config().ai.fp_suppress_secs as i64 }, d.kind, d.src, &evidence, Some(d.rule_id), &dcfg);
+                            // E6：full 模式流前缀解析 HTTP 提示与 JA3（TLS 才有）
+                            let (hint, tls_fp) = if cap_cfg.mode == "full" {
+                                match pipeline.stream_bytes(&d.key) {
+                                    Some(stream) => {
+                                        let hint =
+                                            std::str::from_utf8(&stream).ok().and_then(|t| aisafeguard_l7::parse_http_hint(t));
+                                        let tls_fp =
+                                            aisafeguard_l7::parse_ja3(&stream).map(|j| j.md5);
+                                        (hint, tls_fp)
+                                    }
+                                    None => (None, None),
+                                }
+                            } else {
+                                (None, None)
+                            };
+                            handle_detection(&DetectionSink { fw: &*eng.firewall, store: &eng.store, bus: &eng.bus, fp_suppress_secs: eng.config().ai.fp_suppress_secs as i64 }, d.kind, d.src, &evidence, Some(d.rule_id), &dcfg, hint, tls_fp);
                         }
                     }
                     Err(RecvTimeoutError::Timeout) => {
@@ -1425,6 +1444,8 @@ mod tests {
             "60 秒内对 3 个不同目标端口发送 SYN",
             Some("builtin.tcp_scan"),
             &f.dcfg(),
+            None,
+            None,
         );
 
         // 防火墙收到封禁（入站 / 任意协议 / 目标 IP）
@@ -1464,6 +1485,8 @@ mod tests {
                 "100 个纯 SYN",
                 Some("builtin.syn_flood"),
                 &f.dcfg(),
+                None,
+                None,
             );
         }
         assert!(f.fw.added.lock().unwrap().is_empty(), "内网/回环地址必须零封禁");
@@ -1489,6 +1512,8 @@ mod tests {
             "证据",
             None,
             &dcfg,
+            None,
+            None,
         );
         assert!(f.fw.added.lock().unwrap().is_empty(), "auto_block=false 不得封禁");
         assert_eq!(f.store.list_rules().unwrap().len(), 0);

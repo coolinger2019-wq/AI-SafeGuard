@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+aisafeguard-l7.workspace = true
 serde.workspace = true
 tokio.workspace = true
 toml.workspace = true
