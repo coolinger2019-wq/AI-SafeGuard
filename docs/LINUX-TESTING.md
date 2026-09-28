@@ -243,27 +243,67 @@ rm -rf ~/.local/share/aisafeguard
 - [x] 频次检测判定 + 内网保护跳过事件（阈值改 4 触发）
 - [x] verify-log ✓（36/36）/ export-events 含 hash
 
-## 12. 采样捕获实机验证（0.3.3 新增，**待 Linux 环境**）
+## 12. 采样捕获实机验证（0.3.3 新增，2026-09-28 WSL2 实测回填）
 
-> 状态（2026-09-28）：代码已完成并全平台单测 + 模糊测试（L2 剥离 / 模式过滤为纯函数，
-> Windows CI 即可覆盖）；Linux 目标交叉类型检查已过。**以下实机项待 Linux 环境（WSL2/原生）执行**，
-> 执行前先把 0.3.1 Windows 侧同构验证（docs/WINDOWS-CAPTURE-TESTING.md）对照着看。
+> 状态（2026-09-28，Ubuntu 24.04 / WSL2 内核 6.6 / rustc 1.98.1）：**全部实机项已执行通过**。
+> `cargo test --workspace` 73 用例全绿（含 capture 层 l3_payload / mode_filter / fuzz）。
+> 实测方法升级：单机"够不着"的非私网封禁分支用 IP_HDRINCL 原始套接字伪造源地址覆盖
+> （内核按 martian 丢弃不影响网络，捕获层在 L2 tap 先于 ip_rcv 可见），见 docs/LESSONS.md。
+> 执行中发现的行为边界记在文末「实测备注」，运维坑记在 docs/LESSONS.md 第五批。
 
 ```bash
-cargo test --workspace   # 期望含 capture 层新增用例（l3_payload / mode_filter / fuzz）全绿
+cargo test --workspace   # 实测：73 用例全绿（Windows 侧开发的双重确认）
 ```
 
-- [ ] **降级路径**：非 root 启动 + `[detect.capture].enabled=true` → 引擎正常运行，
-  事件与 `/api/status` capture 状态输出"需要 CAP_NET_RAW 权限"，其余功能不受影响
-- [ ] **启动路径**：`sudo`（root 具备 CAP_NET_RAW）启动 → `/api/status` 返回
-  `"capture": {"active": true, "backend": "afpacket", "mode": "..."}`
-- [ ] **检测链路（control 模式）**：连 3+ 个蜜罐端口
-  （`for p in 2222 8081 2323 1337 9999; do timeout 1 bash -c "echo > /dev/tcp/127.0.0.1/$p"; done`）
-  → `detection` 事件（`builtin.tcp_scan`，证据含"对 N 个不同目标端口发送 SYN（采样捕获）"）
-- [ ] **语义对齐抽查**：control 模式下正常业务连接（先 SYN 后数据）不产生载荷摘要证据
-  （捕获线程预过滤只放纯 SYN，与 WinDivert 内核过滤器同语义）
-- [ ] **full 模式**：改 `mode="full"` 重启 → 扫描触发时证据含"载荷摘要"段（截断 + 控制字符清洗）
-- [ ] **AF_PACKET 特有**：确认 AF_PACKET 套接字未开混杂模式
-  （`sudo tcpdump -d -i eth0` 或观察只收到本机相关帧；隐私红线）
-- [ ] **自动封禁出口**：扫描源若为非私网地址 → 自动封禁 + TTL 解封；私网/回环源 → 内网保护跳过留痕
-  （单机 WSL 只能覆盖"跳过"分支，封禁分支由 engine 集成测试的 mock 防火墙覆盖）
+- [x] **降级路径**：非 root 启动 + `[detect.capture].enabled=true` → 引擎正常运行，
+  `/api/status` 返回 `capture: {enabled: true, active: false, backend: "afpacket", note: "需要 CAP_NET_RAW 权限…"}`，
+  事件留痕 `流量采样不可用：需要 CAP_NET_RAW 权限…`；蜜罐 4 监听与 API 不受影响
+- [x] **启动路径**：root 启动 → `/api/status` 返回
+  `"capture": {"active": true, "backend": "afpacket", "mode": "control"}`，
+  事件 `流量采样已启动（afpacket / control 模式）`
+- [x] **检测链路（control 模式）**：连 4 个蜜罐端口 → 采样判定
+  `[scan] 60 秒内对 4 个不同目标端口发送 SYN（采样捕获，[2222, 2323, 7420, 8081]）`，
+  与频次引擎判定（`触达 4 个不同蜜罐端口`）双传感器同时出现，各带一条
+  `内网保护：跳过对 127.0.0.1 的自动封禁（scan）`
+- [x] **语义对齐抽查**：API 请求 + 蜜罐带载荷连接等正常业务流量零误报；control 模式
+  证据只含端口元数据。附带观察：正常业务连接的 SYN 也进扫描计数（7420 出现在端口列表）——
+  传感器视角正确，阈值内不会误判
+- [x] **full 模式**：洪水判定证据含载荷摘要段——
+  `[flood] … 发送 4 个纯 SYN（采样捕获）；载荷摘要: FORENSIC-PAYLOAD-2026-09-28  AAAA…`，
+  控制字符（\x01\x02\x03）已清洗、摘要精确 120 字符截断。**扫描（tcp_scan）判定的载荷摘要
+  结构性为空**（判定在第 N 个不同端口的首个 SYN 时刻触发，该流载荷按 TCP 语义必在其后），
+  取证摘要目前只有 flood 判定可达——设计取舍见 LESSONS 第五批
+- [x] **AF_PACKET 特有**：`/proc/net/packet` 只有一个套接字（SOCK_RAW / ETH_P_ALL /
+  Iface=0 未绑单接口），lo 与 eth0 均无 PROMISC 标志——未开混杂，隐私红线成立
+- [x] **自动封禁出口**：伪造源 203.0.113.7（TEST-NET-3）SYN 突发 → flood 判定 →
+  真实自动封禁（`nft set blk4_in` 出现该元素，规则 `origin=engine` 带 TTL）→
+  TTL（90s）到期 janitor 自动解封（set 清空 + `TTL 到期，自动解封` + `firewall_remove` 事件）；
+  `nft delete table` 后重启 → 规则从 DB 重灌（resync）且 capture 仍 active；
+  私网/回环源 → 内网保护跳过留痕（对照组）
+
+### 0.3.4 附加闭环（同轮实测）
+
+- [x] **误报反馈三联动**：engine 自动封禁 198.51.100.5 后 `POST /api/feedback` →
+  `{"ok":true,"removed_rules":1}`（联动解封）+ 30 天抑制入库；同源换端口再洪水 →
+  判定照常产生但事件为 `误报反馈抑制：跳过对 … 的自动封禁`，无新规则；列表接口返回
+  count/first/last/note 聚合
+- [x] **转正正/负路径**：engine TTL 规则 promote → `expires` 延长 30.0 天（promote_ttl_secs）；
+  手动永久规则 promote → 明确拒绝 `已是永久封禁，无需转正`
+- [x] **鉴权与 AI 端点冒烟**：无 token 401；`/api/ai/key` present=false（未配 key）、
+  `/api/ai/runs`、`/api/proposals` 空列表
+- [x] **完整性/导出**：`verify-log` 哈希链校验通过；`export-events` 全量 JSONL 含
+  prev_hash/hash 字段
+
+### 实测备注（行为边界，非缺陷）
+
+1. **tcp_scan 判定的载荷摘要恒空**（full 模式）：判定触发表=第 N 个**不同**端口的首个
+   SYN，而该流的载荷必在 SYN 之后到达；同源 60s 冷却又挡住后续补发。若要扫描判定也带
+   取证，需设计调整（判定时取该源任一已缓存流摘要 / 载荷到达后补发取证事件），当前按
+   "flood 可取证、scan 只看元数据"理解。
+2. **loopback 上 AF_PACKET 每帧双投递**（xmit tap + rx tap）：实验环境洪水计数翻倍
+   （阈值 4 实际 2 个 SYN 即触发）；扫描判定按去重端口计数不受影响。生产 eth0 单向观测
+   无此现象。
+3. **事件存储不携带 rule_id**：`builtin.*` 规则标识只在事件总线（GUI 实时流）可见，
+   落库/API 历史里靠证据文案辨识规则。追溯需求若强，可考虑给 EventRow 加列。
+4. **低阈值实验配置下，对同一端口的高频轮询**（本测试的 curl）会触发 syn_flood 判定
+   （同端口窗口内 ≥4 连接）——默认阈值 100 下正常监控频率不会触发。

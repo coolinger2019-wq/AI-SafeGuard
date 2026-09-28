@@ -14,10 +14,6 @@ mod service {
     pub fn unsupported() -> anyhow::Result<()> {
         anyhow::bail!("Windows 服务管理当前仅支持 Windows")
     }
-
-    pub fn install_systemd() -> anyhow::Result<()> {
-        super::install_systemd_unit()
-    }
 }
 
 /// Linux systemd 服务安装：写 unit（数据目录 /var/lib/aisafeguard）+ 启用自启动。
@@ -77,6 +73,8 @@ use std::time::{Duration, Instant};
 
 use aisafeguard_core::config::AppConfig;
 use aisafeguard_core::event::{EventBus, SecurityEvent};
+// secrets 只在 Windows 凭据管理器分支用到（Linux 落文件，见 load_or_create_token）
+#[cfg(windows)]
 use aisafeguard_core::secrets;
 use aisafeguard_store::Store;
 use console::Console;
