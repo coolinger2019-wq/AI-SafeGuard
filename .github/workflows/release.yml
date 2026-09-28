@@ -1,0 +1,47 @@
+# 发布产物构建（D1）：tag 触发，Windows / Linux 产物上传。
+# 注意：本仓库主远程是 Gitee；此 workflow 在 GitHub mirror 上生效
+# （mirror 步骤见 docs/ROADMAP-0.4.md D1）。CI 只信任 tag，不信任分支。
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: aisafeguard-windows-x64.zip
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: aisafeguard-linux-x64.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (release, auditable)
+        run: cargo auditable build --release
+      - name: Test
+        run: cargo test --workspace
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target/release/aisafeguard.exe -DestinationPath ${{ matrix.artifact }}
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          chmod +x target/release/aisafeguard
+          tar czf ${{ matrix.artifact }} -C target/release aisafeguard
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact }}
