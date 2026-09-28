@@ -69,7 +69,7 @@ impl AisafeApp {
                                     ))
                                     .clicked()
                             {
-                                match self.eng.mark_false_positive(&ev.remote_ip, "") {
+                                match self.eng.mark_false_positive(&ev.remote_ip, "", None) {
                                     Ok((dismissed, removed)) => self.set_toast(format!(
                                         "已标记误报：解封 {removed} 条规则，收弃 {dismissed} 条建议（30 天抑制）"
                                     )),

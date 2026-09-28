@@ -237,7 +237,7 @@ impl Console for RemoteConsole {
         Ok(body["removed"].as_u64().unwrap_or(0) as usize)
     }
 
-    fn mark_false_positive(&self, ip: &str, note: &str) -> anyhow::Result<(i64, usize)> {
+    fn mark_false_positive(&self, ip: &str, note: &str, _local_port: Option<u16>) -> anyhow::Result<(i64, usize)> {
         let v: serde_json::Value = self
             .post_json("/api/feedback", &serde_json::json!({ "remote_ip": ip, "note": note }))?
             .json()?;

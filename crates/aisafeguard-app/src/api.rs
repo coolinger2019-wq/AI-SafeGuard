@@ -205,11 +205,13 @@ async fn promote_rule(State(s): State<AppState>, Path(id): Path<i64>) -> Respons
 struct FeedbackBody {
     remote_ip: String,
     note: Option<String>,
+    /// 可选端口粒度（0.4.0 B4）：仅抑制该端口的处置；缺省 = 按 IP 整体
+    local_port: Option<u16>,
 }
 
 /// 误报反馈：记录（30 天抑制）+ 解除该来源自动封禁 + 收弃 pending 建议。
 async fn mark_false_positive(State(s): State<AppState>, Json(body): Json<FeedbackBody>) -> Response {
-    match s.engine.mark_false_positive(&body.remote_ip, body.note.as_deref().unwrap_or("")) {
+    match s.engine.mark_false_positive(&body.remote_ip, body.note.as_deref().unwrap_or(""), body.local_port) {
         Ok((dismissed, removed)) => Json(json!({
             "ok": true,
             "dismissed_proposals": dismissed,

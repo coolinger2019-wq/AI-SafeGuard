@@ -73,6 +73,8 @@ pub struct FpRow {
     pub first_ts: i64,
     pub last_ts: i64,
     pub note: String,
+    /// None = 按 IP 整体抑制；Some = 仅该端口（0.4.0 B4）
+    pub local_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -220,11 +222,12 @@ CREATE TABLE IF NOT EXISTS fed_members (
 -- 误报反馈（AI 深度介入 v1）：用户判定为误报的来源，自动封禁/自动应用跳过，
 -- 并作为上下文送回 AI。value = 来源 IP；TTL 语义由查询侧（last_ts + 抑制期）实现。
 CREATE TABLE IF NOT EXISTS fp_feedback (
-    value    TEXT PRIMARY KEY,
-    count    INTEGER NOT NULL DEFAULT 1,
-    first_ts INTEGER NOT NULL,
-    last_ts  INTEGER NOT NULL,
-    note     TEXT NOT NULL DEFAULT ''
+    value      TEXT PRIMARY KEY,
+    count      INTEGER NOT NULL DEFAULT 1,
+    first_ts   INTEGER NOT NULL,
+    last_ts    INTEGER NOT NULL,
+    note       TEXT NOT NULL DEFAULT '',
+    local_port INTEGER
 );
 "#;
 
@@ -300,6 +303,7 @@ impl Store {
             "ALTER TABLE proposals ADD COLUMN ttl_secs INTEGER",
             "ALTER TABLE fed_members ADD COLUMN cert_fp TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE rules ADD COLUMN tag TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE fp_feedback ADD COLUMN local_port INTEGER",
         ] {
             let _ = conn.execute(sql, []); // 列已存在时报错，忽略
         }
@@ -912,25 +916,44 @@ impl Store {
     // ---------- 误报反馈 ----------
 
     /// 记录一次误报标记（同来源聚合：count+1、last_ts/note 刷新为最新）。
-    pub fn insert_fp_feedback(&self, value: &str, ts: i64, note: &str) -> Result<()> {
+    /// 误报标记：value=来源 IP；local_port=None 表示按 IP 整体抑制，
+    /// Some(port) 表示仅抑制该端口的处置（0.4.0 B4）。
+    pub fn insert_fp_feedback(
+        &self,
+        value: &str,
+        ts: i64,
+        note: &str,
+        local_port: Option<u16>,
+    ) -> Result<()> {
+        // 最后一次标记决定粒度（IP 级 / 端口级）：行以 value 为主键
         self.lock()?
             .execute(
-                "INSERT INTO fp_feedback (value, count, first_ts, last_ts, note)
-                 VALUES (?1, 1, ?2, ?2, ?3)
-                 ON CONFLICT(value) DO UPDATE SET count = count + 1, last_ts = excluded.last_ts, note = excluded.note",
-                params![value, ts, note],
+                "INSERT INTO fp_feedback (value, count, first_ts, last_ts, note, local_port)
+                 VALUES (?1, 1, ?2, ?2, ?3, ?4)
+                 ON CONFLICT(value) DO UPDATE SET count = count + 1, last_ts = excluded.last_ts, note = excluded.note, local_port = excluded.local_port",
+                params![value, ts, note, local_port],
             )
             .map_err(|e| Error::Store(e.to_string()))?;
         Ok(())
     }
 
-    /// 该来源是否处于误报抑制期（last_ts 起算 suppress_ttl_secs 内有过标记）。
-    pub fn active_fp(&self, value: &str, now: i64, suppress_ttl_secs: i64) -> Result<bool> {
+    /// 该来源是否处于误报抑制期（0.4.0 B4 端口粒度）：
+    /// 记录 local_port=NULL = 按 IP 整体抑制（对任何处置生效）；
+    /// 记录 Some(port) = 仅对处置端口相同的动作抑制（action_port=None 的
+    /// 来源级检测不被端口级记录抑制）。
+    pub fn active_fp(
+        &self,
+        value: &str,
+        now: i64,
+        suppress_ttl_secs: i64,
+        action_port: Option<u16>,
+    ) -> Result<bool> {
         let n: i64 = self
             .lock()?
             .query_row(
-                "SELECT COUNT(*) FROM fp_feedback WHERE value = ?1 AND last_ts + ?2 > ?3",
-                params![value, suppress_ttl_secs, now],
+                "SELECT COUNT(*) FROM fp_feedback
+                 WHERE value = ?1 AND last_ts + ?2 > ?3 AND (local_port IS NULL OR local_port IS ?4)",
+                params![value, suppress_ttl_secs, now, action_port],
                 |r| r.get(0),
             )
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -951,7 +974,7 @@ impl Store {
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
-                "SELECT value, count, first_ts, last_ts, note FROM fp_feedback
+                "SELECT value, count, first_ts, last_ts, note, local_port FROM fp_feedback
                  WHERE last_ts + ?2 > ?1 ORDER BY last_ts DESC LIMIT ?3",
             )
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -963,6 +986,7 @@ impl Store {
                     first_ts: r.get(2)?,
                     last_ts: r.get(3)?,
                     note: r.get(4)?,
+                    local_port: r.get(5)?,
                 })
             })
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -1164,7 +1188,7 @@ mod tests {
             st.query_map([], |r| r.get(0)).unwrap().map(|x| x.unwrap()).collect()
         };
         store.set_proposal_status(ids[0], "applied", None).unwrap();
-        store.insert_fp_feedback("203.0.113.9", now, "fp").unwrap();
+        store.insert_fp_feedback("203.0.113.9", now, "fp", None).unwrap();
         // 真实链路：「已自动封禁」文本在 kind=engine 的事件里（handle_detection 固定文案）
         store
             .insert_event(&aisafeguard_core::event::SecurityEvent::Engine {
@@ -1187,12 +1211,27 @@ mod tests {
     #[test]
     fn fp_feedback_clear() {
         let store = tmp_store("fp-clear");
-        store.insert_fp_feedback("203.0.113.9", 100, "test").unwrap();
-        assert!(store.active_fp("203.0.113.9", 150, 10_000).unwrap());
+        store.insert_fp_feedback("203.0.113.9", 100, "test", None).unwrap();
+        assert!(store.active_fp("203.0.113.9", 150, 10_000, None).unwrap());
         assert_eq!(store.clear_fp_feedback("203.0.113.9").unwrap(), 1);
-        assert!(!store.active_fp("203.0.113.9", 150, 10_000).unwrap());
+        assert!(!store.active_fp("203.0.113.9", 150, 10_000, None).unwrap());
         // 再清一次 = 0（幂等）
         assert_eq!(store.clear_fp_feedback("203.0.113.9").unwrap(), 0);
+    }
+
+    /// 端口粒度抑制（0.4.0 B4）：IP 级记录抑制任何处置；端口级记录仅抑制对应端口。
+    #[test]
+    fn fp_port_scope() {
+        let store = tmp_store("fp-port");
+        // 端口级记录：仅 2222
+        store.insert_fp_feedback("203.0.113.9", 100, "仅 2222", Some(2222)).unwrap();
+        assert!(store.active_fp("203.0.113.9", 150, 10_000, Some(2222)).unwrap());
+        assert!(!store.active_fp("203.0.113.9", 150, 10_000, Some(8081)).unwrap());
+        assert!(!store.active_fp("203.0.113.9", 150, 10_000, None).unwrap(), "端口级记录不抑制来源级检测");
+        // 改标为 IP 级（最后一次标记决定粒度）→ 任何处置都抑制
+        store.insert_fp_feedback("203.0.113.9", 200, "按 IP", None).unwrap();
+        assert!(store.active_fp("203.0.113.9", 250, 10_000, Some(8081)).unwrap());
+        assert!(store.active_fp("203.0.113.9", 250, 10_000, None).unwrap());
     }
 
     /// fed 成员 node ↔ 证书指纹 TOFU 绑定：首登、同指纹心跳、异指纹拒绝。

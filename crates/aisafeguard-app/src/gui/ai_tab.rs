@@ -202,7 +202,7 @@ impl AisafeApp {
                                 self.refresh_cache();
                             }
                             if !p.remote_ip.is_empty() && ui.button("误报").clicked() {
-                                match self.eng.mark_false_positive(&p.remote_ip, "") {
+                                match self.eng.mark_false_positive(&p.remote_ip, "", None) {
                                     Ok((dismissed, removed)) => {
                                         let days = self
                                             .eng

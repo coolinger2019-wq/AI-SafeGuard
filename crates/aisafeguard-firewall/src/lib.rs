@@ -287,7 +287,7 @@ pub mod nft {
             addr_kw.into(),
             ".".into(),
             proto.into(),
-            format!("{port_kw}"),
+            port_kw.to_string(),
             format!("@{set}"),
             "drop".into(),
         ]

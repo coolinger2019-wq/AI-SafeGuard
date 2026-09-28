@@ -396,7 +396,7 @@ impl EngineHandle {
 
     /// 误报反馈：记录（30 天抑制期）+ 解除该来源的全部自动封禁（engine/ai 来源，
     /// 人工手动添加的规则不动）+ 收弃该来源的 pending 建议。全程留痕。
-    pub fn mark_false_positive(&self, ip_str: &str, note: &str) -> Result<(i64, usize)> {
+    pub fn mark_false_positive(&self, ip_str: &str, note: &str, local_port: Option<u16>) -> Result<(i64, usize)> {
         let ip: IpAddr = ip_str
             .trim()
             .parse()
@@ -411,7 +411,8 @@ impl EngineHandle {
             .filter(|c| !c.is_control())
             .take(200)
             .collect();
-        self.store.insert_fp_feedback(&src, now_ts(), &note)?;
+        self.store
+            .insert_fp_feedback(&src, now_ts(), &note, local_port)?;
         let dismissed = self.store.dismiss_pending_proposals_for_ip(&src)?;
         let mut removed = 0usize;
         for r in self.store.list_rules()? {
@@ -607,7 +608,7 @@ fn handle_detection(
     // 误报反馈：用户已判定该来源为正常业务，自动封禁跳过（人工封禁不受影响）
     if sink
         .store
-        .active_fp(&src, now_ts(), sink.fp_suppress_secs)
+        .active_fp(&src, now_ts(), sink.fp_suppress_secs, None)
         .unwrap_or(false)
     {
         sink.bus.publish(SecurityEvent::engine(
@@ -1023,7 +1024,7 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                         .parse::<IpAddr>()
                         .map(|ip| {
                             eng.store
-                                .active_fp(&ip.to_string(), now_ts(), cfg.ai.fp_suppress_secs as i64)
+                                .active_fp(&ip.to_string(), now_ts(), cfg.ai.fp_suppress_secs as i64, p.local_port)
                                 .unwrap_or(false)
                         })
                         .unwrap_or(false);
@@ -1144,8 +1145,8 @@ impl Console for EmbeddedConsole {
             .map_err(anyhow::Error::msg)
     }
 
-    fn mark_false_positive(&self, ip: &str, note: &str) -> anyhow::Result<(i64, usize)> {
-        self.0.mark_false_positive(ip, note).map_err(anyhow::Error::msg)
+    fn mark_false_positive(&self, ip: &str, note: &str, local_port: Option<u16>) -> anyhow::Result<(i64, usize)> {
+        self.0.mark_false_positive(ip, note, local_port).map_err(anyhow::Error::msg)
     }
 
     fn trigger_analysis(&self) -> bool {
