@@ -345,6 +345,7 @@ mod tests {
             enabled: true,
             mode: "control".into(),
             scan_distinct_ports: 3,
+            driver_sha256: String::new(),
             syn_flood_rate: 4,
             window_secs: 60,
             flow_idle_secs: 120,

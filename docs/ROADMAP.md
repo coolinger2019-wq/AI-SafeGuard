@@ -80,10 +80,10 @@
 ### 安装与运行
 
 - [ ] Windows 服务安装体验收口（开机自启；服务/交互模式凭据路径文档化）
-- [ ] Linux systemd unit + 最小权限说明（`CAP_NET_RAW` 仅捕获需要；无捕获可降级）
-- [ ] WinDivert 官方获取说明与可选文件哈希校验；缺失时明确提示并降级
-- [ ] 配置热更新（第一批）：`[detect]` 阈值、`[syslog]`、`[notify]`、`[ai].enabled` / `auto_apply`、暴露面扫描间隔无需重启
-- [ ] 需重启项（蜜罐端口、API 绑定、捕获开关等）在 GUI/文档标注；状态页可选「生效配置 vs 文件配置」diff
+- [x] Linux systemd unit + 最小权限（0.4.0）：unit 白名单式授权 `AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW` + `CapabilityBoundingSet` + `NoNewPrivileges=yes`，注释写明降级路径（不开捕获/XDP 可整行删除）
+- [x] WinDivert 官方获取说明与可选文件哈希校验（0.4.0）：`[detect.capture].driver_sha256` 配置期望哈希（空=不校验），不符降级并留事件不静默；缺失驱动原有明确提示
+- [x] 配置热更新（第一批，0.4.0）：`[detect]` 阈值、`[syslog]`、`[notify]`、`[ai].enabled` / `auto_apply`、暴露面扫描间隔无需重启；**接线 `analyze_interval_secs` 定时分析任务**（此前只有配置无消费者，分析全靠手动）；热更/重启分界固化为 `AppConfig::restart_required` 契约 + 单测
+- [x] 需重启项（蜜罐端口、API 端口、捕获开关/模式、XDP、fed 角色、数据目录）在 GUI 标注（0.4.0）：设置页各小节「需重启」徽标 + 新增 XDP 小节 + 保存 toast 按 `restart_required` 列出需重启项；「生效配置 vs 文件配置」完整 diff 视图留 P1
 
 ### 封禁语义与误报
 

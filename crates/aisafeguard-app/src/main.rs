@@ -32,6 +32,15 @@ ExecStart={} --headless --data-dir /var/lib/aisafeguard
 Restart=on-failure
 RestartSec=5
 User=root
+# 最小权限（0.4.0 A2）：白名单式授权 + 禁止提权。
+#   CAP_NET_ADMIN —— nftables 封禁（inet aisafeguard 表）
+#   CAP_NET_RAW   —— AF_PACKET 采样捕获（[detect.capture].enabled=true 才需要）
+#   两个能力都不用（仅蜜罐+API，且蜜罐端口>1024）时可将 AmbientCapabilities
+#   整行删除，服务降级为无特权运行（捕获/封禁功能自动降级并留事件）。
+#   进一步收权可改 User= 为专用低权用户（需 chown /var/lib/aisafeguard）。
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=yes
 
 [Install]
 WantedBy=multi-user.target
@@ -476,6 +485,9 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
     forward::spawn_syslog_task(&engine);
     forward::spawn_notify_task(&engine);
     forward::spawn_exposure_task(&engine);
+
+    // AI 定时分析（0.4.0 A4 接线）：任务自门控 [ai].enabled，interval/enabled 全热更
+    engine.spawn_ai_task();
 
     // 威胁情报（默认关闭，[intel].enabled 开启）
     if cfg.intel.enabled {

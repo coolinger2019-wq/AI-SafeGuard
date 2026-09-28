@@ -17,6 +17,7 @@ impl AisafeApp {
             self.settings_syslog_target = cfg.syslog.target.clone();
             self.settings_notify_url = cfg.notify.url.clone();
             self.settings_exposure_secs = cfg.exposure.auto_scan_secs.to_string();
+            self.settings_xdp_iface = cfg.xdp.iface.clone();
             self.settings_draft = Some(cfg);
         }
         let Some(draft) = self.settings_draft.as_mut() else {
@@ -187,10 +188,10 @@ impl AisafeApp {
                 ui.label("启用采样捕获");
                 ui.checkbox(
                     &mut draft.detect.capture.enabled,
-                    "（被动观测，仅取副本；Windows 需管理员/服务模式，Linux 需 CAP_NET_RAW；默认关闭）",
+                    "（需重启；被动观测，仅取副本；Windows 需管理员/服务模式，Linux 需 CAP_NET_RAW；默认关闭）",
                 );
                 ui.end_row();
-                ui.label("采集模式");
+                ui.label("采集模式（需重启）");
                 egui::ComboBox::from_id_salt("capture-mode")
                     .selected_text(&draft.detect.capture.mode)
                     .show_ui(ui, |ui| {
@@ -241,7 +242,7 @@ impl AisafeApp {
                 ui.label("启用本地 API");
                 ui.checkbox(&mut draft.api.enabled, "（仅监听 127.0.0.1）");
                 ui.end_row();
-                ui.label("端口");
+                ui.label("端口（需重启）");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.settings_port).desired_width(120.0),
                 );
@@ -341,9 +342,43 @@ impl AisafeApp {
 
         ui.add_space(14.0);
         section(ui, "蜜罐");
-        ui.checkbox(&mut draft.honeypot.enabled, "启用蜜罐");
+        ui.checkbox(&mut draft.honeypot.enabled, "启用蜜罐（需重启）");
         ui.label(
             RichText::new("监听列表（名称/端口/类型）通过 config.toml 的 [honeypot.listeners] 编辑，重启生效。")
+                .size(11.0)
+                .color(text_dim()),
+        );
+
+        ui.add_space(14.0);
+        section(ui, "XDP 快速执行层（仅 Linux，需重启）");
+        egui::Grid::new("xdp-settings")
+            .num_columns(2)
+            .spacing([14.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("启用 XDP");
+                ui.checkbox(
+                    &mut draft.xdp.enabled,
+                    "（IP 级入站封禁内核直丢；nftables 永远兜底，附加失败自动降级）",
+                );
+                ui.end_row();
+                ui.label("网卡");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.settings_xdp_iface)
+                        .desired_width(120.0)
+                        .hint_text("eth0"),
+                );
+                ui.end_row();
+                ui.label("模式");
+                egui::ComboBox::from_id_salt("xdp-mode")
+                    .selected_text(&draft.xdp.mode)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut draft.xdp.mode, "skb".to_string(), "skb（generic XDP，所有网卡可用）");
+                        ui.selectable_value(&mut draft.xdp.mode, "native".to_string(), "native（驱动级，更快，需网卡支持）");
+                    });
+                ui.end_row();
+            });
+        ui.label(
+            RichText::new("仅 Linux 生效；需 root/CAP_BPF。镜像范围 = 入站 + 任意协议 + 无端口 + IPv4 的封禁规则。")
                 .size(11.0)
                 .color(text_dim()),
         );
@@ -513,12 +548,30 @@ impl AisafeApp {
                 return;
             }
         }
+        cfg.xdp.iface = self.settings_xdp_iface.trim().to_string();
+        if cfg.xdp.enabled && cfg.xdp.iface.is_empty() {
+            self.set_toast("启用 XDP 需填写网卡名");
+            return;
+        }
+        if !cfg.xdp.valid_mode() {
+            self.set_toast("XDP 模式非法（skb | native）");
+            return;
+        }
         // 界面外观：主题名归一化（未知值回退默认），字号收敛到合法区间
         cfg.ui.theme = ThemeId::from_str(&cfg.ui.theme).as_str().to_string();
         cfg.ui.font_scale = theme::normalize_font_scale(cfg.ui.font_scale);
+        // 热更/重启分界（A4/A5 契约）：提示哪些项需重启
+        // 热更/重启分界（A4/A5 契约）：对比最近一次保存的配置，提示哪些项需重启
+        let old_cfg = self.eng.config().unwrap_or_default();
+        let restart_items = AppConfig::restart_required(&old_cfg, &cfg);
         match self.eng.save_config(cfg) {
             Ok(()) => {
-                self.set_toast("设置已保存（主题/字号即时生效；蜜罐/API 端口等重启后生效）");
+                let toast = if restart_items.is_empty() {
+                    "设置已保存（改动全部热更生效，无需重启）".to_string()
+                } else {
+                    format!("设置已保存；需重启生效：{}", restart_items.join("、"))
+                };
+                self.set_toast(&toast);
                 self.settings_draft = None;
                 self.refresh_cache();
             }

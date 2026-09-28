@@ -137,7 +137,18 @@ docs/               架构 / 路线图 / 合规对照 / NGFW 演进 / Windows �
 
 ## 已知限制（0.3.2）
 
-蜜罐、API 与采样捕获的配置改动需重启；服务模式与内嵌模式并存，服务 token 文件依赖 ProgramData 默认 ACL（后续收紧为命名管道）；采样捕获 Windows 用 WinDivert（WinDivert64.sys 需自行从官方渠道获取放入程序目录）、Linux 用 AF_PACKET（需 CAP_NET_RAW，实机验证清单 docs/LINUX-TESTING.md §12）；Linux 无凭据管理器后端（Key 请用环境变量）；防火墙封禁规则为 IP 粒度，L7/应用层识别在路线图 0.4。详见架构文档。
+配置分两类：**热更**（`[detect]` 阈值、`[syslog]`、`[notify]`、`[ai]`、`[exposure]`、`[intel]` 等，保存即生效）与**需重启**（蜜罐监听、API 端口、捕获开关/模式、XDP、fed 角色——GUI 保存时会明确列出需重启项）；服务模式与内嵌模式并存，服务 token 文件依赖 ProgramData 默认 ACL（后续收紧为命名管道）；采样捕获 Windows 用 WinDivert（WinDivert64.sys 需自行从官方渠道获取放入程序目录）、Linux 用 AF_PACKET（需 CAP_NET_RAW，实机验证清单 docs/LINUX-TESTING.md §12）；Linux 无凭据管理器后端（Key 请用环境变量）；防火墙封禁规则为 IP 粒度，L7/应用层识别在路线图 0.5。详见架构文档。
+
+## 服务模式（Windows）与凭据路径
+
+Windows 服务（`service install`，LocalSystem）与普通 GUI 进程的**凭据存放位置不同**，这是 Windows 凭据管理器按用户隔离的必然结果：
+
+| 凭据 | 服务模式 | 交互（内嵌/远程 GUI）模式 |
+|------|----------|--------------------------|
+| API token | 发布为 `%PROGRAMDATA%isafeguardpi-token`（本机用户可读，GUI 远程连接用） | 凭据管理器 `AISafeGuard/api-token` |
+| AI Key | 服务进程读**环境变量 `AISAFEGUARD_AI_KEY`**（服务账户的凭据管理器与你的用户账户隔离，服务读不到你存进去的 Key） | 凭据管理器 `AISafeGuard/ai-key`，或环境变量 |
+
+**服务模式下请用系统环境变量（或 schtasks/systemd 的 Environment=）配置 AI Key**；Linux 服务同理（unit 的 `Environment=` 或 EnvironmentFile）。API Key 与事件数据完整性不受此影响。
 
 ---
 

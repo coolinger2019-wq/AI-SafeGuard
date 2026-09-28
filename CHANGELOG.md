@@ -2,6 +2,53 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.4.0] - 2026-09-29
+
+按 ROADMAP-0.4 Batch A（装得上、跑得稳）完成第一批：配置热更新契约、
+服务化权限收口、交付完整性校验、AI 定时分析接线。
+
+### 新增
+
+- **AI 定时分析接线（A4）**：`[ai].analyze_interval_secs` 此前只有配置没有
+  消费者（分析全靠 GUI/API 手动触发）；新增引擎定时任务，每轮读最新配置——
+  `enabled` / `interval` / `auto_apply` 全部热更；`ai_running` 防重入闸门
+  手动与定时共用；首跑延迟 30s（与情报/暴露面任务先例一致）
+- **热更/重启分界契约（A4/A5）**：`AppConfig::restart_required(old, new)`
+  纯函数 + 契约单测——蜜罐监听、API 服务、捕获开关/模式、XDP、fed 角色、
+  数据目录 = **需重启**；detect 阈值 / syslog / notify / ai / exposure /
+  intel / fed 运行期参数 = **热更**。保存配置时据此留事件、设置页 toast
+  明确列出需重启项，杜绝"以为改了其实没生效"
+- **驱动完整性校验（A3）**：`[detect.capture].driver_sha256`（空 = 不校验，
+  默认）——Windows 启动捕获前校验 exe 同目录 `WinDivert64.sys` 的 SHA-256，
+  不符则捕获降级并留事件（供应链防护，不静默继续）；官方获取说明见
+  docs/WINDOWS-CAPTURE-TESTING.md
+- **systemd 最小权限（A2）**：unit 增加 `AmbientCapabilities=CAP_NET_ADMIN
+  CAP_NET_RAW` + `CapabilityBoundingSet` + `NoNewPrivileges=yes`（白名单式
+  授权而非裸 root 全能力），注释写明"仅蜜罐+API"场景的降级路径与专用用户收权示例
+- **A1 文档化**：README 新增"服务模式与凭据路径"——Windows 凭据管理器按用户
+  隔离导致服务读不到用户存的 AI Key，服务模式一律走环境变量（表格式说明）
+- **XDP 设置小节（A5）**：设置页新增启用/网卡/模式（标注仅 Linux、需重启）
+
+### 变更
+
+- 配置保存事件与 GUI toast 按 `restart_required` 生成（"全部热更生效"或
+  "需重启项列表"），替代原先一刀切的"重启后生效"表述
+- README 已知限制同步热更/重启两类表述
+
+### 已知限制
+
+- 「生效配置 vs 文件配置」完整 diff 视图留 P1
+- 热更边界以 `restart_required` 契约为准——新增需重启项时必须同步该函数
+  （契约单测钉住各分支）
+
+### 验证（WSL2 Ubuntu 24.04，2026-09-29）
+
+- AI 定时任务：`interval_secs=30` + `enabled=true` + 无 Key → 每 30s 一条
+  `ai_run`（未配置 API Key）；`POST /api/config` 关闭 enabled → 不再产生（热更）
+- `restart_required` 契约单测全分支（含"热更项不计入"反向断言）
+- systemd unit 重装后含 AmbientCapabilities / NoNewPrivileges，服务 active
+- 0.3.7 XDP 回归：附加/双写/解封正常
+
 ## [0.3.7] - 2026-09-28
 
 按 ROADMAP 0.3 推进第七批：数据面 Linux——XDP + Aya 快速执行层

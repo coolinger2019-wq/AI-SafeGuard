@@ -424,11 +424,38 @@ impl EngineHandle {
         true
     }
 
+    /// AI 定时分析（0.4.0 A4 接线）：`[ai].analyze_interval_secs` 此前只有配置没有
+    /// 消费者，分析全靠手动触发。本任务每轮读最新配置——enabled / interval /
+    /// auto_apply 全部热更；ai_running 标志防重入（手动与定时共用同一闸门）。
+    /// 首跑延迟 30s（与情报/暴露面任务的启动先例一致，避开启动窗口）。
+    pub fn spawn_ai_task(self: &Arc<Self>) {
+        let eng = Arc::clone(self);
+        let rt = eng.rt.clone();
+        rt.spawn(async move {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            loop {
+                let cfg = eng.config().ai;
+                if cfg.enabled {
+                    eng.trigger_analysis();
+                }
+                let interval = cfg.analyze_interval_secs.clamp(30, 86_400);
+                tokio::time::sleep(Duration::from_secs(interval)).await;
+            }
+        });
+    }
+
     pub fn save_config(&self, new_cfg: AppConfig) -> Result<()> {
+        let old = self.config();
+        // 热更/重启分界（A4/A5 契约，定义见 AppConfig::restart_required）
+        let req = AppConfig::restart_required(&old, &new_cfg);
         new_cfg.save(&self.cfg_path)?;
         *self.cfg.write().expect("配置锁中毒") = new_cfg;
-        self.bus
-            .publish(SecurityEvent::engine("info", "配置已保存（蜜罐/API 端口等重启后生效）"));
+        let msg = if req.is_empty() {
+            "配置已保存（改动全部热更生效，无需重启）".to_string()
+        } else {
+            format!("配置已保存；以下需重启生效：{}", req.join("、"))
+        };
+        self.bus.publish(SecurityEvent::engine("info", msg));
         Ok(())
     }
 }
@@ -637,6 +664,40 @@ pub fn spawn_capture_task(eng: &Arc<EngineHandle>) {
             format!("流量采样模式非法：{}（可用 control | full）", cfg.mode),
         ));
         return;
+    }
+    // 驱动完整性校验（0.4.0 A3，仅 Windows）：配置了期望哈希且驱动文件存在时启用——
+    // 供应链防护，只认官方渠道获取的驱动；哈希不符降级并留事件，绝不静默继续。
+    #[cfg(windows)]
+    if !cfg.driver_sha256.is_empty()
+        && let Some(sys_path) = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("WinDivert64.sys")))
+        && sys_path.exists()
+    {
+        use sha2::Digest as _;
+        let checked = std::fs::read(&sys_path).map(|bytes| {
+            let digest = sha2::Sha256::digest(&bytes);
+            digest.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        });
+        match checked {
+            Ok(hex) if hex.eq_ignore_ascii_case(cfg.driver_sha256.trim()) => {}
+            Ok(hex) => {
+                let msg = "WinDivert64.sys SHA-256 与配置不符（driver_sha256），捕获已降级；请从官方渠道重新获取驱动";
+                tracing::error!("驱动校验失败: 期望 {} 实际 {hex}", cfg.driver_sha256.trim());
+                eng.capture.set_error(msg);
+                eng.bus
+                    .publish(SecurityEvent::engine("error", format!("流量采样不可用：{msg}")));
+                return;
+            }
+            Err(e) => {
+                eng.capture.set_error("WinDivert64.sys 读取失败，捕获已降级");
+                eng.bus.publish(SecurityEvent::engine(
+                    "error",
+                    format!("流量采样不可用：驱动读取失败: {e}"),
+                ));
+                return;
+            }
+        }
     }
     let eng = Arc::clone(eng);
     let eng_thread = Arc::clone(&eng);

@@ -60,7 +60,7 @@ impl Default for GeneralConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ApiConfig {
     pub enabled: bool,
@@ -114,7 +114,7 @@ impl Default for HoneypotConfig {
 }
 
 /// kind 取值：ssh | http | telnet | generic
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ListenerConfig {
     pub name: String,
@@ -215,6 +215,10 @@ pub struct CaptureConfig {
     pub mode: String,
     /// 端口扫描判定：window_secs 内对 ≥ scan_distinct_ports 个不同目标端口发 SYN
     pub scan_distinct_ports: u32,
+    /// 驱动完整性校验（Windows，0.4.0 A3）：期望的 WinDivert64.sys SHA-256（hex，小写）。
+    /// 空 = 不校验（默认）；非空且驱动文件存在但哈希不符 → 捕获降级并留事件
+    /// （供应链防护：只认官方渠道获取的驱动）。Linux 无驱动文件，忽略。
+    pub driver_sha256: String,
     /// SYN flood 判定：同一 (来源, 目标 IP:端口) window_secs 内 ≥ syn_flood_rate 个 SYN
     pub syn_flood_rate: u32,
     pub window_secs: i64,
@@ -230,6 +234,7 @@ impl Default for CaptureConfig {
             enabled: false,
             mode: "control".into(),
             scan_distinct_ports: 15,
+            driver_sha256: String::new(),
             syn_flood_rate: 100,
             window_secs: 60,
             flow_idle_secs: 120,
@@ -247,7 +252,7 @@ impl CaptureConfig {
 /// XDP 快速执行层（0.3.7，仅 Linux；设计见 docs/NGFW_EVOLUTION.md）。
 /// nftables 永远兜底，XDP 只镜像「入站 + Any 协议 + 无端口 + IPv4」的封禁规则，
 /// 内核收包路径直接丢弃（微秒级生效）。附加失败自动降级为纯 nftables。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct XdpConfig {
     /// 默认关闭：需要 root/CAP_BPF，且是对本机数据面的行为，用户显式开启
@@ -505,6 +510,50 @@ impl AppConfig {
     pub fn db_path(&self) -> PathBuf {
         self.data_dir().join("aisafeguard.db")
     }
+
+    /// 热更/重启分界（0.4.0 A4/A5 契约）：比对保存前后配置，
+    /// 返回**必须重启引擎才能生效**的项名列表。空 = 全部热更生效。
+    ///
+    /// 契约（与实现同源，改任何一边先改这里）：
+    /// - **热更**（任务每轮/每事件读最新配置，无需重启）：[detect] 全部阈值与开关、
+    ///   [detect.capture].driver_sha256、[xdp].enabled（未附加时下次装配生效；已附加
+    ///   状态读 composite）、[syslog] / [notify] / [exposure] 全部、[ai] 全部、
+    ///   [intel]、[fed] 运行期参数（interval_secs）
+    /// - **需重启**：蜜罐监听列表与开关（端口绑定）、API 端口/开关、
+    ///   捕获开关与模式（后端过滤语义固定于附加时）、XDP 网卡与模式、
+    ///   fed 角色与证书材料、[general].data_dir
+    pub fn restart_required(old: &AppConfig, new: &AppConfig) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if old.honeypot.enabled != new.honeypot.enabled || old.honeypot.listeners != new.honeypot.listeners
+        {
+            out.push("蜜罐监听");
+        }
+        if old.api != new.api {
+            out.push("API 服务");
+        }
+        if old.detect.capture.enabled != new.detect.capture.enabled
+            || old.detect.capture.mode != new.detect.capture.mode
+        {
+            out.push("流量采样捕获");
+        }
+        if old.xdp != new.xdp {
+            out.push("XDP 快速执行层");
+        }
+        if old.fed.enabled != new.fed.enabled
+            || old.fed.role != new.fed.role
+            || old.fed.node != new.fed.node
+            || old.fed.listen_addr != new.fed.listen_addr
+            || old.fed.ca_path != new.fed.ca_path
+            || old.fed.cert_path != new.fed.cert_path
+            || old.fed.key_path != new.fed.key_path
+        {
+            out.push("组织协同");
+        }
+        if old.general.data_dir != new.general.data_dir {
+            out.push("数据目录");
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -537,5 +586,68 @@ mod tests {
         // 明文 key 的搬移在 AppConfig::load 的 pre-pass 里完成，不靠结构体兼容
         let raw = "[ai]\napi_key = \"\"\n";
         assert!(toml::from_str::<AppConfig>(raw).is_err());
+    }
+
+    /// 热更/重启分界契约（0.4.0 A4/A5）：各需重启项的判定分支。
+    #[test]
+    fn restart_required_contract() {
+        let base = AppConfig::default();
+        // 无变化 → 空
+        assert!(AppConfig::restart_required(&base, &base).is_empty());
+
+        // 蜜罐：监听列表或开关变化
+        let mut honeypot = base.clone();
+        honeypot.honeypot.enabled = !honeypot.honeypot.enabled;
+        assert_eq!(AppConfig::restart_required(&base, &honeypot), ["蜜罐监听"]);
+        let mut listener = base.clone();
+        listener.honeypot.listeners[0].port = 1234;
+        assert_eq!(AppConfig::restart_required(&base, &listener), ["蜜罐监听"]);
+
+        // API 端口
+        let mut api = base.clone();
+        api.api.port = 7999;
+        assert_eq!(AppConfig::restart_required(&base, &api), ["API 服务"]);
+
+        // 捕获开关/模式
+        let mut capture = base.clone();
+        capture.detect.capture.mode = "full".into();
+        assert_eq!(AppConfig::restart_required(&base, &capture), ["流量采样捕获"]);
+
+        // XDP
+        let mut xdp = base.clone();
+        xdp.xdp.enabled = true;
+        assert_eq!(AppConfig::restart_required(&base, &xdp), ["XDP 快速执行层"]);
+
+        // fed 运行期参数（interval_secs）不算需重启
+        let mut fed_interval = base.clone();
+        fed_interval.fed.interval_secs = 99;
+        assert!(AppConfig::restart_required(&base, &fed_interval).is_empty());
+        // fed 角色变化算
+        let mut fed = base.clone();
+        fed.fed.role = "coordinator".into();
+        assert_eq!(AppConfig::restart_required(&base, &fed), ["组织协同"]);
+
+        // 热更项不计入：detect 阈值 / syslog / notify / exposure / ai / intel
+        let mut hot = base.clone();
+        hot.detect.scan_distinct_ports = 9;
+        hot.detect.ttl_secs = 99;
+        hot.syslog.enabled = true;
+        hot.notify.min_severity = "info".into();
+        hot.exposure.auto_scan_secs = 300;
+        hot.ai.auto_apply = true;
+        hot.ai.analyze_interval_secs = 60;
+        hot.intel.interval_secs = 3600;
+        assert!(
+            AppConfig::restart_required(&base, &hot).is_empty(),
+            "热更项不应被标为需重启：{:?}",
+            AppConfig::restart_required(&base, &hot)
+        );
+
+        // 多项同时变化 → 全部列出
+        let mut multi = base.clone();
+        multi.api.port = 7999;
+        multi.xdp.enabled = true;
+        let req = AppConfig::restart_required(&base, &multi);
+        assert_eq!(req, ["API 服务", "XDP 快速执行层"]);
     }
 }
