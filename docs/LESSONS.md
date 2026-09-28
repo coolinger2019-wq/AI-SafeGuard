@@ -69,3 +69,11 @@
 - **WinDivert 的 SNIFF 标志语义要读驱动源码确认：它是"不吸收、只给副本"，不是"发送时不改校验和"**。初版按"recv→注回"写，读 vendored 驱动源码才发现 SNIFF 模式下驱动不设 BLOCK/ABSORB（`windivert.c` 网络层 classify 末尾 `if (!sniff_mode)`），匹配包**同时**走协议栈与用户态句柄——再 `send()` 就是重复注入（SYN 发两遍、full 模式全量重复）。正确姿势：嗅探模式只收不发，天然"捕获线程死了也不影响网络"，比注回模式少一类故障面。教训：第三方 C 库的标志语义别按记忆写，`vendor/` 里有源码就直接读。
 - **单机 E2E 够不着的分支要用可注入依赖补测试**：本机所有流量源必是回环/私网（内网保护会拦下封禁分支），真实自动封禁无法在单机触发。把封禁出口抽成 `apply_block(fw, store, bus, …)` + `DetectionSink`，用 mock 防火墙断言"公网 IP 封禁+TTL 记账 / 内网零封禁 / 开关关闭 / 空规则拒绝"，再用真实 Windows 防火墙跑一遍 API 加删规则验证后端本身。
 - WinDivert 的过滤表达式大小写不敏感（`tcp.Syn == 1 and tcp.Ack == 0`）；纯 SYN 判定要在过滤器里排掉 SYN-ACK（`Ack == 0`），否则回包方向也会被当成扫描样本。
+
+## 0.3 第三批 · Linux AF_PACKET 捕获（2026-09-28）
+
+- **全 crate 交叉类型检查被 ring 卡死时，用"只含目标平台依赖的临时 crate"检查平台代码**：detect crate 因 reqwest→ring（需 Linux C 工具链）无法在 Windows 交叉 check，但新写的平台代码路径可以抽出来放进 `target/` 下的临时 crate（桩掉 `CapturedFrame`/`now_ts`，带上 rustix/etherparse），`cargo check --target x86_64-unknown-linux-gnu` 秒级完成——这一步抓到了 `Errno::ACCES` 拼错（rustix 1.1 里叫 `ACCESS`，`ACCES` 只是 doc alias）。临时 crate 不进仓库，用完即删。
+- **rustix 1.1.5 的 `net` 特性单独启用在 Linux 上编译不过**：linux_raw 后端的 `net/sockopt.rs` 引用 `crate::timespec`，而 `mod timespec` 的 cfg 门控需要 fs/event/process/runtime/thread/time 之一——net 不在名单里。解法：同时启用 `time`（`features = ["net", "time"]`）。这是上游特性声明漏洞，升级 rustix 后可试着去掉 time。
+- **rustix 的 Errno 变体名去掉 E 前缀但不是机械截断**：`EACCES → ACCESS`（不是 `ACCES`）。写 match 前先 grep 源码确认（`src/backend/linux_raw/io/errno.rs`），doc alias 里的老名字不能用于匹配。
+- **AF_PACKET 的语义对齐点**：①它给的是 L2 以太网帧（WinDivert NetworkLayer 给 L3），必须剥离后才能进同一管线——剥头偏移只有 14（以太网）/18（单层 802.1Q），做成纯函数全平台可测；②它没有内核过滤表达式，WinDivert 在内核做的事（control 只放纯 SYN、full 放 TCP）要在捕获线程用用户态预过滤补上，否则 flow 表语义漂移 + 高流量主机会把 4096 容量的帧通道灌满；③默认不开混杂模式，只收本机相关帧——正好符合隐私红线，别去加 PACKET_ADD_MEMBERSHIP。
+- **文案是行为的一部分**：GUI 设置页 0.3.1 留了一句"采样为被动观测（包原样注回）"——SNIFF 模式恰恰**不注回**（LESSONS 上一批刚记录），代码改对了但说明文字没跟着改。改行为时全仓库搜一遍旧描述（"注回"），说明文字与行为漂移比代码 bug 更误导。

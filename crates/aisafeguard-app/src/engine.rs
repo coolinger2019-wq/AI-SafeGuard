@@ -466,8 +466,9 @@ pub fn spawn_detect_task(eng: &Arc<EngineHandle>) {
     });
 }
 
-/// 采样捕获任务（检测平台 MVP）：专用线程跑「WinDivert 注回+分发 → 解析 → 流表/检测器」，
-/// 判定走 handle_detection 与蜜罐快路径同一出口。
+/// 采样捕获任务（检测平台 MVP）：专用线程跑「平台捕获（Windows=WinDivert /
+/// Linux=AF_PACKET）分发 → 解析 → 流表/检测器」，判定走 handle_detection
+/// 与蜜罐快路径同一出口。
 /// 捕获不可用（缺驱动/无提权/被杀软拦截）只降级不退出：状态写进 CaptureState + 事件留痕。
 pub fn spawn_capture_task(eng: &Arc<EngineHandle>) {
     let cfg = eng.config().detect.capture;
@@ -491,7 +492,7 @@ pub fn spawn_capture_task(eng: &Arc<EngineHandle>) {
         .name("capture-pipeline".into())
         .spawn(move || {
             let eng = eng_thread;
-            let rx = match aisafeguard_detect::capture::spawn_windivert(&cfg.mode) {
+            let rx = match aisafeguard_detect::capture::spawn(&cfg.mode) {
                 Ok(rx) => rx,
                 Err(e) => {
                     eng.capture.set_error(&e);

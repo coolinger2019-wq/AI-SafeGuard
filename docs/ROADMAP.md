@@ -42,7 +42,7 @@
 > 按"传感器/执行器分离 + 快/慢双路径"演进：防火墙 trait 只做执行器，检测能力全部落在新 crate `aisafeguard-detect`，经事件总线接入。
 
 - [x] **检测平台 MVP（Windows，0.3 第二批）**：`aisafeguard-detect` 新增 capture / reasm / flow / inspect 分层——WinDivert 被动采样捕获（静态编入；SNIFF 嗅探：内核照常转发、句柄只取副本；缺驱动/无提权优雅降级）、TCP 流重组（乱序/重传/环绕，含结构化模糊测试）、流统计表（元数据与计数，红线不存载荷）、内置端口扫描 / SYN flood 检测器；实机验证指南 docs/WINDOWS-CAPTURE-TESTING.md（WinDivert64.sys 需从官方渠道获取后置于程序目录）
-- [ ] **检测平台（Linux）**：nflog/afpacket 采样捕获（`CaptureSource` trait 已预留平台扩展位，Linux 后端与实机验证待补）
+- [x] **检测平台（Linux，0.3 第三批）**：AF_PACKET 采样捕获（`capture::spawn` 平台分发，ETH_P_ALL 不 bind 观测所有接口、不开混杂模式；无 CAP_NET_RAW 优雅降级；L2 剥离 + 模式预过滤与 Windows 内核过滤器同语义）。L2→L3 剥离与过滤逻辑为纯函数，全平台单测 + 模糊测试；Linux 目标交叉类型检查已过，**实机 E2E 清单见 docs/LINUX-TESTING.md §12（待 Linux 环境）**。nflog 方案弃用：无 iptables 集成需求，AF_PACKET 更简单直接
 - [x] **快路径引擎扩展**：端口扫描 / SYN flood / 暴破速率内置检测器（暴破延续 0.2 频次引擎；扫描与 SYN flood 由采样捕获驱动），全部带 TTL 自动解封与内网保护，触发器映射表有容量上限防伪造源耗尽
 - [x] **威胁情报管道 v1** [A.5.23]：Feodo C2 源（`feed_url` 可换自托管/镜像源）+ 本地蜜罐源；高置信度自动封禁（TTL 3 天+内网保护），本地/fed 源仅标注进 AI 上下文；`GET /api/intel`、`POST /api/intel/refresh`；6h 定时拉取，源不可达优雅跳过
 - [ ] **数据面（Windows）**：WFP callout 驱动或 WinDivert；ebpf-for-windows 成熟后试点评估（Aya 用户态加载器绑定 Linux bpf() 系统调用，不能直接用于 Windows）

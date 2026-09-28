@@ -105,7 +105,7 @@
 | 阶段 | 内容 | 验收标准 |
 |---|---|---|
 | 0.2（随 P1） | `SecurityEvent::Detection` 变体占位；频次引擎 v1（端口扫描/暴破速率）；nftables 后端带 `ct` 模板 | 单测：扫描器连 5 端口 → Detection 事件 + 自动封禁 + TTL 解封 |
-| 0.3 | `aisafeguard-detect` MVP：WinDivert/nflog 采样捕获 + TCP 重组 + 端口扫描/SYN flood/暴破检测器；情报管道 v1（Feodo + 本地蜜罐源）；TTL 自动解封<br>**状态（0.3.1）**：Windows 侧已完成（capture/flow/reasm/inspect 分层 + WinDivert 静态集成 + 降级路径，实机核对见 docs/WINDOWS-CAPTURE-TESTING.md）；Linux 采样捕获未做 | E2E：nmap 扫描 → 秒级自动封 → TTL 后恢复；Feodo 列表 IP 连接 → 命中事件 + 自动封 |
+| 0.3 | `aisafeguard-detect` MVP：WinDivert/nflog 采样捕获 + TCP 重组 + 端口扫描/SYN flood/暴破检测器；情报管道 v1（Feodo + 本地蜜罐源）；TTL 自动解封<br>**状态（0.3.3）**：Windows 侧（capture/flow/reasm/inspect 分层 + WinDivert 静态集成 + 降级路径，实机核对见 docs/WINDOWS-CAPTURE-TESTING.md）与 Linux 侧（AF_PACKET 采样捕获，交叉类型检查已过、实机 E2E 清单见 docs/LINUX-TESTING.md §12）均已完成；nflog 方案弃用（无 iptables 集成需求） | E2E：nmap 扫描 → 秒级自动封 → TTL 后恢复；Feodo 列表 IP 连接 → 命中事件 + 自动封 |
 | 0.4 | L7 指纹（JA3/JA4 + HTTP 解析复用）；Suricata 规则子集引擎；eBPF 流表；情报 → XDP map 联动；AI 输入接入流统计 | E2E：特定 TLS 指纹命中规则 → 处置留痕；AI 报告引用流统计与情报标注 |
 | 远期 | AF_XDP 全流量深检、文件/载荷还原、ML 异常评分、WFP callout（驱动签名成本可接受时） | — |
 
@@ -115,7 +115,7 @@
 - **事件**：`SecurityEvent::Detection { ts, kind: scan|flood|bruteforce|signature|intel_hit, src_ip, confidence, evidence: String(截断), rule_id: Option<String> }`（0.3.1 起 rule_id 标识内置规则，如 builtin.tcp_scan / builtin.syn_flood）
 - **store**：新表 `intel`（source, kind, value, confidence, first_seen, expires_ts）；`rules` 表加 `expires_ts` 列；流统计**不落盘**（内存流表 + 空闲回收，只随 Detection 证据留痕）
 - **config**：`[detect]`（频次引擎开关与阈值）、`[detect.capture]`（0.3.1：enabled/mode/扫描与 flood 阈值/窗口/流表容量）与 `[intel]`（feed_url、拉取间隔、自动下发开关）
-- **新 trait**：`CaptureSource`（win: WinDivert【0.3.1 已实现】 / linux: nflog|AF_XDP【待补】）与流表（做在 detect crate 内的用户态实现，容量上限 + 超时回收）；`Firewall` 与 `EventBus` 不动
+- **新 trait**：`CaptureSource`（win: WinDivert【0.3.1 已实现】 / linux: AF_PACKET【0.3.3 已实现；nflog 弃用——无 iptables 集成需求】）与流表（做在 detect crate 内的用户态实现，容量上限 + 超时回收）；实现落为 `capture::spawn` 平台分发函数而非 trait（当前每平台只有一个后端，AGENTS：不做预防性抽象）；`Firewall` 与 `EventBus` 不动
 
 ## 6. 内网组织协同（分布式威胁共享）
 

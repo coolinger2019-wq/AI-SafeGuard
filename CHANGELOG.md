@@ -2,6 +2,39 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.3.3] - 2026-09-28
+
+按 ROADMAP 0.3 推进第三批：检测平台补齐 Linux 侧——AF_PACKET 采样捕获后端，
+Windows/Linux 帧语义全平台对齐。
+
+### 新增
+
+- **Linux 采样捕获（AF_PACKET）**：`aisafeguard-detect::capture` 平台分发重构为
+  `spawn(mode)` 单入口（Windows=WinDivert / Linux=AF_PACKET / 其余平台明确报暂无）——
+  AF_PACKET 原始套接字（ETH_P_ALL、不 bind = 观测所有接口；**不开混杂模式**，
+  只看与本机相关的流量，隐私红线 §3）；无 CAP_NET_RAW 时映射为可读错误并优雅降级
+  （root / systemd 服务天然具备权限，`service install-systemd` 以 root 运行直接可用）
+- **帧语义全平台对齐**：Linux 捕获线程内完成 L2→L3 剥离（`l3_payload` 纯函数，
+  IPv4/IPv6 直通 + 单层 VLAN 解包）与模式预过滤（`passes_mode_filter`：control 只放
+  TCP 纯 SYN、full 放全部 TCP 段——与 WinDivert 内核过滤器同语义），管线与流表
+  在两个平台看到完全相同的输入
+- 纯函数单测（全平台可跑）+ 5 万轮模糊测试（不变量：`l3_payload` 产出恒为输入的
+  偏移 14/18 后缀切片、过滤器对任意输入不 panic）
+- Linux 目标交叉类型检查通过（rustix 依赖面 + 捕获代码路径，方法见 docs/LESSONS.md）
+
+### 变更
+
+- engine 捕获任务改调 `capture::spawn`；GUI 设置页采集说明改为平台无关措辞，
+  并修正 0.3.1 遗留的错误描述（SNIFF 模式是"仅取副本"而非"包原样注回"）
+- 新依赖：`rustix 1.1`（仅 Linux 目标，`net`+`time` 特性；已在依赖树内，安全 API）
+
+### 已知限制
+
+- Linux 实机 E2E 未执行（本开发环境 WSL/Docker 均不可用）：清单已备好
+  docs/LINUX-TESTING.md §12，待环境后执行
+- rustix 1.1.5 的 `net` 特性单独启用时 linux_raw 后端缺 `timespec`（sockopt 引用），
+  需同时启用 `time`——已在 workspace 依赖注释中说明
+
 ## [0.3.2] - 2026-09-28
 
 界面外观批次：多套配色方案 + 全局字号缩放（按 ui.md 规范落地），并补齐版权信息。

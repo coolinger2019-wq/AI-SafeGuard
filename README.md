@@ -2,13 +2,13 @@
 
 用 Rust 编写的模块化终端安全软件。**蜜罐诱捕 → 事件流水线 → 快路径频次检测 / AI 慢路径分析 → 防火墙处置** 的端到端闭环，带本地图形界面。
 
-> 当前版本 **0.3.1**（检测平台 MVP：真实流量采样捕获 + 流重组 + 内置检测器）。设计文档见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，路线图见 [docs/ROADMAP.md](docs/ROADMAP.md)，ISO 27001 对照见 [docs/COMPLIANCE.md](docs/COMPLIANCE.md)，NGFW/分布式演进见 [docs/NGFW_EVOLUTION.md](docs/NGFW_EVOLUTION.md)。
+> 当前版本 **0.3.3**（检测平台 MVP：真实流量采样捕获 + 流重组 + 内置检测器，Windows + Linux）。设计文档见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，路线图见 [docs/ROADMAP.md](docs/ROADMAP.md)，ISO 27001 对照见 [docs/COMPLIANCE.md](docs/COMPLIANCE.md)，NGFW/分布式演进见 [docs/NGFW_EVOLUTION.md](docs/NGFW_EVOLUTION.md)。
 
 ## 当前功能
 
 - **蜜罐**：SSH / HTTP / Telnet / 通用 四种低交互 TCP 监听器，记录来源与首包，假响应逼真，自身有并发/超时/截断三重防护
 - **快路径检测**：频次引擎自动判定端口扫描 / 暴力探测，触发即产出 Detection 事件；自动封禁带 TTL 到期自动解封，内网/回环地址永不自动封禁
-- **流量采样捕获**（Windows，默认关闭）：WinDivert 嗅探模式被动观测真实流量（内核照常转发、句柄只取副本，不吸收不注回），内置端口扫描 / SYN flood 检测器走同一自动封禁出口；control 模式只看 SYN 元数据，full 模式带 TCP 流重组取证；缺驱动/无提权只降级不报错（[实机验证清单](docs/WINDOWS-CAPTURE-TESTING.md)）
+- **流量采样捕获**（Windows + Linux，默认关闭）：被动观测真实流量（Windows = WinDivert 嗅探模式，Linux = AF_PACKET；均只取副本、不吸收不注回，AF_PACKET 不开混杂模式），内置端口扫描 / SYN flood 检测器走同一自动封禁出口；control 模式只看 SYN 元数据，full 模式带 TCP 流重组取证；缺驱动/无提权只降级不报错（[Windows 实机验证清单](docs/WINDOWS-CAPTURE-TESTING.md)）
 - **防火墙**：Windows = COM API 管理 `aisafeguard-blk-*` 规则；Linux = nftables（`inet aisafeguard` 表 + 集合元素，启动自动重灌）。两端都只管理自己创建的内容
 - **主机暴露面盘点**：枚举监听端口与归属进程，AI 评估对外暴露风险（"自动分析功能接口"第一步）
 - **AI 助手**（慢路径）：OpenAI 兼容端点（默认智谱 GLM，内网可指向本地推理），把 24h 攻击统计、暴露面快照喂给 LLM，产出**严格校验**的封禁建议；默认人工确认，可选自动应用（带严重度阈值）
@@ -68,7 +68,7 @@ bruteforce_hits = 10        # 同一蜜罐 60 秒内命中 ≥10 次 = 暴力探
 ttl_secs = 1800             # 自动封禁 30 分钟后自动解封
 
 [detect.capture]
-enabled = false             # 真实流量采样捕获（WinDivert，需管理员/服务模式，重启生效）
+enabled = false             # 真实流量采样捕获（Windows 需管理员/服务模式；Linux 需 CAP_NET_RAW；重启生效）
 mode = "control"            # control = 仅 TCP SYN 元数据；full = 全 TCP 段 + 流重组取证
 scan_distinct_ports = 15    # 窗口内对不同目标端口发 SYN 的判定阈值
 syn_flood_rate = 100        # 同一 (来源, 目标:端口) 窗口内 SYN 数判定阈值
@@ -134,7 +134,7 @@ docs/               架构 / 路线图 / 合规对照 / NGFW 演进 / Windows �
 
 ## 已知限制（0.3.2）
 
-蜜罐、API 与采样捕获的配置改动需重启；服务模式与内嵌模式并存，服务 token 文件依赖 ProgramData 默认 ACL（后续收紧为命名管道）；流量采样捕获目前仅 Windows（Linux nflog 后端计划中，CaptureSource trait 已预留），WinDivert64.sys 需自行从官方渠道获取放入程序目录；Linux 无凭据管理器后端（Key 请用环境变量）；防火墙封禁规则为 IP 粒度，L7/应用层识别在路线图 0.4。详见架构文档。
+蜜罐、API 与采样捕获的配置改动需重启；服务模式与内嵌模式并存，服务 token 文件依赖 ProgramData 默认 ACL（后续收紧为命名管道）；采样捕获 Windows 用 WinDivert（WinDivert64.sys 需自行从官方渠道获取放入程序目录）、Linux 用 AF_PACKET（需 CAP_NET_RAW，实机验证清单 docs/LINUX-TESTING.md §12）；Linux 无凭据管理器后端（Key 请用环境变量）；防火墙封禁规则为 IP 粒度，L7/应用层识别在路线图 0.4。详见架构文档。
 
 ---
 

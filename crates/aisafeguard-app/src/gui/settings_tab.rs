@@ -184,7 +184,7 @@ impl AisafeApp {
                 ui.label("启用采样捕获");
                 ui.checkbox(
                     &mut draft.detect.capture.enabled,
-                    "（WinDivert 被动观测，需管理员/服务模式；默认关闭）",
+                    "（被动观测，仅取副本；Windows 需管理员/服务模式，Linux 需 CAP_NET_RAW；默认关闭）",
                 );
                 ui.end_row();
                 ui.label("采集模式");
@@ -222,7 +222,8 @@ impl AisafeApp {
         ui.label(
             RichText::new(
                 "阈值（扫描端口数 / SYN flood 速率 / 窗口 / 流表）在 config.toml [detect.capture] 调整；\
-                 采样为被动观测（包原样注回），模式与开关重启后生效。full 模式仅在判定可疑时截断留存载荷摘要。",
+                 采样为被动观测（仅取副本，不注回、不拦截任何包），模式与开关重启后生效。\
+                 full 模式仅在判定可疑时截断留存载荷摘要。",
             )
             .size(11.0)
             .color(text_dim()),

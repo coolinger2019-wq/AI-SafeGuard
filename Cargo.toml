@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 license = "MIT"
 authors = ["coolinger (vibe coding)"]
@@ -38,6 +38,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 keyring = { version = "3", default-features = false, features = ["windows-native"] }
 sha2 = "0.10"
 etherparse = "0.18"
+# Linux 采样捕获（AF_PACKET 原始套接字，安全 API，仅 Linux 目标编译）。
+# time 特性：rustix 1.1.5 的 net 单独启用时 linux_raw 后端缺 timespec（sockopt 需要）
+rustix = { version = "1.1", features = ["net", "time"] }
 axum = "0.8"
 eframe = "0.36"
 egui = "0.36"

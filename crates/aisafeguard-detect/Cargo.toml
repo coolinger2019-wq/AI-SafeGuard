@@ -18,5 +18,9 @@ tracing.workspace = true
 [target.'cfg(windows)'.dependencies]
 windivert = { version = "0.7.0-beta.4", default-features = false, features = ["static"] }
 
+# Linux 采样捕获：AF_PACKET 原始套接字（安全 API；需要 CAP_NET_RAW，无权限时优雅降级）
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix.workspace = true
+
 [lints]
 workspace = true

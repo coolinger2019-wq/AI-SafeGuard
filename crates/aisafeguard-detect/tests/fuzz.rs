@@ -4,6 +4,7 @@
 //! 输出判定数有界（每次 observe 最多 2 条：scan + bruteforce）。
 
 use aisafeguard_core::config::DetectConfig;
+use aisafeguard_detect::capture::{l3_payload, passes_mode_filter};
 use aisafeguard_detect::FreqEngine;
 use aisafeguard_detect::reasm::StreamReassembler;
 use std::net::IpAddr;
@@ -103,5 +104,39 @@ fn fuzz_reasm_stream_is_ordered_prefix() {
             }
         );
         assert!(stream.len() <= 4096, "round {round}: 产出不得超过上限");
+    }
+}
+
+/// L2 剥离不变量：任意字节序列（合法帧/畸形帧/截断帧），l3_payload 不 panic，
+/// 且产出必须是输入的后缀切片（偏移只可能是 14/18——以太网头与单层 VLAN 头）。
+#[test]
+fn fuzz_l3_payload_returns_suffix_of_input() {
+    let mut state = 0x1_2F00_D000_0002u64;
+    for round in 0..50_000u64 {
+        // 随机长度（含超短帧）+ 偏向合法帧头的字节分布
+        let len = (xorshift(&mut state) % 80) as usize;
+        let mut frame: Vec<u8> = (0..len).map(|_| (xorshift(&mut state) % 256) as u8).collect();
+        if len >= 14 && xorshift(&mut state).is_multiple_of(2) {
+            // 一半概率放进合法 ethertype，覆盖直通/丢弃两条路径
+            let et = match xorshift(&mut state) % 3 {
+                0 => 0x0800u16,
+                1 => 0x86DD,
+                _ => 0x8100,
+            };
+            frame[12..14].copy_from_slice(&et.to_be_bytes());
+            if et == 0x8100 && len >= 18 {
+                frame[16..18].copy_from_slice(&[0x08, 0x00]);
+            }
+        }
+        if let Some(ip) = l3_payload(&frame) {
+            let off = frame.len() - ip.len();
+            assert!(
+                (off == 14 || off == 18) && frame.ends_with(ip),
+                "round {round}: 产出必须是偏移 14/18 的后缀切片，得到偏移 {off}"
+            );
+            // 过滤器对同一输入不 panic（control / full 两种模式）
+            let _ = passes_mode_filter(ip, false);
+            let _ = passes_mode_filter(ip, true);
+        }
     }
 }

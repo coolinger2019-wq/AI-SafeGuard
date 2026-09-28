@@ -242,3 +242,28 @@ rm -rf ~/.local/share/aisafeguard
 - [x] 清场后重启 → resync 自动重灌（4.4，最关键）
 - [x] 频次检测判定 + 内网保护跳过事件（阈值改 4 触发）
 - [x] verify-log ✓（36/36）/ export-events 含 hash
+
+## 12. 采样捕获实机验证（0.3.3 新增，**待 Linux 环境**）
+
+> 状态（2026-09-28）：代码已完成并全平台单测 + 模糊测试（L2 剥离 / 模式过滤为纯函数，
+> Windows CI 即可覆盖）；Linux 目标交叉类型检查已过。**以下实机项待 Linux 环境（WSL2/原生）执行**，
+> 执行前先把 0.3.1 Windows 侧同构验证（docs/WINDOWS-CAPTURE-TESTING.md）对照着看。
+
+```bash
+cargo test --workspace   # 期望含 capture 层新增用例（l3_payload / mode_filter / fuzz）全绿
+```
+
+- [ ] **降级路径**：非 root 启动 + `[detect.capture].enabled=true` → 引擎正常运行，
+  事件与 `/api/status` capture 状态输出"需要 CAP_NET_RAW 权限"，其余功能不受影响
+- [ ] **启动路径**：`sudo`（root 具备 CAP_NET_RAW）启动 → `/api/status` 返回
+  `"capture": {"active": true, "backend": "afpacket", "mode": "..."}`
+- [ ] **检测链路（control 模式）**：连 3+ 个蜜罐端口
+  （`for p in 2222 8081 2323 1337 9999; do timeout 1 bash -c "echo > /dev/tcp/127.0.0.1/$p"; done`）
+  → `detection` 事件（`builtin.tcp_scan`，证据含"对 N 个不同目标端口发送 SYN（采样捕获）"）
+- [ ] **语义对齐抽查**：control 模式下正常业务连接（先 SYN 后数据）不产生载荷摘要证据
+  （捕获线程预过滤只放纯 SYN，与 WinDivert 内核过滤器同语义）
+- [ ] **full 模式**：改 `mode="full"` 重启 → 扫描触发时证据含"载荷摘要"段（截断 + 控制字符清洗）
+- [ ] **AF_PACKET 特有**：确认 AF_PACKET 套接字未开混杂模式
+  （`sudo tcpdump -d -i eth0` 或观察只收到本机相关帧；隐私红线）
+- [ ] **自动封禁出口**：扫描源若为非私网地址 → 自动封禁 + TTL 解封；私网/回环源 → 内网保护跳过留痕
+  （单机 WSL 只能覆盖"跳过"分支，封禁分支由 engine 集成测试的 mock 防火墙覆盖）
