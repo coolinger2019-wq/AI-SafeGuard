@@ -79,7 +79,7 @@
 
 ### 安装与运行
 
-- [ ] Windows 服务安装体验收口（开机自启；服务/交互模式凭据路径文档化）
+- [x] Windows 服务安装体验收口（0.4.0 A1：服务/交互模式凭据路径差异表已入 README；服务 E2E 于 0.2 实机完成）
 - [x] Linux systemd unit + 最小权限（0.4.0）：unit 白名单式授权 `AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW` + `CapabilityBoundingSet` + `NoNewPrivileges=yes`，注释写明降级路径（不开捕获/XDP 可整行删除）
 - [x] WinDivert 官方获取说明与可选文件哈希校验（0.4.0）：`[detect.capture].driver_sha256` 配置期望哈希（空=不校验），不符降级并留事件不静默；缺失驱动原有明确提示
 - [x] 配置热更新（第一批，0.4.0）：`[detect]` 阈值、`[syslog]`、`[notify]`、`[ai].enabled` / `auto_apply`、暴露面扫描间隔无需重启；**接线 `analyze_interval_secs` 定时分析任务**（此前只有配置无消费者，分析全靠手动）；热更/重启分界固化为 `AppConfig::restart_required` 契约 + 单测
@@ -87,26 +87,26 @@
 
 ### 封禁语义与误报
 
-- [ ] 规则模型扩展：`ip` → `ip + optional port + optional tag`；旧 IP 规则兼容
-- [ ] 轻量 L7 **标签**（非完整指纹）：HTTP method / path 前缀 / 可疑 UA 等进入事件与 AI 上下文（为 0.5 抽取解析器铺路）
-- [ ] 误报抑制时长可配置；API/GUI 可查可清；可选高严重度忽略抑制
-- [ ] 误报可选 port/protocol 粒度（默认仍按 IP，避免表膨胀）
-- [ ] 价值指标：近 24h/7d 建议数、采纳率（`applied/proposed`）、误报率（`fp/applied`）、自动封禁数（GUI + `/api/status`）
+- [x] 规则模型扩展：`ip` → `ip + optional port + optional tag`；旧 IP 规则兼容（0.4.0 B1：nftables 端口级拼接集合，修复端口被放大为封全端口）
+- [x] 轻量 L7 **标签**（非完整指纹）（0.4.0 B2：method/path 前缀/可疑 UA，蜜罐与捕获共用 core::l7）：HTTP method / path 前缀 / 可疑 UA 等进入事件与 AI 上下文（为 0.5 抽取解析器铺路）
+- [x] 误报抑制时长可配置；API/GUI 可查可清；可选高严重度忽略抑制（0.4.0 B3）
+- [x] 误报可选 port 粒度（0.4.0 B4；默认仍按 IP）
+- [x] 价值指标：近 24h/7d 建议数、采纳率、误报率、自动封禁数（GUI + `/api/status`，0.4.0 B5，口径写死+测试）
 
 ### 组织协同（安全补全，非完全体）
 
-- [ ] 证书吊销（先手动 CRL/吊销列表即可）；协调者拒绝已吊销客户端
-- [ ] 换证流程文档化；缓解 TOFU 抢注（预登记 `node+expected_fp` 或首登审批）
-- [ ] 可选 quorum 约束 **auto_block / auto_apply**（单节点自动降级为本地策略；与 0.6「情报升格 quorum」区分）
-- [ ] 协同审计导出（成员、同步建议、拒绝原因）；默认脱敏
-- [ ] fed 监听默认引导内网绑定；公网监听需显式确认（暴露面盘点已计入）
+- [x] 证书吊销（文件式 CRL，0.4.0 C1：fed revoke，连接级检查立即生效 + 审计事件）
+- [x] 换证流程文档化 + TOFU 缓解（0.4.0 C2：fed expect 预登记，README 组织协同运维节）
+- [x] 可选 quorum 约束 **auto_apply**（0.4.0 C3：[fed].min_peers，单节点/无上报自动降级本地策略）
+- [x] 协同审计导出（0.4.0 C4：fed audit 导出成员/吊销/近期协同事件；拒绝原因走事件总线）
+- [x] fed 监听引导内网绑定（0.4.0 C5：公网/全地址启动 warn 事件 + README 建议）
 
 ### 分发与叙事
 
-- [ ] GitHub mirror + tag 构建 Win/Linux 产物
-- [ ] README 重写：明确「主机入侵检测与处置」，开篇区分 LLM 内容审核/Guardrail 产品
-- [ ] 5 分钟演示脚本（支持无 AI、仅快路径模式）
-- [ ] 威胁模型一页纸（信任边界、fed 面、捕获隐私、非目标）
+- [x] GitHub 发布 CI（0.4.0 D1：workflow 就绪；mirror 推送待 GitHub 可达时执行）
+- [x] README 重写（0.4.0 D2：定位/数据流图/适合谁/已知限制中置/5 分钟上手）
+- [x] 5 分钟演示脚本（0.4.0 D3：scripts/demo-attack.sh，无 AI 仅快路径）
+- [x] 威胁模型一页纸（0.4.0 D4：docs/THREAT_MODEL.md）
 
 ### 0.4 明确 Won't
 

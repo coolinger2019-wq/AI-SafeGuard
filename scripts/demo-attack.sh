@@ -38,10 +38,11 @@ sleep 2
 
 echo "═══ 3) 防守视角：事件流水（detection + 自动封禁）═══"
 curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:7420/api/events?limit=6" \
-  | python3 -c '
+  | python3 -c "
 import json,sys
 for e in json.load(sys.stdin)[:6]:
-    print(f"  [{e[\"kind\"]}] {(e[\"summary\"] or \"\")[:90]}")'
+    k = e.get('kind'); s = (e.get('summary') or '')[:90]
+    print('  [' + k + '] ' + s)"
 
 echo "═══ 4) 封禁效果：nftables 集合（内网保护会跳过 127.0.0.1 的自动封禁——"
 echo "    换公网来源即真实封禁；此处展示判定链路）═══"
