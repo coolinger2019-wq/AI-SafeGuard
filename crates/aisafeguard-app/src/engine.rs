@@ -410,6 +410,21 @@ impl EngineHandle {
         Ok((dismissed, removed))
     }
 
+    /// 清除某来源的误报抑制（0.4.0 B3）：删除后该来源恢复自动封禁资格并留痕。
+    pub fn clear_false_positive(&self, value: &str) -> Result<usize> {
+        value
+            .parse::<IpAddr>()
+            .map_err(|e| Error::Config(format!("IP 非法: {e}")))?;
+        let removed = self.store.clear_fp_feedback(value)?;
+        if removed > 0 {
+            self.bus.publish(SecurityEvent::engine(
+                "info",
+                format!("误报抑制已清除：{value}（恢复自动封禁资格）"),
+            ));
+        }
+        Ok(removed)
+    }
+
     /// 触发一次 AI 分析（异步执行，状态通过事件与 ai_running 标志反馈）。
     /// 返回 false 表示已有分析在运行。
     pub fn trigger_analysis(self: &Arc<Self>) -> bool {
@@ -499,11 +514,9 @@ pub(crate) struct DetectionSink<'a> {
     pub fw: &'a dyn Firewall,
     pub store: &'a Store,
     pub bus: &'a EventBus,
+    /// 误报抑制期（秒，0.4.0 B3 可配置）——快路径自动封禁跳过抑制期来源
+    pub fp_suppress_secs: i64,
 }
-
-/// 误报反馈抑制期（秒，30 天）：用户标记过误报的来源，自动封禁/自动应用跳过。
-/// 人工手动封禁不受影响（管理员意志优先）。
-pub const FP_SUPPRESS_TTL_SECS: i64 = 2_592_000;
 
 /// 本产品自身 API 攻击面清单（<self_endpoints> 段静态部分）。
 /// 与 api.rs 的路由保持同步——加端点时这里也要加（AI 自检的输入完整性依赖它）。
@@ -514,6 +527,7 @@ const SELF_API_ENDPOINTS: &[&str] = &[
     "POST /api/rules/{id}/promote — 灰度规则转正",
     "GET /api/proposals；POST /api/proposals/{id}/apply|dismiss — AI 建议",
     "POST /api/feedback — 误报反馈",
+    "DELETE /api/feedback/{ip} — 清除误报抑制",
     "GET /api/stats、GET/POST /api/exposure[*/scan] — 统计与暴露面",
     "GET /api/intel、POST /api/intel/refresh — 威胁情报",
     "GET/POST /api/config — 配置读写",
@@ -573,7 +587,7 @@ fn handle_detection(
     // 误报反馈：用户已判定该来源为正常业务，自动封禁跳过（人工封禁不受影响）
     if sink
         .store
-        .active_fp(&src, now_ts(), FP_SUPPRESS_TTL_SECS)
+        .active_fp(&src, now_ts(), sink.fp_suppress_secs)
         .unwrap_or(false)
     {
         sink.bus.publish(SecurityEvent::engine(
@@ -632,7 +646,7 @@ pub fn spawn_detect_task(eng: &Arc<EngineHandle>) {
                     };
                     let cfg = eng.config().detect;
                     for d in eng.detect.observe(now_ts(), ip, &listener, port, &cfg) {
-                        handle_detection(&DetectionSink { fw: &*eng.firewall, store: &eng.store, bus: &eng.bus }, d.kind, ip, &d.evidence, None, &cfg);
+                        handle_detection(&DetectionSink { fw: &*eng.firewall, store: &eng.store, bus: &eng.bus, fp_suppress_secs: eng.config().ai.fp_suppress_secs as i64 }, d.kind, ip, &d.evidence, None, &cfg);
                     }
                 }
                 Ok(_) => {}
@@ -742,7 +756,7 @@ pub fn spawn_capture_task(eng: &Arc<EngineHandle>) {
                                 }
                             }
                             let dcfg = eng.config().detect;
-                            handle_detection(&DetectionSink { fw: &*eng.firewall, store: &eng.store, bus: &eng.bus }, d.kind, d.src, &evidence, Some(d.rule_id), &dcfg);
+                            handle_detection(&DetectionSink { fw: &*eng.firewall, store: &eng.store, bus: &eng.bus, fp_suppress_secs: eng.config().ai.fp_suppress_secs as i64 }, d.kind, d.src, &evidence, Some(d.rule_id), &dcfg);
                         }
                     }
                     Err(RecvTimeoutError::Timeout) => {
@@ -914,7 +928,7 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
     // 误报反馈：抑制期内的来源一并送评（用户已判定正常的不再建议封禁）
     let feedback_json = eng
         .store
-        .list_active_feedback(now_ts(), FP_SUPPRESS_TTL_SECS, 20)
+        .list_active_feedback(now_ts(), cfg.ai.fp_suppress_secs as i64, 20)
         .ok()
         .filter(|v| !v.is_empty())
         .map(|v| serde_json::to_string(&v).unwrap_or_default());
@@ -972,17 +986,21 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                     created += 1;
                     let severity_ok = aisafeguard_ai::severity_rank(&p.severity)
                         >= aisafeguard_ai::severity_rank(&cfg.ai.auto_apply_min_severity);
-                    // 自动应用同样尊重误报反馈（人工确认的应用不受影响）
+                    // 自动应用尊重误报反馈（人工确认的应用不受影响）；
+                    // fp_ignore_min_severity 配置后，达到该档及以上的建议忽略抑制
+                    let ignore_fp = !cfg.ai.fp_ignore_min_severity.is_empty()
+                        && aisafeguard_ai::severity_rank(&p.severity)
+                            >= aisafeguard_ai::severity_rank(&cfg.ai.fp_ignore_min_severity);
                     let fp_suppressed = p
                         .remote_ip
                         .parse::<IpAddr>()
                         .map(|ip| {
                             eng.store
-                                .active_fp(&ip.to_string(), now_ts(), FP_SUPPRESS_TTL_SECS)
+                                .active_fp(&ip.to_string(), now_ts(), cfg.ai.fp_suppress_secs as i64)
                                 .unwrap_or(false)
                         })
                         .unwrap_or(false);
-                    if cfg.ai.auto_apply && severity_ok && !fp_suppressed && eng.apply_proposal(pid).is_ok() {
+                    if cfg.ai.auto_apply && severity_ok && (ignore_fp || !fp_suppressed) && eng.apply_proposal(pid).is_ok() {
                         auto_applied += 1;
                     }
                 }
@@ -1082,6 +1100,21 @@ impl Console for EmbeddedConsole {
 
     fn promote_rule(&self, id: i64) -> anyhow::Result<RuleRow> {
         self.0.promote_rule(id).map_err(anyhow::Error::msg)
+    }
+
+    fn clear_false_positive(&self, ip: &str) -> anyhow::Result<usize> {
+        self.0.clear_false_positive(ip).map_err(anyhow::Error::msg)
+    }
+
+    fn list_feedback(&self) -> anyhow::Result<Vec<aisafeguard_store::FpRow>> {
+        self.0
+            .store
+            .list_active_feedback(
+                aisafeguard_core::now_ts(),
+                self.0.config().ai.fp_suppress_secs as i64,
+                100,
+            )
+            .map_err(anyhow::Error::msg)
     }
 
     fn mark_false_positive(&self, ip: &str, note: &str) -> anyhow::Result<(i64, usize)> {
@@ -1337,7 +1370,7 @@ mod tests {
         let mut rx = f.bus.subscribe();
         let before = now_ts();
         handle_detection(
-            &DetectionSink { fw: &f.fw, store: &f.store, bus: &f.bus },
+            &DetectionSink { fw: &f.fw, store: &f.store, bus: &f.bus, fp_suppress_secs: 0 },
             "scan",
             "203.0.113.7".parse().unwrap(),
             "60 秒内对 3 个不同目标端口发送 SYN",
@@ -1376,7 +1409,7 @@ mod tests {
         let mut rx = f.bus.subscribe();
         for ip in ["127.0.0.1", "192.168.1.10", "10.1.2.3", "fe80::1", "::1"] {
             handle_detection(
-                &DetectionSink { fw: &f.fw, store: &f.store, bus: &f.bus },
+                &DetectionSink { fw: &f.fw, store: &f.store, bus: &f.bus, fp_suppress_secs: 0 },
                 "flood",
                 ip.parse().unwrap(),
                 "100 个纯 SYN",
@@ -1401,7 +1434,7 @@ mod tests {
         let mut dcfg = f.dcfg();
         dcfg.auto_block = false;
         handle_detection(
-            &DetectionSink { fw: &f.fw, store: &f.store, bus: &f.bus },
+            &DetectionSink { fw: &f.fw, store: &f.store, bus: &f.bus, fp_suppress_secs: 0 },
             "scan",
             "203.0.113.9".parse().unwrap(),
             "证据",

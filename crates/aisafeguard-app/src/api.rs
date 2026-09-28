@@ -34,6 +34,7 @@ pub async fn serve(engine: Arc<EngineHandle>) {
         .route("/api/proposals/{id}/apply", post(apply_proposal))
         .route("/api/proposals/{id}/dismiss", post(dismiss_proposal))
         .route("/api/feedback", get(list_feedback).post(mark_false_positive))
+        .route("/api/feedback/{value}", delete(clear_feedback))
         .route("/api/stats", get(stats))
         .route("/api/exposure", get(get_exposure))
         .route("/api/exposure/scan", post(scan_exposure))
@@ -216,14 +217,33 @@ async fn mark_false_positive(State(s): State<AppState>, Json(body): Json<Feedbac
     }
 }
 
-/// 抑制期内的误报反馈列表。
+/// 抑制期内的误报反馈列表（抑制期时长取 [ai].fp_suppress_secs）。
 async fn list_feedback(State(s): State<AppState>) -> Response {
-    match s.engine.store.list_active_feedback(
-        aisafeguard_core::now_ts(),
-        crate::engine::FP_SUPPRESS_TTL_SECS,
-        100,
-    ) {
+    let secs = s.engine.config().ai.fp_suppress_secs as i64;
+    match s
+        .engine
+        .store
+        .list_active_feedback(aisafeguard_core::now_ts(), secs, 100)
+    {
         Ok(rows) => Json(rows).into_response(),
+        Err(e) => err_resp(e),
+    }
+}
+
+/// 清除某来源的误报抑制（0.4.0 B3）：删除记录后该来源恢复自动封禁资格。
+async fn clear_feedback(State(s): State<AppState>, Path(value): Path<String>) -> Response {
+    match s.engine.clear_false_positive(value.trim()) {
+        Ok(removed) => {
+            if removed > 0 {
+                Json(json!({ "ok": true, "removed": removed })).into_response()
+            } else {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": "该来源没有抑制期内的误报记录" })),
+                )
+                    .into_response()
+            }
+        }
         Err(e) => err_resp(e),
     }
 }

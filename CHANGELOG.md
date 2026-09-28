@@ -9,6 +9,11 @@
 
 ### 新增
 
+- **误报抑制时长可配置 + 清除抑制（B3）**：`[ai].fp_suppress_secs`（默认 30 天）
+  替代硬编码常量——快路径自动封禁 / auto_apply / 抑制列表三处统一读取；
+  `DELETE /api/feedback/{ip}` + AI 页"生效中的误报抑制"小节（行内"清除抑制"
+  按钮，清除后恢复自动封禁资格并留事件）；`[ai].fp_ignore_min_severity`
+  可选高严重度忽略抑制（仅作用 auto_apply，快路径始终尊重抑制）
 - **AI 定时分析接线（A4）**：`[ai].analyze_interval_secs` 此前只有配置没有
   消费者（分析全靠 GUI/API 手动触发）；新增引擎定时任务，每轮读最新配置——
   `enabled` / `interval` / `auto_apply` 全部热更；`ai_running` 防重入闸门

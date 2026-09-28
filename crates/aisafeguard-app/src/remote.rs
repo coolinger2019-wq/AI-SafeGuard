@@ -213,6 +213,30 @@ impl Console for RemoteConsole {
         Ok(self.post(&format!("/api/rules/{id}/promote"))?.json()?)
     }
 
+    fn list_feedback(&self) -> anyhow::Result<Vec<aisafeguard_store::FpRow>> {
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base, "/api/feedback"))
+            .bearer_auth(&self.token)
+            .send()
+            .context("无法连接 AI-SafeGuard 服务")?;
+        Ok(self.check(resp)?.json().context("响应解析失败")?)
+    }
+
+    fn clear_false_positive(&self, ip: &str) -> anyhow::Result<usize> {
+        let body: serde_json::Value = self
+            .check(
+                self.http
+                    .delete(format!("{}{}", self.base, format!("/api/feedback/{ip}")))
+                    .bearer_auth(&self.token)
+                    .send()
+                    .context("无法连接 AI-SafeGuard 服务")?,
+            )?
+            .json()
+            .context("响应解析失败")?;
+        Ok(body["removed"].as_u64().unwrap_or(0) as usize)
+    }
+
     fn mark_false_positive(&self, ip: &str, note: &str) -> anyhow::Result<(i64, usize)> {
         let v: serde_json::Value = self
             .post_json("/api/feedback", &serde_json::json!({ "remote_ip": ip, "note": note }))?

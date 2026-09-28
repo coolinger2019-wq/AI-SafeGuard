@@ -889,6 +889,16 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// 清除某来源的误报抑制记录（0.4.0 B3）：删除后该来源恢复自动封禁资格。
+    /// 返回删除的行数（0 = 本来就没有抑制记录）。
+    pub fn clear_fp_feedback(&self, value: &str) -> Result<usize> {
+        let conn = self.lock()?;
+        let n = conn
+            .execute("DELETE FROM fp_feedback WHERE value = ?1", params![value])
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(n)
+    }
+
     pub fn list_active_feedback(&self, now: i64, suppress_ttl_secs: i64, limit: u32) -> Result<Vec<FpRow>> {
         let conn = self.lock()?;
         let mut stmt = conn
@@ -1090,6 +1100,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         Store::open(&dir.join("t.db")).unwrap()
+    }
+
+    /// 误报抑制记录的清除（0.4.0 B3）。
+    #[test]
+    fn fp_feedback_clear() {
+        let store = tmp_store("fp-clear");
+        store.insert_fp_feedback("203.0.113.9", 100, "test").unwrap();
+        assert!(store.active_fp("203.0.113.9", 150, 10_000).unwrap());
+        assert_eq!(store.clear_fp_feedback("203.0.113.9").unwrap(), 1);
+        assert!(!store.active_fp("203.0.113.9", 150, 10_000).unwrap());
+        // 再清一次 = 0（幂等）
+        assert_eq!(store.clear_fp_feedback("203.0.113.9").unwrap(), 0);
     }
 
     /// fed 成员 node ↔ 证书指纹 TOFU 绑定：首登、同指纹心跳、异指纹拒绝。

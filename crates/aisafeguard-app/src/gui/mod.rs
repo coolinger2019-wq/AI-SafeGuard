@@ -42,6 +42,7 @@ struct Cache {
     rules: Vec<RuleRow>,
     proposals: Vec<ProposalRow>,
     runs: Vec<AiRunRow>,
+    feedback: Vec<aisafeguard_store::FpRow>,
 }
 
 pub struct AisafeApp {
@@ -118,6 +119,7 @@ impl AisafeApp {
                 rules: Vec::new(),
                 proposals: Vec::new(),
                 runs: Vec::new(),
+                feedback: Vec::new(),
             },
             cache_at: Instant::now() - Duration::from_secs(60),
             toast: None,
@@ -161,6 +163,7 @@ impl AisafeApp {
         self.cache.rules = self.eng.list_rules().unwrap_or_default();
         self.cache.proposals = self.eng.list_proposals(None, 100).unwrap_or_default();
         self.cache.runs = self.eng.list_ai_runs(8).unwrap_or_default();
+        self.cache.feedback = self.eng.list_feedback().unwrap_or_default();
         if let Ok(cfg) = self.eng.config() {
             self.ui_prefs = (
                 ThemeId::from_str(&cfg.ui.theme),

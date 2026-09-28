@@ -203,9 +203,16 @@ impl AisafeApp {
                             }
                             if !p.remote_ip.is_empty() && ui.button("误报").clicked() {
                                 match self.eng.mark_false_positive(&p.remote_ip, "") {
-                                    Ok((dismissed, removed)) => self.set_toast(format!(
-                                        "已标记误报：收弃 {dismissed} 条建议，解封 {removed} 条规则（30 天内不再自动封禁该来源）"
-                                    )),
+                                    Ok((dismissed, removed)) => {
+                                        let days = self
+                                            .eng
+                                            .config()
+                                            .map(|c| c.ai.fp_suppress_secs / 86400)
+                                            .unwrap_or(30);
+                                        self.set_toast(format!(
+                                            "已标记误报：收弃 {dismissed} 条建议，解封 {removed} 条规则（{days} 天内不再自动封禁该来源）"
+                                        ));
+                                    }
                                     Err(e) => self.set_toast(format!("标记失败: {e}")),
                                 }
                                 self.refresh_cache();
@@ -224,6 +231,39 @@ impl AisafeApp {
                     );
                 });
             ui.add_space(8.0);
+        }
+
+        ui.add_space(10.0);
+        section(ui, "生效中的误报抑制");
+        if self.cache.feedback.is_empty() {
+            ui.label(
+                RichText::new("无（标记误报的来源在此列出，抑制期内自动封禁跳过；可随时清除）。")
+                    .color(text_dim())
+                    .size(13.0),
+            );
+        }
+        for f in self.cache.feedback.clone() {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&f.value).strong().size(13.0));
+                ui.label(
+                    RichText::new(format!("标记 {} 次 · 最近 {}", f.count, fmt_ts(f.last_ts)))
+                        .size(11.0)
+                        .color(text_dim()),
+                );
+                if !f.note.is_empty() {
+                    ui.label(RichText::new(&f.note).size(11.0).color(text_dim()));
+                }
+                if ui.button("清除抑制").clicked() {
+                    match self.eng.clear_false_positive(&f.value) {
+                        Ok(1) => {
+                            self.set_toast(format!("已清除 {} 的误报抑制（恢复自动封禁资格）", f.value));
+                            self.refresh_cache();
+                        }
+                        Ok(_) => {}
+                        Err(e) => self.set_toast(format!("清除失败: {e}")),
+                    }
+                }
+            });
         }
 
         ui.add_space(10.0);

@@ -47,6 +47,10 @@ pub trait Console: Send + Sync {
     /// 误报反馈：记录（30 天抑制）+ 解除该来源自动封禁 + 收弃 pending 建议；
     /// 返回 (收弃建议数, 解封规则数)
     fn mark_false_positive(&self, ip: &str, note: &str) -> anyhow::Result<(i64, usize)>;
+    /// 抑制期内的误报反馈列表（0.4.0 B3）
+    fn list_feedback(&self) -> anyhow::Result<Vec<aisafeguard_store::FpRow>>;
+    /// 清除某来源的误报抑制（0.4.0 B3）；返回删除的记录数（0 = 无记录）
+    fn clear_false_positive(&self, ip: &str) -> anyhow::Result<usize>;
     /// 返回 false = 已有分析在运行
     fn trigger_analysis(&self) -> bool;
     fn save_config(&self, cfg: AppConfig) -> anyhow::Result<()>;
