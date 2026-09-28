@@ -325,6 +325,10 @@ pub struct FedConfig {
     pub node: String,
     /// agent 角色：协调者地址，如 https://192.168.1.10:7421
     pub coordinator: String,
+    /// quorum（0.4.0 C3，默认 0 = 不启用）：>0 时，某来源若有协同节点上报
+    /// 但独立节点数 < min_peers，其 AI 建议不自动应用（仅慢路径人工确认）。
+    /// 该来源无任何协同上报时按本地策略照常（单节点部署不假死）。
+    pub min_peers: u32,
     pub interval_secs: u64,
     /// coordinator 角色：/fed 面 mTLS 监听地址（独立于 127.0.0.1 的本地 API）
     pub listen_addr: String,
@@ -345,6 +349,7 @@ impl Default for FedConfig {
             role: "off".into(),
             node: String::new(),
             coordinator: String::new(),
+            min_peers: 0,
             interval_secs: 60,
             listen_addr: "0.0.0.0:7421".into(),
             ca_path: String::new(),

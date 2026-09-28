@@ -1031,7 +1031,23 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                                 .unwrap_or(false)
                         })
                         .unwrap_or(false);
-                    if cfg.ai.auto_apply && severity_ok && (ignore_fp || !fp_suppressed) && eng.apply_proposal(pid).is_ok() {
+                    // quorum（0.4.0 C3）：来源有协同上报但独立节点数不足时不自动应用；
+                    // 无任何上报（本地判断）不阻塞——单节点部署不假死
+                    let quorum_ok = if cfg.fed.min_peers == 0 {
+                        true
+                    } else {
+                        match p.remote_ip.parse::<IpAddr>() {
+                            Ok(ip) => {
+                                let reporters = eng
+                                    .store
+                                    .fed_reporter_count(&ip.to_string(), now_ts() - 7 * 86_400)
+                                    .unwrap_or(0);
+                                reporters == 0 || reporters as u32 >= cfg.fed.min_peers
+                            }
+                            Err(_) => true,
+                        }
+                    };
+                    if cfg.ai.auto_apply && severity_ok && quorum_ok && (ignore_fp || !fp_suppressed) && eng.apply_proposal(pid).is_ok() {
                         auto_applied += 1;
                     }
                 }

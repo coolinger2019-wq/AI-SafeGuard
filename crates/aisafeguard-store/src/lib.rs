@@ -899,6 +899,19 @@ impl Store {
         Ok(())
     }
 
+    /// 某来源 IP 的独立协同上报节点数（0.4.0 C3 quorum）：
+    /// 事件 listener 形如 `fed:<节点>:<监听器>`，按节点去重。
+    pub fn fed_reporter_count(&self, remote_ip: &str, since: i64) -> Result<i64> {
+        let n: i64 = self.lock()?.query_row(
+            "SELECT COUNT(DISTINCT listener) FROM events
+             WHERE remote_ip = ?1 AND ts >= ?2 AND listener LIKE 'fed:%'",
+            params![remote_ip, since],
+            |r| r.get(0),
+        )
+        .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(n)
+    }
+
     /// 误报标记：把该来源的全部 pending 建议一并收弃（用户已判定其为正常）。
     /// 返回收弃条数。
     pub fn dismiss_pending_proposals_for_ip(&self, remote_ip: &str) -> Result<i64> {
@@ -1217,6 +1230,29 @@ mod tests {
         assert!(!store.active_fp("203.0.113.9", 150, 10_000, None).unwrap());
         // 再清一次 = 0（幂等）
         assert_eq!(store.clear_fp_feedback("203.0.113.9").unwrap(), 0);
+    }
+
+    /// quorum 计数（0.4.0 C3）：按 listener 前缀 fed: 去重节点。
+    #[test]
+    fn fed_reporter_count_dedupes_by_node() {
+        let store = tmp_store("fed-q");
+        let now = aisafeguard_core::now_ts();
+        for (node, ip) in [("agent1", "203.0.113.7"), ("agent2", "203.0.113.7"), ("agent1", "203.0.113.7")] {
+            store
+                .insert_event(&aisafeguard_core::event::SecurityEvent::HoneypotHit {
+                    ts: now,
+                    listener: format!("fed:{node}:ssh"),
+                    kind: "honeypot_hit".into(),
+                    port: 2222,
+                    remote_ip: ip.into(),
+                    remote_port: 55555,
+                    summary: "q".into(),
+                    payload: String::new(),
+                })
+                .unwrap();
+        }
+        assert_eq!(store.fed_reporter_count("203.0.113.7", now - 60).unwrap(), 2);
+        assert_eq!(store.fed_reporter_count("198.51.100.1", now - 60).unwrap(), 0);
     }
 
     /// 端口粒度抑制（0.4.0 B4）：IP 级记录抑制任何处置；端口级记录仅抑制对应端口。
