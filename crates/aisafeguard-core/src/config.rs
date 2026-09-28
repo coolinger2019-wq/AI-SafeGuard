@@ -17,6 +17,9 @@ pub struct AppConfig {
     pub detect: DetectConfig,
     pub intel: IntelConfig,
     pub fed: FedConfig,
+    pub syslog: SyslogConfig,
+    pub notify: NotifyConfig,
+    pub exposure: ExposureConfig,
     pub ui: UiConfig,
 }
 
@@ -304,6 +307,76 @@ impl FedConfig {
     pub fn valid_role(&self) -> bool {
         matches!(self.role.as_str(), "off" | "coordinator" | "agent")
     }
+}
+
+/// 日志远程转发 [A.8.15]（0.3.5）：事件总线 → RFC 5424 syslog（UDP / TCP 换行分帧）。
+/// 事件总线是唯一数据源（解耦），转发是 best-effort：目标不可达只丢该条并留 tracing，
+/// 绝不阻塞引擎；完整性校验仍以本地哈希链（verify-log / export-events）为准。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SyslogConfig {
+    pub enabled: bool,
+    /// 收集器地址，如 127.0.0.1:514
+    pub target: String,
+    /// udp（RFC 5426）| tcp（RFC 6587 非透明分帧，每条一行）
+    pub protocol: String,
+}
+
+impl Default for SyslogConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            target: "127.0.0.1:514".into(),
+            protocol: "udp".into(),
+        }
+    }
+}
+
+impl SyslogConfig {
+    pub fn valid_protocol(&self) -> bool {
+        matches!(self.protocol.as_str(), "udp" | "tcp")
+    }
+}
+
+/// 告警通知 [报表/告警]（0.3.5）：事件总线 → Webhook POST JSON。
+/// 只发达到 min_severity 的事件（severity 数值越小越严重）；请求失败丢弃并限频留痕。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NotifyConfig {
+    pub enabled: bool,
+    /// 接收端 URL（http/https），如企业微信/钉钉/Slack 兼容网关或自建接收器
+    pub url: String,
+    /// info | notice | warning | error —— 转发的最低严重度（含更严重者）
+    pub min_severity: String,
+    pub timeout_secs: u64,
+}
+
+impl Default for NotifyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: String::new(),
+            min_severity: "warning".into(),
+            timeout_secs: 10,
+        }
+    }
+}
+
+impl NotifyConfig {
+    pub fn valid_min_severity(&self) -> bool {
+        matches!(
+            self.min_severity.as_str(),
+            "info" | "notice" | "warning" | "error"
+        )
+    }
+}
+
+/// 主机暴露面盘点（0.2 已有手动扫描；0.3.5 加定时自动扫描）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExposureConfig {
+    /// 定时扫描间隔（秒）；0 = 关闭自动扫描（手动扫描不受影响）。
+    pub auto_scan_secs: u64,
 }
 
 impl AppConfig {

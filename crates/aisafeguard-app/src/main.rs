@@ -2,6 +2,7 @@ mod api;
 mod console;
 mod fed;
 mod engine;
+mod forward;
 mod gui;
 #[cfg(windows)]
 mod service;
@@ -380,6 +381,11 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
 
     // 采样捕获（检测平台 MVP，默认关闭；不可用时只降级并留痕）
     engine::spawn_capture_task(&engine);
+
+    // 事件外发（0.3.5，默认关闭）：syslog 转发 / webhook 告警 / 暴露面定时扫描
+    forward::spawn_syslog_task(&engine);
+    forward::spawn_notify_task(&engine);
+    forward::spawn_exposure_task(&engine);
 
     // 威胁情报（默认关闭，[intel].enabled 开启）
     if cfg.intel.enabled {

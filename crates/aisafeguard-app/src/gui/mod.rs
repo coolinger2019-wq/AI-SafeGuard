@@ -66,6 +66,9 @@ pub struct AisafeApp {
     settings_port: String,
     settings_snippet: String,
     settings_key_input: String,
+    settings_syslog_target: String,
+    settings_notify_url: String,
+    settings_exposure_secs: String,
     // 已保存的界面偏好（缓存值；每 2 秒随 cache 刷新）
     ui_prefs: (ThemeId, f32),
     // 上一帧已应用的主题+缩放（变化才重新 apply，避免每帧重建样式）
@@ -128,6 +131,9 @@ impl AisafeApp {
             settings_port: String::new(),
             settings_snippet: String::new(),
             settings_key_input: String::new(),
+            settings_syslog_target: String::new(),
+            settings_notify_url: String::new(),
+            settings_exposure_secs: String::new(),
             ui_prefs,
             applied_ui: Some(ui_prefs),
         }

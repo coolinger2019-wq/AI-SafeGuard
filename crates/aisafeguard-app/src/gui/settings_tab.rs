@@ -14,6 +14,9 @@ impl AisafeApp {
             self.settings_interval = cfg.ai.analyze_interval_secs.to_string();
             self.settings_port = cfg.api.port.to_string();
             self.settings_snippet = cfg.ai.max_snippet_chars.to_string();
+            self.settings_syslog_target = cfg.syslog.target.clone();
+            self.settings_notify_url = cfg.notify.url.clone();
+            self.settings_exposure_secs = cfg.exposure.auto_scan_secs.to_string();
             self.settings_draft = Some(cfg);
         }
         let Some(draft) = self.settings_draft.as_mut() else {
@@ -246,6 +249,97 @@ impl AisafeApp {
             });
 
         ui.add_space(14.0);
+        section(ui, "远程日志（syslog 转发）");
+        egui::Grid::new("syslog-settings")
+            .num_columns(2)
+            .spacing([14.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("转发到收集器");
+                ui.checkbox(
+                    &mut draft.syslog.enabled,
+                    "（RFC 5424；事件总线的副本，best-effort 不阻塞引擎）",
+                );
+                ui.end_row();
+                ui.label("收集器地址");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.settings_syslog_target)
+                        .desired_width(180.0)
+                        .hint_text("127.0.0.1:514"),
+                );
+                ui.end_row();
+                ui.label("传输协议");
+                egui::ComboBox::from_id_salt("syslog-protocol")
+                    .selected_text(&draft.syslog.protocol)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut draft.syslog.protocol, "udp".to_string(), "udp（RFC 5426）");
+                        ui.selectable_value(&mut draft.syslog.protocol, "tcp".to_string(), "tcp（换行分帧）");
+                    });
+                ui.end_row();
+            });
+        ui.label(
+            RichText::new("改动下一条事件即生效；目标不可达只丢该条。完整性校验仍以本地哈希链（verify-log / 导出）为准。")
+                .size(11.0)
+                .color(text_dim()),
+        );
+
+        ui.add_space(14.0);
+        section(ui, "告警通知（Webhook）");
+        egui::Grid::new("notify-settings")
+            .num_columns(2)
+            .spacing([14.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("推送告警");
+                ui.checkbox(&mut draft.notify.enabled, "（POST JSON 到接收端）");
+                ui.end_row();
+                ui.label("接收端 URL");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.settings_notify_url)
+                        .desired_width(240.0)
+                        .hint_text("http://127.0.0.1:9000/alert"),
+                );
+                ui.end_row();
+                ui.label("最低严重度");
+                egui::ComboBox::from_id_salt("notify-severity")
+                    .selected_text(&draft.notify.min_severity)
+                    .show_ui(ui, |ui| {
+                        for (v, label) in [
+                            ("error", "error（仅错误与更严重）"),
+                            ("warning", "warning（检测判定/封禁/错误）"),
+                            ("notice", "notice（含蜜罐命中/AI 建议）"),
+                            ("info", "info（全部事件）"),
+                        ] {
+                            ui.selectable_value(&mut draft.notify.min_severity, v.to_string(), label);
+                        }
+                    });
+                ui.end_row();
+            });
+        ui.label(
+            RichText::new("严重度口径：detection/封禁=warning，蜜罐命中/AI 建议=notice，例行流水=info；低于所选严重度的事件不推送。")
+                .size(11.0)
+                .color(text_dim()),
+        );
+
+        ui.add_space(14.0);
+        section(ui, "暴露面自动扫描");
+        egui::Grid::new("exposure-settings")
+            .num_columns(2)
+            .spacing([14.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("定时扫描间隔（秒）");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.settings_exposure_secs)
+                        .desired_width(120.0)
+                        .hint_text("0 = 关闭"),
+                );
+                ui.end_row();
+            });
+        ui.label(
+            RichText::new("0 = 仅手动扫描；300-86400 秒 = 定时扫描并入库，供 AI 分析与 API 查询。")
+                .size(11.0)
+                .color(text_dim()),
+        );
+
+        ui.add_space(14.0);
         section(ui, "蜜罐");
         ui.checkbox(&mut draft.honeypot.enabled, "启用蜜罐");
         ui.label(
@@ -393,6 +487,29 @@ impl AisafeApp {
             Ok(v) if (40..=2000).contains(&v) => cfg.ai.max_snippet_chars = v,
             _ => {
                 self.set_toast("payload 上送上限需在 40-2000 之间");
+                return;
+            }
+        }
+        // 远程日志 / 告警 / 暴露面（0.3.5）
+        cfg.syslog.target = self.settings_syslog_target.trim().to_string();
+        if cfg.syslog.enabled && cfg.syslog.target.is_empty() {
+            self.set_toast("启用 syslog 转发需填写收集器地址");
+            return;
+        }
+        if !cfg.notify.valid_min_severity() {
+            self.set_toast("告警最低严重度非法");
+            return;
+        }
+        cfg.notify.url = self.settings_notify_url.trim().to_string();
+        if cfg.notify.enabled && cfg.notify.url.is_empty() {
+            self.set_toast("启用告警推送需填写接收端 URL");
+            return;
+        }
+        match self.settings_exposure_secs.trim().parse::<u64>() {
+            Ok(0) => cfg.exposure.auto_scan_secs = 0,
+            Ok(v) if (300..=86400).contains(&v) => cfg.exposure.auto_scan_secs = v,
+            _ => {
+                self.set_toast("暴露面扫描间隔需为 0（关闭）或 300-86400 秒");
                 return;
             }
         }

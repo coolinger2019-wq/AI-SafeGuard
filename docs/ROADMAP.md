@@ -51,8 +51,9 @@
 - [x] **多主机控制台（组织协同骨架，完全体见 §6 / 0.4）**：协调者 + agent——事件上报（时钟窗校验+100 条/批）、情报双向同步（fed 来源仅标注不自动封禁、内网地址上报前置拒收防投毒）、AI 建议推送（接收方本地复验、仅慢路径）；协调者失联各节点独立运行。鉴权 v1=组织令牌（环境变量），mTLS 每节点证书为 0.3 后续加固 [A.5.15]
 - [ ] 发布物代码签名 + 更新清单签名 [A.8.24]
 - [x] Linux systemd 服务化：`service install-systemd`（unit 写入 + daemon-reload + enable --now，数据目录 /var/lib/aisafeguard；systemd 未运行时照写 unit 并提示）——WSL 实测 active
-- [ ] 日志远程转发（syslog/SIEM）[A.8.15]
-- [ ] 报表导出与告警通知（webhook / 邮件）
+- [x] 日志远程转发（syslog/SIEM）[A.8.15]：`forward::spawn_syslog_task` 事件总线 → RFC 5424（UDP/TCP 可选），severity 统一口径（detection/封禁=warning、蜜罐命中=notice），best-effort 不阻塞引擎，完整性以本地哈希链为准——WSL 实测 UDP/TCP 收包（0.3.5）
+- [x] 告警通知（webhook）：`forward::spawn_notify_task` POST JSON + `min_severity` 四档过滤 + 超时丢弃限频留痕——WSL 实测 severity 过滤与全量 body（0.3.5）
+- [ ] 报表导出与邮件通知
 
 ## 0.4 —— 完整 NGFW 能力与组织协同（详见 docs/NGFW_EVOLUTION.md §4/§6）
 

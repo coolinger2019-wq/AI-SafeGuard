@@ -2,6 +2,56 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.3.5] - 2026-09-28
+
+按 ROADMAP 0.3 推进第五批：事件外发与自动化——日志远程转发（syslog/SIEM）+
+告警通知（webhook）+ 暴露面定时自动扫描。三条通道都是事件总线的只读消费者，
+"加传感器不动执行器"基调不变，零新依赖。
+
+### 新增
+
+- **日志远程转发 [A.8.15]**：`forward::spawn_syslog_task` 常驻订阅事件总线，
+  转发 RFC 5424 行到收集器——UDP（RFC 5426）或 TCP（换行分帧），`[syslog].protocol`
+  可选；PRI = facility daemon(3)×8 + 事件严重度，MSG = 事件摘要（控制字符逐个归空格，
+  保证 TCP 分帧下单条报文永不拆行）；HOSTNAME 取自系统（防御性收敛为可见 ASCII）。
+  配置改动下一条事件即生效；协议非法按 UDP 处理并留痕；目标不可达只丢该条
+  （best-effort），绝不阻塞引擎
+- **告警通知（Webhook）**：`forward::spawn_notify_task` 把达到阈值的事件 POST JSON
+  （host / severity / summary / event 全量）到接收端；`SecurityEvent::severity()`
+  统一严重度口径（RFC 5424 数值越小越严重：detection/封禁执行=warning，
+  蜜罐命中/AI 建议=notice，例行流水=info，engine 按 level），`[notify].min_severity`
+  四档过滤（error/warning/notice/info）；超时可配（1-120s），失败丢弃本条且 60s
+  限频留 tracing，防目标宕机刷日志
+- **暴露面定时自动扫描**：`[exposure].auto_scan_secs`（0=关闭，300-86400）；启动后
+  30 秒先扫一轮（与情报任务"启动首轮"先例一致），之后按间隔复用既有 `scan_exposure`
+  （快照入库 + 事件留痕 + AI `<exposure>` 上下文）
+- **severity 纯函数**：`severity()` / `severity_name()` / `severity_threshold()`，
+  syslog 与 webhook 共用同一"多严重"口径
+- GUI 设置页三组控件：远程日志（开关/收集器地址/协议）、告警通知（开关/URL/最低严重度）、
+  暴露面自动扫描（间隔），保存时校验
+- 单测 4 个：RFC 5424 行快照（PRI/时间戳/字段序）、MSG 换行剥离（TCP 分帧不变量）、
+  severity 映射与阈值过滤（含非法配置回退）、hostname 回退
+
+### 变更
+
+- 事件总线新增两个常驻消费者；转发器**只读总线不产事件**（失败只走 tracing，
+  杜绝"外发失败→engine 事件→再外发"的自反馈风暴）
+
+### 已知限制
+
+- 外发是副本不是审计源：转发报文不携带哈希链 id/hash，完整性校验仍以
+  `verify-log` / `export-events` 为准
+- webhook 无重试与 HMAC 签名，按需后补
+- 邮件通知与报表导出未包含（ROADMAP 已拆分为独立条目）
+
+### 实测（WSL2 Ubuntu 24.04，2026-09-28）
+
+- UDP/TCP 双通道 RFC 5424 收包核对（PRI=30/29/28 对应 info/notice/warning，
+  HOSTNAME/PROCID/MSGID 字段正确，中文 MSG 完整）
+- webhook severity 过滤：notice 阈值下蜜罐命中全量到达、手动加规则（warning）到达、
+  全部事件（info 级）按预期被过滤
+- 暴露面首扫 30 秒内出现（17 个监听端点），事件留痕正常
+
 ## [0.3.4] - 2026-09-28
 
 按 ROADMAP 0.3 推进第四批：AI 深度介入 v1——处置灰度执行 + 误报反馈闭环 + 输入面扩展。

@@ -120,6 +120,53 @@ impl SecurityEvent {
             message: message.into(),
         }
     }
+
+    /// RFC 5424 严重度（0 emerg … 7 debug，数值越小越严重）。syslog 转发与
+    /// webhook 告警共用同一映射，保证两条外发通道对"多严重"口径一致。
+    pub fn severity(&self) -> u8 {
+        match self {
+            // 检测判定与封禁执行是安全产品最核心的告警
+            SecurityEvent::Detection { .. } => 4, // warning
+            SecurityEvent::FirewallRuleAdded { .. } => 4,
+            SecurityEvent::ProposalApplied { .. } => 4,
+            // 蜜罐被触碰、AI 产出建议：值得看但未执行处置
+            SecurityEvent::HoneypotHit { .. } => 5, // notice
+            SecurityEvent::ProposalCreated { .. } => 5,
+            // 例行流水
+            SecurityEvent::FirewallRuleRemoved { .. } => 6, // informational（TTL 到期解封是常态）
+            SecurityEvent::AiRun { .. } => 6,
+            SecurityEvent::Engine { level, .. } => match level.as_str() {
+                "error" => 3, // err
+                "warn" => 4,
+                "info" => 6,
+                _ => 5,
+            },
+        }
+    }
+
+    /// severity 数值 → RFC 5424 名称（展示与配置值共用）。
+    pub fn severity_name(sev: u8) -> &'static str {
+        match sev {
+            0 => "emerg",
+            1 => "alert",
+            2 => "crit",
+            3 => "error",
+            4 => "warning",
+            5 => "notice",
+            6 => "info",
+            _ => "debug",
+        }
+    }
+
+    /// 告警通道的过滤配置值 → 数值阈值（非法值回退 warning）。
+    pub fn severity_threshold(name: &str) -> u8 {
+        match name {
+            "error" => 3,
+            "notice" => 5,
+            "info" => 6,
+            _ => 4,
+        }
+    }
 }
 
 #[derive(Clone)]
