@@ -220,14 +220,15 @@ impl Console for RemoteConsole {
             .bearer_auth(&self.token)
             .send()
             .context("无法连接 AI-SafeGuard 服务")?;
-        Ok(self.check(resp)?.json().context("响应解析失败")?)
+        self.check(resp)?.json().context("响应解析失败")
     }
 
     fn clear_false_positive(&self, ip: &str) -> anyhow::Result<usize> {
+        let path = format!("/api/feedback/{ip}");
         let body: serde_json::Value = self
             .check(
                 self.http
-                    .delete(format!("{}{}", self.base, format!("/api/feedback/{ip}")))
+                    .delete(format!("{}{path}", self.base))
                     .bearer_auth(&self.token)
                     .send()
                     .context("无法连接 AI-SafeGuard 服务")?,

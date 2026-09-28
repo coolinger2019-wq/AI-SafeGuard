@@ -85,6 +85,7 @@ fn forbidden(node: &str) -> Response {
 
 /// node ↔ 证书指纹校验（TOFU）：首次登记，之后指纹必须一致；一致时刷新 last_seen。
 /// 空指纹（理论上 mTLS 强制客户端证书后不该出现）按未接入处理。
+#[allow(clippy::result_large_err)] // Response 是该模块统一的错误载体
 fn check_member(state: &FedState, node: &str, fp: &str) -> Result<(), Response> {
     if fp.is_empty() {
         return Err((StatusCode::UNAUTHORIZED, "缺少客户端证书").into_response());
@@ -414,7 +415,7 @@ pub fn cmd_issue_cert(data_dir: &Path, node: &str, sans: &[String]) -> anyhow::R
     println!("✓ 节点证书已签发：");
     println!("  证书: {}", out_pem.display());
     println!("  私钥: {}（分发到对应节点保管）", out_key.display());
-    println!("  指纹（SHA-256）: {}", cert_fp_of(&cert.der().to_vec()));
+    println!("  指纹（SHA-256）: {}", cert_fp_of(cert.der()));
     println!("  分发后节点配置 [fed] 节点: ca/cert/key 路径（或放到 <数据目录>/fed/ 默认位置）");
     Ok(())
 }
@@ -480,11 +481,12 @@ pub fn cmd_revoke(data_dir: &Path, target: &str, reason: &str) -> anyhow::Result
 }
 
 /// 连接级吊销检查：指纹在吊销集合中返回 false（并给拒绝原因）。
-pub fn check_not_revoked(data_dir: &Path, cert_fp: &str) -> Result<(), String> {
+/// Some(原因) = 已吊销应拒连；None = 通过。
+pub fn check_not_revoked(data_dir: &Path, cert_fp: &str) -> Option<String> {
     if load_revocations(data_dir).contains(cert_fp) {
-        return Err("该证书已被吊销（fed revoke），组织同步被拒绝".to_string());
+        return Some("该证书已被吊销（fed revoke），组织同步被拒绝".to_string());
     }
-    Ok(())
+    None
 }
 
 /// 预登记表（0.4.0 C2）：`{node: expected_fp}` JSON——关闭该节点的 TOFU 抢注窗口：
@@ -700,7 +702,7 @@ pub async fn serve_coordinator(engine: Arc<EngineHandle>) -> Result<(), String> 
                 .map(|c| cert_fp_of(c.as_ref()))
                 .unwrap_or_default();
             // 吊销检查（0.4.0 C1）：立即生效（每次连接读文件），命中拒连并留审计事件
-            if let Err(reason) = check_not_revoked(&data_dir, &cert_fp) {
+            if let Some(reason) = check_not_revoked(&data_dir, &cert_fp) {
                 bus.publish(SecurityEvent::engine("warn", format!("协同连接被拒：{reason}")));
                 return;
             }
@@ -917,14 +919,14 @@ mod tests {
 
         // 空表：不吊销任何人
         assert!(load_revocations(&dir).is_empty());
-        assert!(check_not_revoked(&dir, "aabb").is_ok());
+        assert!(check_not_revoked(&dir, "aabb").is_none());
 
         // 吊销：按指纹写入后立即可查；重复吊销拒绝
         let fp = cmd_revoke(&dir, "aabbccdd" .repeat(8).as_str(), "测试吊销").unwrap();
         assert_eq!(fp.len(), 64);
         assert!(load_revocations(&dir).contains(&fp));
-        assert!(check_not_revoked(&dir, &fp).is_err());
-        assert!(check_not_revoked(&dir, "ffff").is_ok());
+        assert!(check_not_revoked(&dir, &fp).is_some());
+        assert!(check_not_revoked(&dir, "ffff").is_none());
         assert!(cmd_revoke(&dir, &fp, "重复").is_err(), "重复吊销应拒绝");
 
         // 按节点名吊销：certs/<node>.pem 存在时算指纹

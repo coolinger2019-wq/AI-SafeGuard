@@ -577,6 +577,7 @@ fn self_surface_json(eng: &EngineHandle) -> String {
 
 /// 快路径判定统一出口：广播 Detection；auto_block 时自动封禁（TTL + 内网保护 + 审计）。
 /// 频次引擎（蜜罐源）与采样捕获（真实流量源）都走这里，行为一致。
+#[allow(clippy::too_many_arguments)] // 证据/规则/L7 字段并列，语义清晰
 fn handle_detection(
     sink: &DetectionSink<'_>,
     kind: &str,
@@ -789,10 +790,10 @@ pub fn spawn_capture_task(eng: &Arc<EngineHandle>) {
                             let (hint, tls_fp) = if cap_cfg.mode == "full" {
                                 match pipeline.stream_bytes(&d.key) {
                                     Some(stream) => {
-                                        let hint =
-                                            std::str::from_utf8(&stream).ok().and_then(|t| aisafeguard_l7::parse_http_hint(t));
-                                        let tls_fp =
-                                            aisafeguard_l7::parse_ja3(&stream).map(|j| j.md5);
+                                        let hint = std::str::from_utf8(&stream)
+                                            .ok()
+                                            .and_then(aisafeguard_l7::parse_http_hint);
+                                        let tls_fp = aisafeguard_l7::parse_ja3(&stream).map(|j| j.md5);
                                         (hint, tls_fp)
                                     }
                                     None => (None, None),

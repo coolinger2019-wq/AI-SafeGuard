@@ -570,19 +570,17 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
         let specs: Vec<aisafeguard_firewall::BlockSpec> = rules
             .iter()
             .filter(|r| r.enabled && !r.remote_ip.is_empty())
-            .filter_map(|r| {
-                Some(aisafeguard_firewall::BlockSpec {
-                    direction: if r.direction == "in" {
-                        aisafeguard_firewall::Direction::In
-                    } else {
-                        aisafeguard_firewall::Direction::Out
-                    },
-                    protocol: r.protocol.parse().unwrap_or(aisafeguard_firewall::Protocol::Any),
-                    remote_ip: r.remote_ip.parse::<std::net::IpAddr>().ok(),
-                    local_port: r.local_port,
-                    note: r.note.clone(),
-                    tag: r.tag.clone(),
-                })
+            .map(|r| aisafeguard_firewall::BlockSpec {
+                direction: if r.direction == "in" {
+                    aisafeguard_firewall::Direction::In
+                } else {
+                    aisafeguard_firewall::Direction::Out
+                },
+                protocol: r.protocol.parse().unwrap_or(aisafeguard_firewall::Protocol::Any),
+                remote_ip: r.remote_ip.parse::<std::net::IpAddr>().ok(),
+                local_port: r.local_port,
+                note: r.note.clone(),
+                tag: r.tag.clone(),
             })
             .collect();
         if let Err(e) = engine.firewall.resync(&specs) {
