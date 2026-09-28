@@ -20,7 +20,23 @@
 - **威胁情报**：Feodo C2 源 + 本地蜜罐源，高置信度自动封禁，命中随 AI 分析送评
 - **日志远程转发**（默认关闭）：事件总线 → RFC 5424 syslog 收集器（UDP/TCP），severity 统一口径（detection/封禁=warning、蜜罐命中=notice），best-effort 不阻塞引擎，完整性以本地哈希链为准
 - **告警通知**（默认关闭）：达到阈值的事件 POST JSON 到 webhook 接收端（企业微信/钉钉/Slack 兼容网关或自建），最低严重度四档可配
-- **组织协同**（骨架）：协调者/agent 双角色，事件上报、情报同步、AI 建议推送（本地复验、仅慢路径）；mTLS 每节点证书（`fed init-ca` / `fed issue-cert`，node↔证书指纹绑定，协调者独立 mTLS 监听面）
+- **组织协同**（骨架）：协调者/agent 双角色，事件上报、情报同步、AI 建议推送（本地复验、仅慢路径）；mTLS 每节点证书 + 指纹绑定 + 吊销（见下）
+
+### 组织协同运维（协调者侧命令）
+
+```bash
+aisafeguard fed init-ca                      # 组织 CA（仅协调者，一次性）
+aisafeguard fed issue-cert coord1 --san 10.0.0.1   # 协调者自己的证书（SAN = 对外地址）
+aisafeguard fed issue-cert agent1            # 成员证书（分发到对应节点）
+aisafeguard fed expect agent1 <指纹>          # 预登记：关闭该节点名的抢注窗口
+aisafeguard fed revoke <节点名|指纹> [原因]    # 吊销：协调者立即拒绝其连接
+```
+
+**推荐加入流程**：`issue-cert` 签发 → `fed expect <node> <指纹>` 预登记 → 分发证书到节点 → 节点上线（指纹不符即拒，无抢注窗口）。未预登记的节点走 TOFU（首见指纹绑定）。
+
+**换证流程**：`fed revoke <旧节点名>` 吊销旧证 → `issue-cert` 签发新证 → `fed expect <node> <新指纹>` 更新预登记 → 分发新证书到节点。协调者侧 `fed_members` 的旧指纹记录需删除（sqlite3 数据目录下 aisafeguard.db：`DELETE FROM fed_members WHERE node='<节点名>'`）。
+
+**监听建议**：协同面绑内网地址（`[fed].listen_addr = "10.x.x.x:7421"`）；绑公网/所有地址时启动会告警，暴露面盘点已把该端口计入。
 - **本地 API**：`127.0.0.1` + Bearer token，供脚本与未来的远程控制台使用
 
 ## 构建与运行

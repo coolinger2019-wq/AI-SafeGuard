@@ -89,6 +89,15 @@ fn check_member(state: &FedState, node: &str, fp: &str) -> Result<(), Response> 
     if fp.is_empty() {
         return Err((StatusCode::UNAUTHORIZED, "缺少客户端证书").into_response());
     }
+    // 预登记校验（0.4.0 C2）：已预登记节点关闭 TOFU 抢注窗口
+    let data_dir = state.engine.config().general.data_dir.clone();
+    if !expected_ok(&load_expected(&data_dir), node, fp) {
+        state.engine.bus.publish(SecurityEvent::engine(
+            "warn",
+            format!("协同接入被拒：{node} 指纹与预登记不符（可能的冒用/换证）"),
+        ));
+        return Err((StatusCode::FORBIDDEN, "指纹与预登记（fed expect）不符").into_response());
+    }
     match state.engine.store.upsert_fed_member(node, now_ts(), fp) {
         Ok(true) => Ok(()),
         Ok(false) => Err(forbidden(node)),
@@ -423,6 +432,105 @@ fn write_private(path: &Path, pem: String) -> anyhow::Result<()> {
 
 // ---------- 协调者：独立 mTLS 监听面 ----------
 
+/// 吊销列表文件（0.4.0 C1，手动 CRL）：`[{fp, ts, reason}]`，JSON 数组。
+pub fn revocations_path(data_dir: &Path) -> PathBuf {
+    fed_dir(data_dir).join("revoked.json")
+}
+
+/// 读吊销指纹集合；文件不存在/损坏返回空集（损坏留由命令侧提示）。
+pub fn load_revocations(data_dir: &Path) -> std::collections::HashSet<String> {
+    let raw = match std::fs::read(revocations_path(data_dir)) {
+        Ok(b) => b,
+        Err(_) => return Default::default(),
+    };
+    serde_json::from_str::<Vec<serde_json::Value>>(&String::from_utf8_lossy(&raw))
+        .map(|v| {
+            v.iter()
+                .filter_map(|e| e["fp"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `fed revoke <fp|node> [原因]`：按指纹或节点名（读 certs/<node>.pem 算指纹）吊销。
+/// 立即生效——协调者每次连接检查该集合，不依赖证书有效期。
+pub fn cmd_revoke(data_dir: &Path, target: &str, reason: &str) -> anyhow::Result<String> {
+    let fp = if target.len() == 64 && target.chars().all(|c| c.is_ascii_hexdigit()) {
+        target.to_ascii_lowercase()
+    } else {
+        let cert = certs_dir(data_dir).join(format!("{target}.pem"));
+        let der = read_pem_certs(&cert)
+            .map_err(|e| anyhow::anyhow!("节点证书不可读（{cert:?}）: {e}"))?
+            .remove(0);
+        cert_fp_of(der.as_ref())
+    };
+    std::fs::create_dir_all(fed_dir(data_dir))?;
+    let path = revocations_path(data_dir);
+    let mut list: Vec<serde_json::Value> = std::fs::read(&path)
+        .map(|b| serde_json::from_str(&String::from_utf8_lossy(&b)).unwrap_or_default())
+        .unwrap_or_default();
+    if list.iter().any(|e| e["fp"].as_str() == Some(fp.as_str())) {
+        anyhow::bail!("该指纹已在吊销列表中");
+    }
+    list.push(serde_json::json!({
+        "fp": fp, "ts": now_ts(), "reason": reason,
+    }));
+    std::fs::write(&path, serde_json::to_string_pretty(&list)?)?;
+    Ok(fp)
+}
+
+/// 连接级吊销检查：指纹在吊销集合中返回 false（并给拒绝原因）。
+pub fn check_not_revoked(data_dir: &Path, cert_fp: &str) -> Result<(), String> {
+    if load_revocations(data_dir).contains(cert_fp) {
+        return Err("该证书已被吊销（fed revoke），组织同步被拒绝".to_string());
+    }
+    Ok(())
+}
+
+/// 预登记表（0.4.0 C2）：`{node: expected_fp}` JSON——关闭该节点的 TOFU 抢注窗口：
+/// 预登记后，非匹配指纹的首次绑定也被拒。
+pub fn expected_path(data_dir: &Path) -> PathBuf {
+    fed_dir(data_dir).join("expected.json")
+}
+
+/// 读预登记表（文件不存在/损坏返回空表）。
+pub fn load_expected(data_dir: &Path) -> std::collections::HashMap<String, String> {
+    std::fs::read(expected_path(data_dir))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+/// 预登记校验：节点已预登记时指纹必须精确匹配；未预登记走 TOFU。
+pub fn expected_ok(
+    expected: &std::collections::HashMap<String, String>,
+    node: &str,
+    cert_fp: &str,
+) -> bool {
+    match expected.get(node) {
+        Some(want) => want == cert_fp,
+        None => true,
+    }
+}
+
+/// `fed expect <node> <fp>`：预登记节点指纹（签发后、节点上线前执行）。
+pub fn cmd_expect(data_dir: &Path, node: &str, fp: &str) -> anyhow::Result<()> {
+    if !valid_node_name(node) {
+        anyhow::bail!("node 名不合法（限字母数字_-，≤32 字符）");
+    }
+    let fp = fp.to_ascii_lowercase();
+    if fp.len() != 64 || !fp.chars().all(|c| c.is_ascii_hexdigit()) {
+        anyhow::bail!("指纹须为 64 位十六进制（fed issue-cert 输出的 SHA-256）");
+    }
+    std::fs::create_dir_all(fed_dir(data_dir))?;
+    let path = expected_path(data_dir);
+    let mut map = load_expected(data_dir);
+    map.insert(node.to_string(), fp);
+    std::fs::write(&path, serde_json::to_string_pretty(&map)?)?;
+    println!("✓ 已预登记 {node} 的证书指纹（该节点非匹配指纹的接入将被拒）");
+    Ok(())
+}
+
 /// 解析 fed 证书文件路径：空配置回退 <数据目录>/fed/ 默认位置。
 pub fn resolve_fed_path(data_dir: &Path, configured: &str, default_name: &str) -> PathBuf {
     if configured.is_empty() {
@@ -525,7 +633,14 @@ pub async fn serve_coordinator(engine: Arc<EngineHandle>) -> Result<(), String> 
         .await
         .map_err(|e| format!("mTLS 监听 {addr} 绑定失败: {e}"))?;
     tracing::info!("组织协同 mTLS 面已监听 {addr}");
-    let app = fed_router(engine);
+    let app = fed_router(engine.clone());
+    let (audit_bus, audit_dir) = {
+        let eng = engine.clone();
+        (
+            eng.bus.clone(),
+            eng.config().general.data_dir.clone(),
+        )
+    };
 
     loop {
         let (tcp, _) = listener
@@ -534,6 +649,7 @@ pub async fn serve_coordinator(engine: Arc<EngineHandle>) -> Result<(), String> 
             .map_err(|e| format!("mTLS 监听器错误: {e}"))?;
         let acceptor = acceptor.clone();
         let app = app.clone();
+        let (bus, data_dir) = (audit_bus.clone(), audit_dir.clone());
         tokio::spawn(async move {
             let Ok(stream) = acceptor.accept(tcp).await else {
                 return; // 握手失败（无证书/链不可信/协议错误）：连接层拒绝即可
@@ -546,6 +662,14 @@ pub async fn serve_coordinator(engine: Arc<EngineHandle>) -> Result<(), String> 
                 .and_then(|c| c.first())
                 .map(|c| cert_fp_of(c.as_ref()))
                 .unwrap_or_default();
+            // 吊销检查（0.4.0 C1）：立即生效（每次连接读文件），命中拒连并留审计事件
+            if load_revocations(&data_dir).contains(&cert_fp) {
+                bus.publish(SecurityEvent::engine(
+                    "warn",
+                    format!("协同连接被拒：证书 {} 已吊销", &cert_fp[..16.min(cert_fp.len())]),
+                ));
+                return;
+            }
             // Router 直接实现 tower Service<Request<Incoming>>，TowerToHyperService 适配
             let svc =
                 hyper_util::service::TowerToHyperService::new(app.layer(axum::Extension(FedPeer {
@@ -748,6 +872,43 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// C1/C2：吊销列表读写 + 预登记校验（文件为真源，纯函数断言）。
+    #[test]
+    fn revocations_and_expected_registration() {
+        let dir = std::env::temp_dir().join(format!("asg-fed-c1-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 空表：不吊销任何人
+        assert!(load_revocations(&dir).is_empty());
+        assert!(check_not_revoked(&dir, "aabb").is_ok());
+
+        // 吊销：按指纹写入后立即可查；重复吊销拒绝
+        let fp = cmd_revoke(&dir, "aabbccdd" .repeat(8).as_str(), "测试吊销").unwrap();
+        assert_eq!(fp.len(), 64);
+        assert!(load_revocations(&dir).contains(&fp));
+        assert!(check_not_revoked(&dir, &fp).is_err());
+        assert!(check_not_revoked(&dir, "ffff").is_ok());
+        assert!(cmd_revoke(&dir, &fp, "重复").is_err(), "重复吊销应拒绝");
+
+        // 按节点名吊销：certs/<node>.pem 存在时算指纹
+        cmd_init_ca(&dir).unwrap();
+        cmd_issue_cert(&dir, "node-x", &[]).unwrap();
+        let fp2 = cmd_revoke(&dir, "node-x", "换证前吊销").unwrap();
+        assert_eq!(fp2.len(), 64);
+
+        // 预登记：写入后 expected_ok 生效
+        cmd_expect(&dir, "agent1", &"e".repeat(64)).unwrap();
+        let expected = load_expected(&dir);
+        assert!(expected_ok(&expected, "agent1", &"e".repeat(64)));
+        assert!(!expected_ok(&expected, "agent1", &"f".repeat(64)), "指纹不符必须拒");
+        assert!(expected_ok(&expected, "未登记节点", "任意指纹"), "未预登记走 TOFU");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     #[test]

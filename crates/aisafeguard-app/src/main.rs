@@ -146,8 +146,31 @@ fn main() -> anyhow::Result<()> {
                             }
                         }
                     }
+                    Some("revoke") => {
+                        i += 1;
+                        match args.get(i) {
+                            Some(target) => command = Some(("fed-revoke".into(), Some(target.clone()))),
+                            None => {
+                                eprintln!("用法: aisafeguard fed revoke <节点名|指纹> [原因]");
+                                std::process::exit(2);
+                            }
+                        }
+                    }
+                    Some("expect") => {
+                        i += 1;
+                        match (args.get(i), args.get(i + 1)) {
+                            (Some(node), Some(fp)) => {
+                                i += 1;
+                                command = Some(("fed-expect".into(), Some(format!("{node}\u{1}{fp}"))));
+                            }
+                            _ => {
+                                eprintln!("用法: aisafeguard fed expect <node> <指纹>");
+                                std::process::exit(2);
+                            }
+                        }
+                    }
                     _ => {
-                        eprintln!("用法: aisafeguard fed init-ca | fed issue-cert <node> [--san ...]");
+                        eprintln!("用法: aisafeguard fed init-ca | issue-cert <node> [--san ...] | revoke <node|fp> [原因] | expect <node> <fp>");
                         std::process::exit(2);
                     }
                 }
@@ -238,6 +261,32 @@ fn main() -> anyhow::Result<()> {
                     std::process::exit(2);
                 };
                 return fed::cmd_issue_cert(&resolve_cfg(cfg_path, data_dir)?.0.data_dir(), &node, &fed_sans);
+            }
+            "fed-revoke" => {
+                let Some(target) = arg else {
+                    eprintln!("用法: aisafeguard fed revoke <节点名|指纹> [原因]");
+                    std::process::exit(2);
+                };
+                let reason = fed_sans.into_iter().next().unwrap_or_default();
+                return match fed::cmd_revoke(&resolve_cfg(cfg_path, data_dir)?.0.data_dir(), &target, &reason) {
+                    Ok(fp) => {
+                        println!("✓ 已吊销 {fp}（协调者立即拒绝其连接）");
+                        Ok(())
+                    }
+                    Err(e) => {
+                        eprintln!("✗ {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            "fed-expect" => {
+                let Some(joined) = arg else {
+                    eprintln!("用法: aisafeguard fed expect <node> <指纹>");
+                    std::process::exit(2);
+                };
+                let (node, fp) = joined.split_once('\u{1}').unwrap_or((joined.as_str(), ""));
+                return fed::cmd_expect(&resolve_cfg(cfg_path, data_dir)?.0.data_dir(), node, fp)
+                    .map_err(|e| anyhow::anyhow!("{e}"));
             }
             _ => unreachable!(),
         }
@@ -544,6 +593,20 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
                             cfg.fed.node, cfg.fed.listen_addr
                         ),
                     ));
+                    // C5 绑定建议（0.4.0）：监听公网地址或所有地址时提示——
+                    // 组织面应绑内网；暴露面盘点已把该端口计入
+                    if let Ok(addr) = cfg.fed.listen_addr.parse::<std::net::SocketAddr>() {
+                        let ip = addr.ip();
+                        let public = !ip.is_loopback()
+                            && !aisafeguard_core::is_protected_ip(ip)
+                            && !ip.is_unspecified();
+                        if public || ip.is_unspecified() {
+                            bus.publish(SecurityEvent::engine(
+                                "warn",
+                                "协同面绑定到非内网地址：建议改为内网地址（组织同步不需要公网可达；已入暴露面盘点）",
+                            ));
+                        }
+                    }
                     let eng = engine.clone();
                     let bus = bus.clone();
                     rt.spawn(async move {
