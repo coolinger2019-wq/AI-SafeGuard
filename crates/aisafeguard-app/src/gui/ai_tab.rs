@@ -172,7 +172,7 @@ impl AisafeApp {
                             if ui
                                 .add(
                                     egui::Button::new(
-                                        RichText::new("应用封禁").color(on_accent()),
+                                        RichText::new("灰度应用").color(on_accent()),
                                     )
                                     .fill(danger())
                                     .corner_radius(CornerRadius::same(6))
@@ -181,8 +181,32 @@ impl AisafeApp {
                                 .clicked()
                             {
                                 match self.eng.apply_proposal(pid) {
-                                    Ok(row) => self.set_toast(format!("已应用为规则 {}", row.name)),
+                                    Ok(row) => {
+                                        let until = row
+                                            .expires_ts
+                                            .and_then(|t| {
+                                                chrono::DateTime::from_timestamp(t, 0).map(|d| {
+                                                    d.with_timezone(&chrono::Local)
+                                                        .format("%H:%M")
+                                                        .to_string()
+                                                })
+                                            })
+                                            .unwrap_or_default();
+                                        self.set_toast(format!(
+                                            "已灰度应用为规则 {row}（{until} 自动解封，可在防火墙页转正）",
+                                            row = row.name
+                                        ));
+                                    }
                                     Err(e) => self.set_toast(format!("应用失败: {e}")),
+                                }
+                                self.refresh_cache();
+                            }
+                            if !p.remote_ip.is_empty() && ui.button("误报").clicked() {
+                                match self.eng.mark_false_positive(&p.remote_ip, "") {
+                                    Ok((dismissed, removed)) => self.set_toast(format!(
+                                        "已标记误报：收弃 {dismissed} 条建议，解封 {removed} 条规则（30 天内不再自动封禁该来源）"
+                                    )),
+                                    Err(e) => self.set_toast(format!("标记失败: {e}")),
                                 }
                                 self.refresh_cache();
                             }

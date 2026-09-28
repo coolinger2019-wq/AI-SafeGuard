@@ -108,6 +108,8 @@ impl AisafeApp {
                         row.col(|ui| {
                             let (text, color) = match r.origin.as_str() {
                                 "ai" => ("AI", purple()),
+                                "engine" => ("检测器", warn()),
+                                "intel" => ("情报", ok()),
                                 _ => ("手动", text_dim()),
                             };
                             ui.label(RichText::new(text).size(12.0).color(color));
@@ -117,6 +119,34 @@ impl AisafeApp {
                         });
                         row.col(|ui| {
                             let rid = r.id;
+                            // 灰度规则（AI 来源 + 带 TTL）可转正：TTL 延长到 promote_ttl_secs
+                            if r.origin == "ai"
+                                && r.enabled
+                                && r.expires_ts.is_some()
+                                && ui
+                                    .add(egui::Button::new(
+                                        RichText::new("转正").size(12.0).color(purple()),
+                                    ))
+                                    .clicked()
+                            {
+                                match self.eng.promote_rule(rid) {
+                                    Ok(row) => {
+                                        let until = row
+                                            .expires_ts
+                                            .and_then(|t| {
+                                                chrono::DateTime::from_timestamp(t, 0).map(|d| {
+                                                    d.with_timezone(&chrono::Local)
+                                                        .format("%Y-%m-%d %H:%M")
+                                                        .to_string()
+                                                })
+                                            })
+                                            .unwrap_or_default();
+                                        self.set_toast(format!("规则 #{rid} 已转正（封禁至 {until}）"));
+                                    }
+                                    Err(e) => self.set_toast(format!("转正失败: {e}")),
+                                }
+                                self.refresh_cache();
+                            }
                             if ui.add(egui::Button::new(RichText::new("删除").size(12.0).color(danger())).fill(Color32::TRANSPARENT)).clicked() {
                                 match self.eng.remove_rule(rid) {
                                     Ok(()) => self.set_toast(format!("规则 #{rid} 已删除")),

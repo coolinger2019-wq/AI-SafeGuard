@@ -30,9 +30,10 @@ impl AisafeApp {
             .column(egui_extras::Column::exact(110.0))
             .column(egui_extras::Column::exact(70.0))
             .column(egui_extras::Column::exact(150.0))
+            .column(egui_extras::Column::exact(64.0))
             .column(egui_extras::Column::remainder())
             .header(22.0, |mut header| {
-                for name in ["时间", "类型", "蜜罐", "来源", "摘要"] {
+                for name in ["时间", "类型", "蜜罐", "来源", "操作", "摘要"] {
                     header.col(|ui| {
                         ui.strong(name);
                     });
@@ -57,6 +58,25 @@ impl AisafeApp {
                                 format!("{}:{}", ev.remote_ip, ev.remote_port)
                             };
                             ui.label(RichText::new(src).monospace().size(12.0));
+                        });
+                        row.col(|ui| {
+                            // 检测类事件一键误报：30 天抑制该来源自动封禁 + 解除现有自动封禁
+                            if ev.kind == "detection"
+                                && !ev.remote_ip.is_empty()
+                                && ui
+                                    .add(egui::Button::new(
+                                        RichText::new("误报").size(11.0).color(warn()),
+                                    ))
+                                    .clicked()
+                            {
+                                match self.eng.mark_false_positive(&ev.remote_ip, "") {
+                                    Ok((dismissed, removed)) => self.set_toast(format!(
+                                        "已标记误报：解封 {removed} 条规则，收弃 {dismissed} 条建议（30 天抑制）"
+                                    )),
+                                    Err(e) => self.set_toast(format!("标记失败: {e}")),
+                                }
+                                self.refresh_cache();
+                            }
                         });
                         row.col(|ui| {
                             ui.label(RichText::new(&ev.summary).size(12.0));

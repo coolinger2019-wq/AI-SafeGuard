@@ -34,9 +34,11 @@ pub async fn serve(engine: Arc<EngineHandle>) {
         .route("/api/events", get(events))
         .route("/api/rules", get(list_rules).post(add_rule))
         .route("/api/rules/{id}", delete(remove_rule))
+        .route("/api/rules/{id}/promote", post(promote_rule))
         .route("/api/proposals", get(list_proposals))
         .route("/api/proposals/{id}/apply", post(apply_proposal))
         .route("/api/proposals/{id}/dismiss", post(dismiss_proposal))
+        .route("/api/feedback", get(list_feedback).post(mark_false_positive))
         .route("/api/stats", get(stats))
         .route("/api/exposure", get(get_exposure))
         .route("/api/exposure/scan", post(scan_exposure))
@@ -195,6 +197,45 @@ async fn apply_proposal(State(s): State<AppState>, Path(id): Path<i64>) -> Respo
 async fn dismiss_proposal(State(s): State<AppState>, Path(id): Path<i64>) -> Response {
     match s.engine.dismiss_proposal(id) {
         Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => err_resp(e),
+    }
+}
+
+/// 灰度规则转正：TTL 延长到 promote_ttl_secs。
+async fn promote_rule(State(s): State<AppState>, Path(id): Path<i64>) -> Response {
+    match s.engine.promote_rule(id) {
+        Ok(row) => Json(row).into_response(),
+        Err(e) => err_resp(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct FeedbackBody {
+    remote_ip: String,
+    note: Option<String>,
+}
+
+/// 误报反馈：记录（30 天抑制）+ 解除该来源自动封禁 + 收弃 pending 建议。
+async fn mark_false_positive(State(s): State<AppState>, Json(body): Json<FeedbackBody>) -> Response {
+    match s.engine.mark_false_positive(&body.remote_ip, body.note.as_deref().unwrap_or("")) {
+        Ok((dismissed, removed)) => Json(json!({
+            "ok": true,
+            "dismissed_proposals": dismissed,
+            "removed_rules": removed,
+        }))
+        .into_response(),
+        Err(e) => err_resp(e),
+    }
+}
+
+/// 抑制期内的误报反馈列表。
+async fn list_feedback(State(s): State<AppState>) -> Response {
+    match s.engine.store.list_active_feedback(
+        aisafeguard_core::now_ts(),
+        crate::engine::FP_SUPPRESS_TTL_SECS,
+        100,
+    ) {
+        Ok(rows) => Json(rows).into_response(),
         Err(e) => err_resp(e),
     }
 }

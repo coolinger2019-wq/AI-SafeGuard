@@ -209,6 +209,20 @@ impl Console for RemoteConsole {
         Ok(())
     }
 
+    fn promote_rule(&self, id: i64) -> anyhow::Result<RuleRow> {
+        Ok(self.post(&format!("/api/rules/{id}/promote"))?.json()?)
+    }
+
+    fn mark_false_positive(&self, ip: &str, note: &str) -> anyhow::Result<(i64, usize)> {
+        let v: serde_json::Value = self
+            .post_json("/api/feedback", &serde_json::json!({ "remote_ip": ip, "note": note }))?
+            .json()?;
+        Ok((
+            v["dismissed_proposals"].as_i64().unwrap_or(0),
+            v["removed_rules"].as_i64().unwrap_or(0) as usize,
+        ))
+    }
+
     fn trigger_analysis(&self) -> bool {
         self.post("/api/ai/analyze").is_ok()
     }

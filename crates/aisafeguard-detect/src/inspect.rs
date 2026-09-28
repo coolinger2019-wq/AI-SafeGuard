@@ -62,6 +62,12 @@ impl CapturePipeline {
         self.table.len()
     }
 
+    /// 流统计快照（AI 提示词输入用）：活跃流数 + 按纯 SYN 计数的前 n 名来源。
+    /// 红线：只含元数据与计数，无载荷。
+    pub fn flow_snapshot(&self, top_n: usize) -> (usize, Vec<(IpAddr, u32)>) {
+        (self.table.len(), self.table.top_syn_sources(top_n))
+    }
+
     /// 送入一帧（IP 包），返回本次触发的检测判定。
     pub fn on_frame(&mut self, ts: i64, data: &[u8], cfg: &CaptureConfig) -> Vec<FlowDetection> {
         if !cfg.enabled {

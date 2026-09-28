@@ -77,3 +77,13 @@
 - **rustix 的 Errno 变体名去掉 E 前缀但不是机械截断**：`EACCES → ACCESS`（不是 `ACCES`）。写 match 前先 grep 源码确认（`src/backend/linux_raw/io/errno.rs`），doc alias 里的老名字不能用于匹配。
 - **AF_PACKET 的语义对齐点**：①它给的是 L2 以太网帧（WinDivert NetworkLayer 给 L3），必须剥离后才能进同一管线——剥头偏移只有 14（以太网）/18（单层 802.1Q），做成纯函数全平台可测；②它没有内核过滤表达式，WinDivert 在内核做的事（control 只放纯 SYN、full 放 TCP）要在捕获线程用用户态预过滤补上，否则 flow 表语义漂移 + 高流量主机会把 4096 容量的帧通道灌满；③默认不开混杂模式，只收本机相关帧——正好符合隐私红线，别去加 PACKET_ADD_MEMBERSHIP。
 - **文案是行为的一部分**：GUI 设置页 0.3.1 留了一句"采样为被动观测（包原样注回）"——SNIFF 模式恰恰**不注回**（LESSONS 上一批刚记录），代码改对了但说明文字没跟着改。改行为时全仓库搜一遍旧描述（"注回"），说明文字与行为漂移比代码 bug 更误导。
+
+## 0.3 第四批 · AI 深度介入（2026-09-28）
+
+- **GUI 的 `self.eng` 是 `Arc<dyn Console>` 不是 EngineHandle**：给引擎加新能力（promote_rule/mark_false_positive）必须三处一起动——Console trait + EmbeddedConsole（`self.0.xxx().map_err(anyhow::Error::msg)`）+ RemoteConsole（HTTP → 新端点）。只改 EngineHandle 时 GUI 编译报 E0599 "method not found in `Arc<dyn Console>`"——trait 是 GUI/API 双通道契约，0.2 服务化时就该记住的纪律。
+- **AI 应用即灰度是语义对齐，不是新功能**：AI 判断是概率性的，"应用"不该等于"永久封禁"。AI 规则默认短 TTL（AI 给 `ttl_secs` 用它的、否则 `[ai].trial_ttl_secs` 默认 900s），人工"转正"才延长（`promote_ttl_secs` 默认 30 天）——复用既有 TTL 清扫任务与 rules.expires_ts 记账，零新执行器。永久 AI 规则（0.3.3 前）转正要明确拒绝（否则"转正"反而把永久降成 30 天）。
+- **误报"学习" = 本地抑制 + 提示词反馈，不训模型**：`fp_feedback` 表按 IP 聚合（count/first_ts/last_ts/note，ON CONFLICT 累加）+ `active_fp` 查询（handle_detection/auto_apply 跳过抑制来源）+ `<feedback>` 段进提示词。零推理成本、每次跳过留痕可审计、TTL 到期自然失效。
+- **reqwest blocking 的 `post_json` 返回 Response 不是 Value**：忘接 `.json()?` 就是 E0308 "expected `Value`, found `Response`"。远程 Console 的响应解析与内嵌不同形——内嵌直返结构体，远程要 JSON 反序列化，两套返回形状分别对。
+- **`cargo check` 不编译 `#[cfg(test)]` 代码**：改方法签名（insert_proposal 加 ttl_secs 参数）后 `cargo check` 全绿、`cargo clippy --all-targets` 才炸 E0061——测试调用点漏改。CI 门禁必须用 `--all-targets`。
+- **长会话里"我做过什么"的记忆会自己长出内容**：本轮多次出现编辑结果与记忆互相矛盾（"成功"与"失败"并存、同文件两个路径拼写、工具输出与 grep 不一致）。机械协议：每步编辑后立即 `cargo check`，以编译器输出为唯一事实源；状态彻底可疑时 `git stash push`（可逆兜底）→ `git status`/`git diff --stat HEAD` 机械核对 → `git stash pop` 恢复——stash 往返零丢失，比在矛盾记忆里继续编辑安全得多。
+- **Edit 被拒"File has not been read yet"是防线在工作**：只 grep/sed 过的文件（Bash 读）不算"已读"，Edit 工具要求 Read 工具读过才放行——被拒就老老实实 Read 再改，绝不凭记忆写 old_string。被拒的编辑不落盘，这本身就是保护。

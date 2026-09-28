@@ -112,6 +112,21 @@ impl FlowTable {
             self.flows.remove(&oldest);
         }
     }
+
+    /// 按纯 SYN 计数聚合来源，返回前 n 名（同分按 IP 字典序，保证快照稳定）。
+    /// 只含元数据与计数，无载荷——AI 提示词快照与展示共用。
+    pub fn top_syn_sources(&self, n: usize) -> Vec<(IpAddr, u32)> {
+        let mut agg: HashMap<IpAddr, u32> = HashMap::new();
+        for (k, s) in &self.flows {
+            if s.syn_count > 0 {
+                *agg.entry(k.src).or_insert(0) += s.syn_count;
+            }
+        }
+        let mut v: Vec<(IpAddr, u32)> = agg.into_iter().collect();
+        v.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.to_string().cmp(&b.0.to_string())));
+        v.truncate(n);
+        v
+    }
 }
 
 #[cfg(test)]
@@ -186,5 +201,30 @@ mod tests {
         let s = &t.flows[&k];
         assert_eq!(s.segments, 1);
         assert_eq!(s.payload_bytes, 100);
+    }
+
+    #[test]
+    fn top_syn_sources_aggregates_and_ranks() {
+        let mut t = FlowTable::new(1024);
+        // 源 A：两条流共 4 个 SYN
+        t.observe_syn(100, key("203.0.113.7", 80));
+        t.observe_syn(101, key("203.0.113.7", 80));
+        t.observe_syn(102, key("203.0.113.7", 443));
+        t.observe_syn(103, key("203.0.113.7", 443));
+        // 源 C：3 个（第二名）
+        for i in 0..3u32 {
+            t.observe_syn(105 + i as i64, key("203.0.113.8", 22));
+        }
+        // 源 B：1 个（第三名，n=2 时被截断）
+        t.observe_syn(104, key("198.51.100.9", 80));
+
+        let top = t.top_syn_sources(2);
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].0.to_string(), "203.0.113.7");
+        assert_eq!(top[0].1, 4);
+        assert_eq!(top[1].0.to_string(), "203.0.113.8");
+        assert_eq!(top[1].1, 3);
+        assert_eq!(t.top_syn_sources(1).len(), 1);
+        assert_eq!(t.top_syn_sources(10).len(), 3);
     }
 }

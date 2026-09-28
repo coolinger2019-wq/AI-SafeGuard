@@ -22,6 +22,22 @@ pub struct CaptureState {
     active: AtomicBool,
     mode: Mutex<String>,
     note: Mutex<String>,
+    /// 流统计快照（AI 深度介入）：捕获线程 sweep 时刷新，分析时随提示词送评。
+    /// 只含元数据与计数，无载荷。
+    flows: Mutex<FlowSnapshot>,
+}
+
+/// 流统计快照（提示词输入）。
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct FlowSnapshot {
+    pub flow_count: usize,
+    pub top_syn: Vec<SynSource>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SynSource {
+    pub ip: String,
+    pub syn_count: u32,
 }
 
 impl CaptureState {
@@ -34,6 +50,14 @@ impl CaptureState {
     pub fn set_error(&self, note: &str) {
         *self.note.lock().expect("捕获状态锁中毒") = note.to_string();
         self.active.store(false, Ordering::Relaxed);
+    }
+
+    pub fn set_flows(&self, snap: FlowSnapshot) {
+        *self.flows.lock().expect("流统计锁中毒") = snap;
+    }
+
+    pub fn flows(&self) -> FlowSnapshot {
+        self.flows.lock().expect("流统计锁中毒").clone()
     }
 
     pub fn active(&self) -> bool {
@@ -83,6 +107,10 @@ pub struct AiStatus {
     pub auto_apply: bool,
     pub auto_apply_min_severity: String,
     pub analyze_interval_secs: u64,
+    /// 灰度执行：AI 建议应用的默认封禁时长（秒）
+    pub trial_ttl_secs: u64,
+    /// 转正时长（秒）：人工确认后的封禁时长
+    pub promote_ttl_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,6 +206,8 @@ impl EngineHandle {
                 auto_apply: cfg.ai.auto_apply,
                 auto_apply_min_severity: cfg.ai.auto_apply_min_severity.clone(),
                 analyze_interval_secs: cfg.ai.analyze_interval_secs,
+                trial_ttl_secs: cfg.ai.trial_ttl_secs,
+                promote_ttl_secs: cfg.ai.promote_ttl_secs,
             },
         }
     }
@@ -288,7 +318,12 @@ impl EngineHandle {
             local_port: p.local_port,
             note: format!("AI 建议 #{}: {}", p.id, p.reason),
         };
-        let row = self.add_block(&spec, "ai")?;
+        // 灰度执行（AI 深度介入 v1）：AI 建议应用即短 TTL 试运行，到期自动解封；
+        // AI 明确给了 ttl_secs 用它的，否则用配置的默认灰度时长。人工"转正"才延长。
+        let trial_ttl = p
+            .ttl_secs
+            .unwrap_or(self.config().ai.trial_ttl_secs as i64);
+        let row = self.add_block_ex(&spec, "ai", Some(now_ts() + trial_ttl))?;
         self.store.set_proposal_status(id, "applied", Some(row.id))?;
         self.bus.publish(SecurityEvent::ProposalApplied {
             ts: now_ts(),
@@ -307,6 +342,72 @@ impl EngineHandle {
             self.store.set_proposal_status(id, "dismissed", None)?;
         }
         Ok(())
+    }
+
+    /// 灰度规则转正：TTL 延长到 promote_ttl_secs。只改记账（规则本体不动，
+    /// 解封由既有 TTL 清扫任务负责），全程留痕。
+    pub fn promote_rule(&self, id: i64) -> Result<RuleRow> {
+        let row = self
+            .store
+            .get_rule(id)?
+            .ok_or_else(|| Error::Store(format!("规则 #{id} 不存在")))?;
+        if !row.name.starts_with(RULE_PREFIX) {
+            return Err(Error::Firewall(format!("拒绝转正非 AI-SafeGuard 规则: {}", row.name)));
+        }
+        if !row.enabled {
+            return Err(Error::Store(format!("规则 #{id} 已禁用，无法转正")));
+        }
+        // 永久规则没有可延长的灰度窗，转正反而会把它变成 30 天 TTL——明确拒绝
+        if row.expires_ts.is_none() {
+            return Err(Error::Store(format!("规则 {} 已是永久封禁，无需转正", row.name)));
+        }
+        let expires = now_ts() + self.config().ai.promote_ttl_secs as i64;
+        self.store.update_rule_expires(id, Some(expires))?;
+        let until = chrono::DateTime::from_timestamp(expires, 0)
+            .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_default();
+        self.bus.publish(SecurityEvent::engine(
+            "info",
+            format!("规则 {} 已转正（封禁延长至 {until}）", row.name),
+        ));
+        let mut updated = row;
+        updated.expires_ts = Some(expires);
+        Ok(updated)
+    }
+
+    /// 误报反馈：记录（30 天抑制期）+ 解除该来源的全部自动封禁（engine/ai 来源，
+    /// 人工手动添加的规则不动）+ 收弃该来源的 pending 建议。全程留痕。
+    pub fn mark_false_positive(&self, ip_str: &str, note: &str) -> Result<(i64, usize)> {
+        let ip: IpAddr = ip_str
+            .trim()
+            .parse()
+            .map_err(|e| Error::Store(format!("IP 非法: {e}")))?;
+        if aisafeguard_core::is_protected_ip(ip) {
+            return Err(Error::Store("内网/回环地址本就受自动封禁保护，无需误报标记".into()));
+        }
+        let src = ip.to_string();
+        // 进提示词与库的都按不可信输入清洗
+        let note: String = note
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(200)
+            .collect();
+        self.store.insert_fp_feedback(&src, now_ts(), &note)?;
+        let dismissed = self.store.dismiss_pending_proposals_for_ip(&src)?;
+        let mut removed = 0usize;
+        for r in self.store.list_rules()? {
+            let auto = matches!(r.origin.as_str(), "engine" | "ai");
+            if auto && r.enabled && r.remote_ip == src && self.remove_rule(r.id).is_ok() {
+                removed += 1;
+            }
+        }
+        self.bus.publish(SecurityEvent::engine(
+            "info",
+            format!(
+                "误报反馈：{src} 已标记（自动封禁抑制 30 天；解封 {removed} 条规则，收弃 {dismissed} 条建议）"
+            ),
+        ));
+        Ok((dismissed, removed))
     }
 
     /// 触发一次 AI 分析（异步执行，状态通过事件与 ai_running 标志反馈）。
@@ -373,6 +474,45 @@ pub(crate) struct DetectionSink<'a> {
     pub bus: &'a EventBus,
 }
 
+/// 误报反馈抑制期（秒，30 天）：用户标记过误报的来源，自动封禁/自动应用跳过。
+/// 人工手动封禁不受影响（管理员意志优先）。
+pub const FP_SUPPRESS_TTL_SECS: i64 = 2_592_000;
+
+/// 本产品自身 API 攻击面清单（<self_endpoints> 段静态部分）。
+/// 与 api.rs 的路由保持同步——加端点时这里也要加（AI 自检的输入完整性依赖它）。
+const SELF_API_ENDPOINTS: &[&str] = &[
+    "GET /api/status — 状态总览",
+    "GET /api/events — 事件查询",
+    "GET/POST /api/rules；DELETE /api/rules/{id} — 防火墙规则管理",
+    "POST /api/rules/{id}/promote — 灰度规则转正",
+    "GET /api/proposals；POST /api/proposals/{id}/apply|dismiss — AI 建议",
+    "POST /api/feedback — 误报反馈",
+    "GET /api/stats、GET/POST /api/exposure[*/scan] — 统计与暴露面",
+    "GET /api/intel、POST /api/intel/refresh — 威胁情报",
+    "GET/POST /api/config — 配置读写",
+    "GET/POST/DELETE /api/ai/key — AI Key 管理",
+    "GET /api/ai/runs、POST /api/ai/analyze — AI 分析",
+];
+
+/// 本产品自身攻击面快照（<self_endpoints> 段动态部分：协同开关等运行事实）。
+fn self_surface_json(eng: &EngineHandle) -> String {
+    let cfg = eng.config();
+    serde_json::json!({
+        "api": {
+            "bind": "127.0.0.1（仅本机回环）",
+            "auth": "Bearer token（凭据管理器/数据目录文件，不落 config）",
+            "endpoints": SELF_API_ENDPOINTS,
+        },
+        "fed": {
+            "enabled": cfg.fed.enabled,
+            "role": cfg.fed.role,
+            "auth": "组织令牌（环境变量 AISAFEGUARD_FED_TOKEN）；mTLS 每节点证书为后续加固项",
+        },
+        "honeypot": "TCP 蜜罐端口有意对攻击者暴露（诱捕面，非攻击面）",
+    })
+    .to_string()
+}
+
 /// 快路径判定统一出口：广播 Detection；auto_block 时自动封禁（TTL + 内网保护 + 审计）。
 /// 频次引擎（蜜罐源）与采样捕获（真实流量源）都走这里，行为一致。
 fn handle_detection(
@@ -400,6 +540,18 @@ fn handle_detection(
         sink.bus.publish(SecurityEvent::engine(
             "info",
             format!("内网保护：跳过对 {src} 的自动封禁（{kind}）"),
+        ));
+        return;
+    }
+    // 误报反馈：用户已判定该来源为正常业务，自动封禁跳过（人工封禁不受影响）
+    if sink
+        .store
+        .active_fp(&src, now_ts(), FP_SUPPRESS_TTL_SECS)
+        .unwrap_or(false)
+    {
+        sink.bus.publish(SecurityEvent::engine(
+            "info",
+            format!("误报反馈抑制：跳过对 {src} 的自动封禁（{kind}）"),
         ));
         return;
     }
@@ -537,6 +689,18 @@ pub fn spawn_capture_task(eng: &Arc<EngineHandle>) {
                         if now - last_sweep >= 10 {
                             pipeline.sweep(now, &eng.config().detect.capture);
                             last_sweep = now;
+                            // 流统计快照随 sweep 刷新（AI 提示词输入，元数据与计数）
+                            let (flow_count, top) = pipeline.flow_snapshot(5);
+                            eng.capture.set_flows(FlowSnapshot {
+                                flow_count,
+                                top_syn: top
+                                    .into_iter()
+                                    .map(|(ip, syn_count)| SynSource {
+                                        ip: ip.to_string(),
+                                        syn_count,
+                                    })
+                                    .collect(),
+                            });
                         }
                     }
                     Err(RecvTimeoutError::Disconnected) => {
@@ -680,17 +844,35 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
         }
         Err(_) => None,
     };
+    // 采样捕获流统计快照（元数据与计数，无载荷）——捕获活跃时送评
+    let flows_json = if eng.capture.active() {
+        Some(serde_json::to_string(&eng.capture.flows()).unwrap_or_default())
+    } else {
+        None
+    };
+    // 误报反馈：抑制期内的来源一并送评（用户已判定正常的不再建议封禁）
+    let feedback_json = eng
+        .store
+        .list_active_feedback(now_ts(), FP_SUPPRESS_TTL_SECS, 20)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(|v| serde_json::to_string(&v).unwrap_or_default());
+    // 本产品自身 API/服务攻击面
+    let self_endpoints_json = self_surface_json(eng);
 
     let client = AiClient::new(&cfg.ai.base_url, &cfg.ai.model, &key);
     let result = client
         .chat(
             aisafeguard_ai::SYSTEM_PROMPT,
-            &aisafeguard_ai::build_user_prompt(
-                &stats_json,
-                &events_json,
-                exposure_json.as_deref(),
-                intel_json.as_deref(),
-            ),
+            &aisafeguard_ai::build_user_prompt(&aisafeguard_ai::PromptInputs {
+                stats: &stats_json,
+                events: &events_json,
+                exposure: exposure_json.as_deref(),
+                intel: intel_json.as_deref(),
+                flows: flows_json.as_deref(),
+                feedback: feedback_json.as_deref(),
+                self_endpoints: Some(&self_endpoints_json),
+            }),
         )
         .await;
 
@@ -714,6 +896,7 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                         &p.protocol,
                         &p.remote_ip,
                         p.local_port,
+                        p.ttl_secs,
                         &p.reason,
                         &analysis,
                     ) else {
@@ -728,7 +911,17 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                     created += 1;
                     let severity_ok = aisafeguard_ai::severity_rank(&p.severity)
                         >= aisafeguard_ai::severity_rank(&cfg.ai.auto_apply_min_severity);
-                    if cfg.ai.auto_apply && severity_ok && eng.apply_proposal(pid).is_ok() {
+                    // 自动应用同样尊重误报反馈（人工确认的应用不受影响）
+                    let fp_suppressed = p
+                        .remote_ip
+                        .parse::<IpAddr>()
+                        .map(|ip| {
+                            eng.store
+                                .active_fp(&ip.to_string(), now_ts(), FP_SUPPRESS_TTL_SECS)
+                                .unwrap_or(false)
+                        })
+                        .unwrap_or(false);
+                    if cfg.ai.auto_apply && severity_ok && !fp_suppressed && eng.apply_proposal(pid).is_ok() {
                         auto_applied += 1;
                     }
                 }
@@ -824,6 +1017,14 @@ impl Console for EmbeddedConsole {
 
     fn dismiss_proposal(&self, id: i64) -> anyhow::Result<()> {
         self.0.dismiss_proposal(id).map_err(anyhow::Error::msg)
+    }
+
+    fn promote_rule(&self, id: i64) -> anyhow::Result<RuleRow> {
+        self.0.promote_rule(id).map_err(anyhow::Error::msg)
+    }
+
+    fn mark_false_positive(&self, ip: &str, note: &str) -> anyhow::Result<(i64, usize)> {
+        self.0.mark_false_positive(ip, note).map_err(anyhow::Error::msg)
     }
 
     fn trigger_analysis(&self) -> bool {

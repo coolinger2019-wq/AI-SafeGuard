@@ -2,6 +2,33 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.3.4] - 2026-09-28
+
+按 ROADMAP 0.3 推进第四批：AI 深度介入 v1——处置灰度执行 + 误报反馈闭环 + 输入面扩展。
+
+### 新增
+
+- **处置灰度执行（playbook 语义落地）**：AI 建议应用即短 TTL 试运行——AI 明确给 `ttl_secs`（60-604800s，schema 严格校验、非法整条作废）用它的，否则配置 `[ai].trial_ttl_secs`（默认 900s）；到期由既有 TTL 清扫任务自动解封；人工"转正"延长到 `[ai].promote_ttl_secs`（默认 30 天），防火墙页灰度规则一键转正。语义分层：AI=暂时（灰度），人工转正=长期，管理员手动=随自己意；0.3.3 前的永久 AI 规则转正明确拒绝
+- **误报反馈闭环**：store 新表 `fp_feedback`（value=来源 IP 聚合，count/first_ts/last_ts/note，ON CONFLICT 累加）；`mark_false_positive` 一键三联动——记录反馈（30 天抑制 `active_fp`）+ 解除该来源全部 engine/ai 自动封禁（人工手动规则不动）+ 收弃该来源 pending 建议；自动封禁（快路径 handle_detection）与自动应用（AI auto_apply）跳过抑制期来源并留痕，人工封禁不受影响；`<feedback>` 段进提示词（"用户已判定正常，无新确凿证据不要再建议封禁"）
+- **AI 输入面扩展**：`<flows>` 段（采样捕获活跃时送评：流表快照 flow_count + 按纯 SYN 计数 top 5 来源——`FlowTable::top_syn_sources` 聚合、同分按 IP 字典序稳定排序；元数据与计数，无载荷）；`<self_endpoints>` 段（本产品自身 API 攻击面：端点清单 + 仅回环绑定 + Bearer token + fed 开关与鉴权现状，提示词要求评估自身暴露异常）
+- **API**：`POST /api/rules/{id}/promote`（转正）、`POST /api/feedback`（误报反馈，返回解封/收弃计数）、`GET /api/feedback`（抑制期列表）
+- **GUI 三页联动**：AI 页建议行"灰度应用"（toast 显示解封时间）+ "误报"；事件页 detection 行"误报"；防火墙页灰度 AI 规则"转正"按钮 + 来源列区分 AI/检测器/情报/手动
+- **Console 契约扩展**：trait 新增 `promote_rule`/`mark_false_positive`，内嵌（EngineHandle 委托）与远程（HTTP → 新端点）双实现，GUI 双形态行为一致
+- system prompt 更新：灰度语义（不确定→短 TTL 灰度、确凿→长 TTL）+ `<feedback>`/`<flows>`/`<self_endpoints>` 段说明；`PromptInputs` 结构化（7 段可选输入，无数据段不出现）
+- 单测：ai（ttl_secs 边界校验 60-604800、非法整条作废、提示词全段包含/缺省不出现）；store（fp_feedback 聚合 upsert/active 边界/收弃计数/update_rule_expires）；detect（top_syn_sources 聚合排序截断）；engine 集成（误报抑制跳过自动封禁、转正延长 TTL）
+
+### 变更
+
+- `apply_proposal` 从永久规则改为灰度 TTL（0.3.3 前应用的 AI 规则保持永久，转正对其明确拒绝）
+- 捕获管线 sweep 时刷新 `FlowSnapshot` 进 CaptureState（AI 分析随取随用）
+- fed 共享建议复验入库带 ttl_secs（远端建议同样走灰度语义）
+
+### 已知限制
+
+- 误报抑制 30 天为常量（`FP_SUPPRESS_TTL_SECS`），暂不可配
+- 转正 TTL 固定 `promote_ttl_secs`（默认 30 天），不支持"永久转正"（永久封禁走管理员手动添加）
+- 误报反馈按来源 IP 聚合，无 per-端口/per-协议粒度
+
 ## [0.3.3] - 2026-09-28
 
 按 ROADMAP 0.3 推进第三批：检测平台补齐 Linux 侧——AF_PACKET 采样捕获后端，

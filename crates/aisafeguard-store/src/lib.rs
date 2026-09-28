@@ -59,6 +59,18 @@ pub struct ProposalRow {
     pub status: String,
     pub applied_rule_id: Option<i64>,
     pub analysis: String,
+    /// AI 建议的灰度封禁时长（秒）；None = 引擎默认灰度时长
+    pub ttl_secs: Option<i64>,
+}
+
+/// 误报反馈条目（抑制期内的来源）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FpRow {
+    pub value: String,
+    pub count: i64,
+    pub first_ts: i64,
+    pub last_ts: i64,
+    pub note: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,6 +200,16 @@ CREATE TABLE IF NOT EXISTS fed_members (
     node      TEXT PRIMARY KEY,
     last_seen INTEGER NOT NULL
 );
+
+-- 误报反馈（AI 深度介入 v1）：用户判定为误报的来源，自动封禁/自动应用跳过，
+-- 并作为上下文送回 AI。value = 来源 IP；TTL 语义由查询侧（last_ts + 抑制期）实现。
+CREATE TABLE IF NOT EXISTS fp_feedback (
+    value    TEXT PRIMARY KEY,
+    count    INTEGER NOT NULL DEFAULT 1,
+    first_ts INTEGER NOT NULL,
+    last_ts  INTEGER NOT NULL,
+    note     TEXT NOT NULL DEFAULT ''
+);
 "#;
 
 /// 事件链哈希：H(prev_hash | 规范化行)。规范化用 serde_json 默认的字典序键，
@@ -259,6 +281,7 @@ impl Store {
             "ALTER TABLE events ADD COLUMN prev_hash TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE events ADD COLUMN hash TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE rules ADD COLUMN expires_ts INTEGER",
+            "ALTER TABLE proposals ADD COLUMN ttl_secs INTEGER",
         ] {
             let _ = conn.execute(sql, []); // 列已存在时报错，忽略
         }
@@ -697,6 +720,17 @@ impl Store {
             .collect())
     }
 
+    /// 转正：延长规则 TTL（灰度 → 长期）。只改记账，防火墙规则本体不动。
+    pub fn update_rule_expires(&self, id: i64, expires_ts: Option<i64>) -> Result<()> {
+        self.lock()?
+            .execute(
+                "UPDATE rules SET expires_ts = ?2 WHERE id = ?1",
+                params![id, expires_ts],
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(())
+    }
+
     // ---------- AI 建议 ----------
 
     pub fn pending_proposal_exists(&self, remote_ip: &str, local_port: Option<u16>) -> Result<bool> {
@@ -721,13 +755,14 @@ impl Store {
         protocol: &str,
         remote_ip: &str,
         local_port: Option<u16>,
+        ttl_secs: Option<u64>,
         reason: &str,
         analysis: &str,
     ) -> Result<i64> {
         self.lock()?
             .execute(
-                "INSERT INTO proposals (created_ts, model, severity, direction, protocol, remote_ip, local_port, reason, status, analysis)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9)",
+                "INSERT INTO proposals (created_ts, model, severity, direction, protocol, remote_ip, local_port, ttl_secs, reason, status, analysis)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', ?10)",
                 params![
                     aisafeguard_core::now_ts(),
                     model,
@@ -736,6 +771,7 @@ impl Store {
                     protocol,
                     remote_ip,
                     local_port,
+                    ttl_secs.map(|t| t as i64),
                     reason,
                     analysis
                 ],
@@ -750,11 +786,11 @@ impl Store {
         let conn = self.lock()?;
         let sql = match status {
             Some(_) => {
-                "SELECT id, created_ts, model, severity, direction, protocol, remote_ip, local_port, reason, status, applied_rule_id, analysis
+                "SELECT id, created_ts, model, severity, direction, protocol, remote_ip, local_port, reason, status, applied_rule_id, analysis, ttl_secs
                  FROM proposals WHERE status = ?1 ORDER BY id DESC LIMIT ?2"
             }
             None => {
-                "SELECT id, created_ts, model, severity, direction, protocol, remote_ip, local_port, reason, status, applied_rule_id, analysis
+                "SELECT id, created_ts, model, severity, direction, protocol, remote_ip, local_port, reason, status, applied_rule_id, analysis, ttl_secs
                  FROM proposals ORDER BY id DESC LIMIT ?2"
             }
         };
@@ -774,6 +810,7 @@ impl Store {
                     status: r.get(9)?,
                     applied_rule_id: r.get(10)?,
                     analysis: r.get(11)?,
+                    ttl_secs: r.get(12)?,
                 })
             })
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -806,6 +843,71 @@ impl Store {
             )
             .map_err(|e| Error::Store(e.to_string()))?;
         Ok(())
+    }
+
+    /// 误报标记：把该来源的全部 pending 建议一并收弃（用户已判定其为正常）。
+    /// 返回收弃条数。
+    pub fn dismiss_pending_proposals_for_ip(&self, remote_ip: &str) -> Result<i64> {
+        let n = self
+            .lock()?
+            .execute(
+                "UPDATE proposals SET status = 'dismissed'
+                 WHERE status = 'pending' AND remote_ip = ?1 AND remote_ip != ''",
+                params![remote_ip],
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(n as i64)
+    }
+
+    // ---------- 误报反馈 ----------
+
+    /// 记录一次误报标记（同来源聚合：count+1、last_ts/note 刷新为最新）。
+    pub fn insert_fp_feedback(&self, value: &str, ts: i64, note: &str) -> Result<()> {
+        self.lock()?
+            .execute(
+                "INSERT INTO fp_feedback (value, count, first_ts, last_ts, note)
+                 VALUES (?1, 1, ?2, ?2, ?3)
+                 ON CONFLICT(value) DO UPDATE SET count = count + 1, last_ts = excluded.last_ts, note = excluded.note",
+                params![value, ts, note],
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(())
+    }
+
+    /// 该来源是否处于误报抑制期（last_ts 起算 suppress_ttl_secs 内有过标记）。
+    pub fn active_fp(&self, value: &str, now: i64, suppress_ttl_secs: i64) -> Result<bool> {
+        let n: i64 = self
+            .lock()?
+            .query_row(
+                "SELECT COUNT(*) FROM fp_feedback WHERE value = ?1 AND last_ts + ?2 > ?3",
+                params![value, suppress_ttl_secs, now],
+                |r| r.get(0),
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(n > 0)
+    }
+
+    pub fn list_active_feedback(&self, now: i64, suppress_ttl_secs: i64, limit: u32) -> Result<Vec<FpRow>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT value, count, first_ts, last_ts, note FROM fp_feedback
+                 WHERE last_ts + ?2 > ?1 ORDER BY last_ts DESC LIMIT ?3",
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![now, suppress_ttl_secs, limit], |r| {
+                Ok(FpRow {
+                    value: r.get(0)?,
+                    count: r.get(1)?,
+                    first_ts: r.get(2)?,
+                    last_ts: r.get(3)?,
+                    note: r.get(4)?,
+                })
+            })
+            .map_err(|e| Error::Store(e.to_string()))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| Error::Store(e.to_string()))
     }
 
     // ---------- 暴露面快照 ----------
@@ -1075,7 +1177,7 @@ mod tests {
         assert_eq!(expired[0].name, "aisafeguard-blk-auto");
 
         let pid = store
-            .insert_proposal("m", "high", "in", "tcp", "203.0.113.9", Some(22), "扫描", "分析")
+            .insert_proposal("m", "high", "in", "tcp", "203.0.113.9", Some(22), None, "扫描", "分析")
             .unwrap();
         assert!(store.pending_proposal_exists("203.0.113.9", Some(22)).unwrap());
         store.set_proposal_status(pid, "applied", Some(rule.id)).unwrap();

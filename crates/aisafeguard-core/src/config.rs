@@ -131,6 +131,11 @@ pub struct AiConfig {
     pub analyze_interval_secs: u64,
     /// 上送给 LLM 的单条 payload 最大字符数。
     pub max_snippet_chars: usize,
+    /// 灰度执行：AI 建议应用时的默认封禁时长（秒，AI 未给 ttl_secs 时使用）。
+    /// AI 判断是概率性的——应用即短 TTL 试运行，到期自动解封，人工确认后转正。
+    pub trial_ttl_secs: u64,
+    /// 转正时长（秒）：灰度规则经人工"转正"后的封禁时长（默认 30 天）。
+    pub promote_ttl_secs: u64,
 }
 
 impl Default for AiConfig {
@@ -143,6 +148,8 @@ impl Default for AiConfig {
             auto_apply_min_severity: "high".into(),
             analyze_interval_secs: 900,
             max_snippet_chars: 200,
+            trial_ttl_secs: 900,
+            promote_ttl_secs: 2_592_000,
         }
     }
 }

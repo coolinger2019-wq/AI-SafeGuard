@@ -239,6 +239,7 @@ async fn fed_proposals(
             &valid.protocol,
             &valid.remote_ip,
             valid.local_port,
+            valid.ttl_secs,
             &valid.reason,
             "组织协同共享建议（接收方本地复验通过，待人工确认）",
         ) {

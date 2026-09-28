@@ -47,7 +47,7 @@
 - [x] **威胁情报管道 v1** [A.5.23]：Feodo C2 源（`feed_url` 可换自托管/镜像源）+ 本地蜜罐源；高置信度自动封禁（TTL 3 天+内网保护），本地/fed 源仅标注进 AI 上下文；`GET /api/intel`、`POST /api/intel/refresh`；6h 定时拉取，源不可达优雅跳过
 - [ ] **数据面（Windows）**：WFP callout 驱动或 WinDivert；ebpf-for-windows 成熟后试点评估（Aya 用户态加载器绑定 Linux bpf() 系统调用，不能直接用于 Windows）
 - [ ] **数据面（Linux）**：XDP + Aya 实现 `XdpBackend`——AI 封禁决策写入 eBPF map，内核微秒级生效（`Firewall` trait 已预留该扩展位）；蜜罐升级为 XDP_REDIRECT 诱导模式：对已标记的扫描源，把发往真实服务端口的流量重定向到蜜罐端口
-- [ ] **AI 深度介入**：处置 playbook（AI 生成、人工审核、灰度执行）；误报反馈学习；对产品自身 API 的攻击面自检；AI 输入接入流统计与情报标注
+- [x] **AI 深度介入 v1（0.3 第四批）**：处置灰度执行——AI 建议应用即短 TTL 试运行（AI 给 `ttl_secs` 60-604800s 用它的、否则 `[ai].trial_ttl_secs` 默认 900s；到期既有 TTL 清扫自动解封；人工"转正"延长到 `[ai].promote_ttl_secs` 默认 30 天，防火墙页一键转正）；误报反馈闭环——`fp_feedback` 表（IP 聚合 count/first/last/note）+ `mark_false_positive` 三联动（记录 30 天抑制 + 解除该来源 engine/ai 自动封禁 + 收弃 pending 建议），自动封禁/自动应用跳过抑制来源，`<feedback>` 段进提示词；AI 输入扩展——`<flows>`（流表快照 + top_syn_sources top5）+ `<self_endpoints>`（自身 API 攻击面自检：端点清单/回环绑定/Bearer/fed 现状）；API 三端点（promote/feedback×2）+ GUI 三页联动（AI 灰度应用+误报 / 事件误报 / 防火墙转正）+ Console 双实现（内嵌/远程）
 - [x] **多主机控制台（组织协同骨架，完全体见 §6 / 0.4）**：协调者 + agent——事件上报（时钟窗校验+100 条/批）、情报双向同步（fed 来源仅标注不自动封禁、内网地址上报前置拒收防投毒）、AI 建议推送（接收方本地复验、仅慢路径）；协调者失联各节点独立运行。鉴权 v1=组织令牌（环境变量），mTLS 每节点证书为 0.3 后续加固 [A.5.15]
 - [ ] 发布物代码签名 + 更新清单签名 [A.8.24]
 - [x] Linux systemd 服务化：`service install-systemd`（unit 写入 + daemon-reload + enable --now，数据目录 /var/lib/aisafeguard；systemd 未运行时照写 unit 并提示）——WSL 实测 active
