@@ -53,7 +53,7 @@
 
 ### 2.1 状态连接跟踪
 
-- **Windows**：基础状态化 0.1 已免费获得（WFP ALE 层）。自定义流统计走 WinDivert 用户态流表（0.3，用户态、免自研驱动签名）；WFP callout（需驱动签名）为最后手段。
+- **Windows**：基础状态化 0.1 已免费获得（WFP ALE 层）。自定义流统计走 WinDivert 用户态流表（0.3，用户态、免自研驱动签名）；WFP callout（需驱动签名）为最后手段——0.3.7 已拍板 WFP 为主路径、callout 仅感知侧中期评估项，详见文末「Windows 数据面决策」。
 - **Linux**：nftables `ct` 状态匹配（0.2 后端即带 established/related/new/invalid 规则模板）；更深的自定义流表用 eBPF LRU hash map（5 元组 → {syn_ts, pkt_count, byte_count, last_seen}），建在 XdpBackend 之上。
 - **落点**：流表统计（新建速率、半开连接数、每流字节分布）周期产出 `Detection` 事件入总线入库。
 - **AI 角色**：流统计是提示词的高价值特征——"60 秒内 800 个半开连接"比"连接数 800"对 LLM 有用一个量级。
@@ -157,6 +157,16 @@
 
 ### 6.5 落点与新增构件
 
-- **0.3（骨架）**：协调者 + agent——节点注册审批、事件上报、情报下发、Proposal 推送四条链路打通，mTLS 全程。
+- **0.3（骨架，0.3.6 已 mTLS 全程）**：协调者 + agent——事件上报（时钟窗校验）、情报双向同步、Proposal 推送（本地复验、仅慢路径）三链路打通；`fed init-ca`/`issue-cert` PKI、独立 mTLS 监听面、node↔证书指纹绑定。
 - **0.4（完全体）**：多节点印证 quorum、跨节点 Proposal 本地复验闭环、协调者选举、STIX 互操作评估。
 - **构件**：`fed` 模块（先放 `aisafeguard-app`，独立成 `aisafeguard-fed` crate 待接口稳定）；config 新增 `[fed]`（enabled / role / org_id / coordinator / quorum_n / 时间窗）；store 新表 `fed_members`（node_id, cert_fp, last_seen, trust），`intel` 表扩展 `sources` 列表列。
+
+## Windows 数据面决策（2026-09）
+
+**主路径：WFP（Windows Filtering Platform）。**  
+执行侧继续使用用户态 WFP 规则（与现有防火墙 COM/`aisafeguard-blk-*` 同一体系）；感知侧短期维持 WinDivert 采样（control/full），中期仅在确有需要时评估「WFP callout：classify + 元数据上送用户态流表/检测」，处置仍经事件总线与 `Firewall` trait，不在 callout 内直接扩成第二套执行器。
+
+**eBPF for Windows（ebpf-for-windows，及可选 xdp-for-windows）定为实验轨，不作为 0.3/0.4 阻塞项。**  
+其网络钩子窄于 Linux eBPF，且多数场景仍落在 WFP/XDP 扩展之上，并非与 WFP 平行的另一套完整过滤栈；与 Linux 程序亦非二进制兼容。生产路径常涉及运行时安装、系统版本门槛与签名/HVCI（含 bpf2c 原生驱动），部署成本高于「系统自带 BFE + 可选自有 callout」。实验仅限于早期过滤/计数类原型，命中后的封禁策略仍回现有 trait。
+
+**跨平台对齐方式：** Linux 0.5 可走 eBPF 流表 / XDP map；Windows 以 WFP 达到**能力对等**（采样、流元数据、情报驱动的封禁建议），不要求与 Linux 共用同一套 eBPF 程序。禁止为叙事一致而将 eBPF-for-windows 定为 Windows 唯一数据面。

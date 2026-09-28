@@ -45,16 +45,14 @@
 - [x] **检测平台（Linux，0.3 第三批）**：AF_PACKET 采样捕获（`capture::spawn` 平台分发，ETH_P_ALL 不 bind 观测所有接口、不开混杂模式；无 CAP_NET_RAW 优雅降级；L2 剥离 + 模式预过滤与 Windows 内核过滤器同语义）。L2→L3 剥离与过滤逻辑为纯函数，全平台单测 + 模糊测试；Linux 目标交叉类型检查已过，**实机 E2E 清单见 docs/LINUX-TESTING.md §12（待 Linux 环境）**。nflog 方案弃用：无 iptables 集成需求，AF_PACKET 更简单直接
 - [x] **快路径引擎扩展**：端口扫描 / SYN flood / 暴破速率内置检测器（暴破延续 0.2 频次引擎；扫描与 SYN flood 由采样捕获驱动），全部带 TTL 自动解封与内网保护，触发器映射表有容量上限防伪造源耗尽
 - [x] **威胁情报管道 v1** [A.5.23]：Feodo C2 源（`feed_url` 可换自托管/镜像源）+ 本地蜜罐源；高置信度自动封禁（TTL 3 天+内网保护），本地/fed 源仅标注进 AI 上下文；`GET /api/intel`、`POST /api/intel/refresh`；6h 定时拉取，源不可达优雅跳过
-- [ ] **数据面（Windows）**：WFP callout 驱动或 WinDivert；ebpf-for-windows 成熟后试点评估（Aya 用户态加载器绑定 Linux bpf() 系统调用，不能直接用于 Windows）
+- [x] **数据面（Windows，0.3.7 决策收口）**：主路径 = **WFP**——执行侧维持既有 COM/`aisafeguard-blk-*` 用户态管理面（规则由系统 BFE 在内核 WFP 层执行，与 Linux nftables→netfilter 同构，内核级生效能力已在手）；感知侧短期维持 WinDivert 采样（0.3.1），WFP callout（仅感知、处置仍走事件总线与 Firewall trait）为中期确有需要时的评估项；**eBPF for Windows 定为实验轨**，非 0.3/0.4 阻塞项。跨平台原则 = 能力对齐（采样/流元数据/情报驱动封禁），不做程序同源。详见 docs/NGFW_EVOLUTION.md「Windows 数据面决策」
 - [x] **数据面（Linux）**：XDP + Aya 快速执行层（0.3.7）——组合防火墙：nftables 永远兜底，「入站 + Any 协议 + 无端口 + IPv4」规则镜像进 eBPF map，内核收包路径 XDP_DROP 微秒级生效；eBPF 程序随仓库分发（`objects/*.o` 嵌入主程序，单二进制）；附加失败降级纯 nftables；WSL2 实测含"删 nft 表后 XDP 独立丢包"证明。蜜罐 XDP_REDIRECT 诱导模式待后续（map 基础已具备）
 - [x] **AI 深度介入 v1（0.3 第四批）**：处置灰度执行——AI 建议应用即短 TTL 试运行（AI 给 `ttl_secs` 60-604800s 用它的、否则 `[ai].trial_ttl_secs` 默认 900s；到期既有 TTL 清扫自动解封；人工"转正"延长到 `[ai].promote_ttl_secs` 默认 30 天，防火墙页一键转正）；误报反馈闭环——`fp_feedback` 表（IP 聚合 count/first/last/note）+ `mark_false_positive` 三联动（记录 30 天抑制 + 解除该来源 engine/ai 自动封禁 + 收弃 pending 建议），自动封禁/自动应用跳过抑制来源，`<feedback>` 段进提示词；AI 输入扩展——`<flows>`（流表快照 + top_syn_sources top5）+ `<self_endpoints>`（自身 API 攻击面自检：端点清单/回环绑定/Bearer/fed 现状）；API 三端点（promote/feedback×2）+ GUI 三页联动（AI 灰度应用+误报 / 事件误报 / 防火墙转正）+ Console 双实现（内嵌/远程）
 - [x] **多主机控制台（组织协同骨架，完全体见 §6 / 0.4）**：协调者 + agent——事件上报（时钟窗校验+100 条/批）、情报双向同步（fed 来源仅标注不自动封禁、内网地址上报前置拒收防投毒）、AI 建议推送（接收方本地复验、仅慢路径）；协调者失联各节点独立运行。**mTLS 每节点证书加固已完成（0.3.6）[A.5.15]**：`fed init-ca`/`issue-cert` PKI 工具链、协调者独立 mTLS 监听面（强制客户端证书链到组织 CA）、node↔证书指纹 TOFU 绑定、组织令牌移除
-- [ ] 发布物代码签名 + 更新清单签名 [A.8.24]
-- [x] Linux systemd 服务化：`service install-systemd`（unit 写入 + daemon-reload + enable --now，数据目录 /var/lib/aisafeguard；systemd 未运行时照写 unit 并提示）——WSL 实测 active
+- [x] 发布物签名 [A.8.24]（0.3.7 决策收口为过渡方案）：callout 推迟后驱动签名不再是 0.3 阻塞；当前以**分发渠道声明 + 发布页公布 SHA-256**（Batch A 的 A3 一并落地）为发布完整性过渡方案，EV 代码签名证书（发布物 + 未来 WFP callout 驱动共用）挂 0.4 收口批次，视采购情况执行- [x] Linux systemd 服务化：`service install-systemd`（unit 写入 + daemon-reload + enable --now，数据目录 /var/lib/aisafeguard；systemd 未运行时照写 unit 并提示）——WSL 实测 active
 - [x] 日志远程转发（syslog/SIEM）[A.8.15]：`forward::spawn_syslog_task` 事件总线 → RFC 5424（UDP/TCP 可选），severity 统一口径（detection/封禁=warning、蜜罐命中=notice），best-effort 不阻塞引擎，完整性以本地哈希链为准——WSL 实测 UDP/TCP 收包（0.3.5）
 - [x] 告警通知（webhook）：`forward::spawn_notify_task` POST JSON + `min_severity` 四档过滤 + 超时丢弃限频留痕——WSL 实测 severity 过滤与全量 body（0.3.5）
-- [ ] 报表导出与邮件通知
-
+- [x] 报表导出与邮件通知（2026-09-29 按用户 Won't 清单关闭：webhook + syslog 已覆盖外发需求；"复杂报表中心"与邮件明确不做——见 docs/ROADMAP-0.4.md §5）
 ## 版本分层说明（2026-09 修订）
 
 0.3.x 已完成：**检测平台 MVP + AI 深度介入 v1 + 事件外发 + 组织协同 mTLS**。  
@@ -126,6 +124,8 @@
 - [ ] 指标定义与文档一致
 
 ---
+
+> **Windows 数据面（已拍板，0.3 已收口）：** 主路径 = **WFP**（用户态规则维持现状；采样短期 WinDivert，中期可选 WFP callout 只做感知）。**eBPF for Windows** = 实验轨，非 0.3/0.4 阻塞项；与 Linux eBPF/XDP 仅做能力对齐，不做程序同源。结论已并入 0.3「数据面（Windows）」条目，详见 `docs/NGFW_EVOLUTION.md`「Windows 数据面决策」。
 
 ## 0.5 —— NGFW 数据面与规则（详见 docs/NGFW_EVOLUTION.md §4）
 
