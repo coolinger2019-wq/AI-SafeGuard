@@ -104,6 +104,18 @@ pub struct ListenerCount {
     pub hits: i64,
 }
 
+/// 价值指标（0.4.0 B5，口径写死见 docs/ROADMAP-0.4.md B5）：
+/// proposed=窗口内产生的 AI 建议；applied=其中被采纳（人工确认或自动应用）；
+/// fp=窗口内被标记误报的来源数；auto_blocks=窗口内检测器/AI 快路径自动封禁次数。
+/// 派生比率由展示层计算：采纳率 = applied/proposed；误报率 = fp/applied。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct ValueMetrics {
+    pub proposed: i64,
+    pub applied: i64,
+    pub fp: i64,
+    pub auto_blocks: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StatsSummary {
     pub total: i64,
@@ -432,6 +444,35 @@ impl Store {
                 |r| r.get(0),
             )
             .map_err(|e| Error::Store(e.to_string()))
+    }
+
+    /// 价值指标（0.4.0 B5）：三个单查询各取一个数，口径见 ValueMetrics 注释。
+    /// auto_blocks 以事件 summary 含「已自动封禁」识别（apply_block 的固定文案，
+    /// 手动/联邦规则的 firewall_add 文案不同）。
+    pub fn metrics_since(&self, since: i64) -> Result<ValueMetrics> {
+        let conn = self.lock()?;
+        let (proposed, applied) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(status = 'applied'), 0) FROM proposals WHERE created_ts >= ?1",
+                params![since],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        let fp = conn
+            .query_row(
+                "SELECT COUNT(*) FROM fp_feedback WHERE last_ts >= ?1",
+                params![since],
+                |r| r.get(0),
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        let auto_blocks = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind = 'engine' AND ts >= ?1 AND summary LIKE '%已自动封禁%'",
+                params![since],
+                |r| r.get(0),
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(ValueMetrics { proposed, applied, fp, auto_blocks })
     }
 
     pub fn stats_since(&self, since: i64) -> Result<StatsSummary> {
@@ -1100,6 +1141,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         Store::open(&dir.join("t.db")).unwrap()
+    }
+
+    /// 价值指标口径（0.4.0 B5）：建议数/采纳数/误报数/自动封禁数，按时间窗。
+    #[test]
+    fn value_metrics_windows() {
+        let store = tmp_store("metrics");
+        let now = aisafeguard_core::now_ts();
+        // 窗口内：2 条建议（1 条 applied）、1 条误报、1 次自动封禁
+        store.insert_proposal("glm", "high", "in", "any", "203.0.113.1", None, Some(900), "r1", "a").unwrap();
+        store.insert_proposal("glm", "high", "in", "any", "203.0.113.2", None, Some(900), "r2", "a").unwrap();
+        let ids: Vec<i64> = {
+            let conn = store.lock().unwrap();
+            let mut st = conn.prepare("SELECT id FROM proposals ORDER BY id").unwrap();
+            st.query_map([], |r| r.get(0)).unwrap().map(|x| x.unwrap()).collect()
+        };
+        store.set_proposal_status(ids[0], "applied", None).unwrap();
+        store.insert_fp_feedback("203.0.113.9", now, "fp").unwrap();
+        // 真实链路：「已自动封禁」文本在 kind=engine 的事件里（handle_detection 固定文案）
+        store
+            .insert_event(&aisafeguard_core::event::SecurityEvent::Engine {
+                ts: now,
+                level: "info".into(),
+                message: "已自动封禁 203.0.113.7 至 20:00:00（规则 aisafeguard-blk-x）".into(),
+            })
+            .unwrap();
+        let m = store.metrics_since(now - 60).unwrap();
+        assert_eq!(m.proposed, 2);
+        assert_eq!(m.applied, 1);
+        assert_eq!(m.fp, 1);
+        assert_eq!(m.auto_blocks, 1);
+        // 窗口外不计入
+        let outside = store.metrics_since(now + 60).unwrap();
+        assert_eq!((outside.proposed, outside.auto_blocks), (0, 0));
     }
 
     /// 误报抑制记录的清除（0.4.0 B3）。

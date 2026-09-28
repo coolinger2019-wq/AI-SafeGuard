@@ -9,6 +9,12 @@
 
 ### 新增
 
+- **价值指标仪表（B5）**：`store::metrics_since` 三个单查询取数（口径写死：
+  proposed=窗口内建议数、applied=采纳数、fp=窗口内误报来源数、
+  auto_blocks=快路径自动封禁次数，以 handle_detection 固定文案「已自动封禁」
+  识别）；`/api/status` 返回 `metrics_24h` / `metrics_7d`；AI 页顶部展示
+  双窗口数字与派生比率（采纳率 = 采纳/建议、误报率 = 误报/采纳，分母为零显示"—"）；
+  store 窗口内外断言测试
 - **误报抑制时长可配置 + 清除抑制（B3）**：`[ai].fp_suppress_secs`（默认 30 天）
   替代硬编码常量——快路径自动封禁 / auto_apply / 抑制列表三处统一读取；
   `DELETE /api/feedback/{ip}` + AI 页"生效中的误报抑制"小节（行内"清除抑制"

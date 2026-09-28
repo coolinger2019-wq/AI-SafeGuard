@@ -143,6 +143,9 @@ pub struct StatusReport {
     pub attackers_24h: i64,
     pub detect_enabled: bool,
     pub capture: CaptureStatus,
+    /// 价值指标（0.4.0 B5）：口径见 store::ValueMetrics，比率由展示层算
+    pub metrics_24h: aisafeguard_store::ValueMetrics,
+    pub metrics_7d: aisafeguard_store::ValueMetrics,
     pub ai: AiStatus,
 }
 
@@ -198,6 +201,14 @@ impl EngineHandle {
                 mode: self.capture.mode(),
                 note: self.capture.note(),
             },
+            metrics_24h: self
+                .store
+                .metrics_since(now_ts() - 86_400)
+                .unwrap_or_default(),
+            metrics_7d: self
+                .store
+                .metrics_since(now_ts() - 7 * 86_400)
+                .unwrap_or_default(),
             ai: AiStatus {
                 enabled: cfg.ai.enabled,
                 model: cfg.ai.model.clone(),

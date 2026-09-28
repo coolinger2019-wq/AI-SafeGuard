@@ -234,6 +234,31 @@ impl AisafeApp {
         }
 
         ui.add_space(10.0);
+        section(ui, "价值指标（口径：采纳率 = 采纳/建议，误报率 = 误报/采纳）");
+        if let Some(st) = &self.cache.status {
+            for (label, m) in [("近 24h", &st.metrics_24h), ("近 7 天", &st.metrics_7d)] {
+                let adopt_rate = if m.proposed > 0 {
+                    format!("{:.0}%", m.applied as f32 / m.proposed as f32 * 100.0)
+                } else {
+                    "—".into()
+                };
+                let fp_rate = if m.applied > 0 {
+                    format!("{:.0}%", m.fp as f32 / m.applied as f32 * 100.0)
+                } else {
+                    "—".into()
+                };
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(label).strong().size(13.0));
+                    ui.label(RichText::new(format!(
+                        "建议 {} · 采纳 {}（{}）· 误报 {}（{}）· 自动封禁 {}",
+                        m.proposed, m.applied, adopt_rate, m.fp, fp_rate, m.auto_blocks
+                    ))
+                    .size(12.0));
+                });
+            }
+        }
+
+        ui.add_space(10.0);
         section(ui, "生效中的误报抑制");
         if self.cache.feedback.is_empty() {
             ui.label(
