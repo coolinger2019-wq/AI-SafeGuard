@@ -48,6 +48,27 @@ impl Protocol {
 }
 
 /// 一条封禁规则的结构化描述。应用层只消费这个结构，不接触任何字符串命令。
+impl std::str::FromStr for Protocol {
+    type Err = std::convert::Infallible;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(match s {
+            "tcp" => Self::Tcp,
+            "udp" => Self::Udp,
+            _ => Self::Any,
+        })
+    }
+}
+
+impl std::str::FromStr for Direction {
+    type Err = std::convert::Infallible;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(match s {
+            "out" => Self::Out,
+            _ => Self::In,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct BlockSpec {
     pub direction: Direction,
@@ -55,6 +76,9 @@ pub struct BlockSpec {
     pub remote_ip: Option<IpAddr>,
     pub local_port: Option<u16>,
     pub note: String,
+    /// 可选标签（0.4.0 B1）：来源/用途分组（如「蜜罐」「情报」），审计与展示用，
+    /// 不参与防火墙匹配语义。
+    pub tag: String,
 }
 
 impl BlockSpec {
@@ -80,12 +104,13 @@ pub trait Firewall: Send + Sync {
     fn backend(&self) -> &'static str;
     fn is_elevated(&self) -> bool;
     fn add_block(&self, name: &str, spec: &BlockSpec) -> Result<()>;
-    /// Windows 按名字删；nftables 按 (方向, IP) 删集合元素，二者都从参数里拿。
-    fn remove(&self, name: &str, remote_ip: Option<IpAddr>, direction: Direction) -> Result<()>;
-    /// 启动时把已启用的来源 IP 封禁同步进防火墙（幂等）。
+    /// 删除规则。spec 携带完整执行语义（方向/协议/IP/端口）——
+    /// nftables 按此分派到 IP 级集合或端口级集合；Windows 按名字删。
+    fn remove(&self, name: &str, spec: &BlockSpec) -> Result<()>;
+    /// 启动时把已启用的封禁规则同步进防火墙（幂等）。
     /// Windows COM 规则跨重启持久，默认空实现；nftables 的 set 是易失的，
-    /// 需要每次启动重灌。
-    fn resync(&self, _entries: &[(Direction, IpAddr)]) -> Result<()> {
+    /// 需要每次启动重灌（0.4.0 B1 起携带完整 spec——含端口级规则）。
+    fn resync(&self, _specs: &[BlockSpec]) -> Result<()> {
         Ok(())
     }
 }
@@ -116,6 +141,13 @@ pub mod nft {
     pub const SET_IN6: &str = "blk6_in";
     pub const SET_OUT4: &str = "blk4_out";
     pub const SET_OUT6: &str = "blk6_out";
+    /// 端口级封禁（0.4.0 B1）：拼接类型集合 `ipv4_addr . inet_service`，
+    /// 元素形如 `{ 203.0.113.7 . 2222 }`——IP 级封禁之外的第二种粒度。
+    /// v6 端口级暂不支持（add_block 明确报错）。
+    pub const SET_PORT_TCP_IN: &str = "blk4_tcp_in";
+    pub const SET_PORT_UDP_IN: &str = "blk4_udp_in";
+    pub const SET_PORT_TCP_OUT: &str = "blk4_tcp_out";
+    pub const SET_PORT_UDP_OUT: &str = "blk4_udp_out";
     pub const CHAIN_IN: &str = "blk_in";
     pub const CHAIN_OUT: &str = "blk_out";
 
@@ -198,6 +230,69 @@ pub mod nft {
         ]
     }
 
+    /// 端口级拼接集合（`type ipv4_addr . inet_service`）
+    pub fn add_port_set(set: &str) -> Vec<String> {
+        vec![
+            "add".into(),
+            "set".into(),
+            "inet".into(),
+            TABLE.into(),
+            set.into(),
+            "{".into(),
+            "type".into(),
+            "ipv4_addr".into(),
+            ".".into(),
+            "inet_service".into(),
+            ";".into(),
+            "}".into(),
+        ]
+    }
+
+    /// 端口级集合元素：`{ 203.0.113.7 . 2222 }`
+    pub fn port_element_args(set: &str, ip: &str, port: u16) -> Vec<String> {
+        vec![
+            "add".into(),
+            "element".into(),
+            "inet".into(),
+            TABLE.into(),
+            set.into(),
+            format!("{{ {ip} . {port} }}"),
+        ]
+    }
+
+    /// 端口级集合元素删除（动词 delete）
+    pub fn port_element_args_delete(set: &str, ip: &str, port: u16) -> Vec<String> {
+        vec![
+            "delete".into(),
+            "element".into(),
+            "inet".into(),
+            TABLE.into(),
+            set.into(),
+            format!("{{ {ip} . {port} }}"),
+        ]
+    }
+
+    /// 端口级链规则：`ip saddr . tcp dport @blk4_tcp_in drop`（出站为 daddr）
+    pub fn drop_rule_port_for(chain: &str, set: &str, proto: &str, out: bool) -> Vec<String> {
+        let (addr_kw, port_kw) = match out {
+            false => ("ip saddr", "dport"),
+            true => ("ip daddr", "sport"),
+        };
+        vec![
+            "add".into(),
+            "rule".into(),
+            "inet".into(),
+            TABLE.into(),
+            chain.into(),
+            addr_kw.into(),
+            ".".into(),
+            proto.into(),
+            format!("{port_kw}"),
+            format!("@{set}"),
+            "drop".into(),
+        ]
+    }
+
     pub fn flush_set(set: &str) -> Vec<String> {
         vec!["flush".into(), "set".into(), "inet".into(), TABLE.into(), set.into()]
     }
@@ -227,6 +322,21 @@ pub mod nft {
             }
         }
         false
+    }
+
+    /// 端口级规则的 (协议, 方向) → set 名列表；protocol=Any → tcp+udp 两个集合
+    pub fn port_sets_for(
+        direction: crate::Direction,
+        protocol: crate::Protocol,
+    ) -> Vec<&'static str> {
+        use crate::{Direction, Protocol};
+        let (tcp, udp) = match (direction, protocol) {
+            (Direction::In, Protocol::Tcp) | (Direction::Out, Protocol::Tcp) => (Some(SET_PORT_TCP_IN), None),
+            (Direction::In, Protocol::Udp) | (Direction::Out, Protocol::Udp) => (None, Some(SET_PORT_UDP_IN)),
+            (Direction::In, _) => (Some(SET_PORT_TCP_IN), Some(SET_PORT_UDP_IN)),
+            (Direction::Out, _) => (Some(SET_PORT_TCP_OUT), Some(SET_PORT_UDP_OUT)),
+        };
+        [tcp, udp].into_iter().flatten().collect()
     }
 
     /// 把 (方向, IP) 映射到对应的 nft set 名
@@ -315,7 +425,7 @@ impl Firewall for WindowsFirewall {
             .map_err(|e| Error::Firewall(format!("添加规则 {name} 失败: {e}（需要管理员权限）")))
     }
 
-    fn remove(&self, name: &str, _remote_ip: Option<IpAddr>, _direction: Direction) -> Result<()> {
+    fn remove(&self, name: &str, _spec: &BlockSpec) -> Result<()> {
         if !name.starts_with(RULE_PREFIX) {
             return Err(Error::Firewall(format!("拒绝删除非 AI-SafeGuard 规则: {name}")));
         }
@@ -347,7 +457,7 @@ impl Firewall for UnsupportedFirewall {
         ))
     }
 
-    fn remove(&self, _name: &str, _remote_ip: Option<IpAddr>, _direction: Direction) -> Result<()> {
+    fn remove(&self, _name: &str, _spec: &BlockSpec) -> Result<()> {
         Err(Error::Firewall("当前平台暂无防火墙后端".into()))
     }
 }
@@ -410,6 +520,14 @@ impl NftablesBackend {
         ] {
             self.run(&nft::add_set(set, v6))?;
         }
+        for set in [
+            nft::SET_PORT_TCP_IN,
+            nft::SET_PORT_UDP_IN,
+            nft::SET_PORT_TCP_OUT,
+            nft::SET_PORT_UDP_OUT,
+        ] {
+            self.run(&nft::add_port_set(set))?;
+        }
         for (chain, hook) in [(nft::CHAIN_IN, "input"), (nft::CHAIN_OUT, "output")] {
             self.run(&nft::add_chain(chain, hook))?;
         }
@@ -427,6 +545,21 @@ impl NftablesBackend {
                 continue;
             }
             if let Err(e) = self.run(&nft::drop_rule_for(chain, set, out)) {
+                failures.push(e.to_string());
+            }
+        }
+        // 端口级链规则（0.4.0 B1）：in 链两条（tcp/udp dport）、out 链两条（sport）
+        for (chain, set, proto, out) in [
+            (nft::CHAIN_IN, nft::SET_PORT_TCP_IN, "tcp", false),
+            (nft::CHAIN_IN, nft::SET_PORT_UDP_IN, "udp", false),
+            (nft::CHAIN_OUT, nft::SET_PORT_TCP_OUT, "tcp", true),
+            (nft::CHAIN_OUT, nft::SET_PORT_UDP_OUT, "udp", true),
+        ] {
+            let listing = self.run(&nft::list_chain(chain).iter().map(|s| s.to_string()).collect::<Vec<_>>())?;
+            if listing.contains(&format!("@{set}")) {
+                continue;
+            }
+            if let Err(e) = self.run(&nft::drop_rule_port_for(chain, set, proto, out)) {
                 failures.push(e.to_string());
             }
         }
@@ -467,31 +600,72 @@ impl Firewall for NftablesBackend {
     fn add_block(&self, _name: &str, spec: &BlockSpec) -> Result<()> {
         let Some(ip) = spec.remote_ip else {
             return Err(Error::Firewall(
-                "nftables 后端 0.2 仅支持按来源 IP 封禁（仅端口封禁待后续版本）".into(),
+                "nftables 后端仅支持按来源 IP（可选端口）封禁".into(),
             ));
         };
-        let set = nft::set_for(spec.direction, ip);
-        self.element_op(nft::add_element, set, &ip)
+        match spec.local_port {
+            // 端口级：v4 拼接集合；any 协议 = tcp+udp 两个集合都写
+            Some(port) => {
+                let sets = nft::port_sets_for(spec.direction, spec.protocol);
+                self.ensure_setup()?;
+                for set in sets {
+                    self.run(&nft::port_element_args(set, &ip.to_string(), port))?;
+                }
+                Ok(())
+            }
+            None => {
+                let set = nft::set_for(spec.direction, ip);
+                self.element_op(nft::add_element, set, &ip)
+            }
+        }
     }
 
-    fn remove(&self, _name: &str, remote_ip: Option<IpAddr>, direction: Direction) -> Result<()> {
-        let Some(ip) = remote_ip else {
-            return Err(Error::Firewall(
-                "nftables 后端删除需要来源 IP（仅端口封禁待后续版本）".into(),
-            ));
+    fn remove(&self, _name: &str, spec: &BlockSpec) -> Result<()> {
+        let Some(ip) = spec.remote_ip else {
+            return Err(Error::Firewall("nftables 后端删除需要来源 IP".into()));
         };
-        let set = nft::set_for(direction, ip);
-        self.element_op(nft::delete_element, set, &ip)
+        match spec.local_port {
+            Some(port) => {
+                let sets = nft::port_sets_for(spec.direction, spec.protocol);
+                self.ensure_setup()?;
+                for set in sets {
+                    self.run(&nft::port_element_args_delete(set, &ip.to_string(), port))?;
+                }
+                Ok(())
+            }
+            None => {
+                let set = nft::set_for(spec.direction, ip);
+                self.element_op(nft::delete_element, set, &ip)
+            }
+        }
     }
 
-    fn resync(&self, entries: &[(Direction, IpAddr)]) -> Result<()> {
+    fn resync(&self, specs: &[BlockSpec]) -> Result<()> {
         self.ensure_setup()?;
-        for set in [nft::SET_IN4, nft::SET_IN6, nft::SET_OUT4, nft::SET_OUT6] {
+        for set in [
+            nft::SET_IN4,
+            nft::SET_IN6,
+            nft::SET_OUT4,
+            nft::SET_OUT6,
+            nft::SET_PORT_TCP_IN,
+            nft::SET_PORT_UDP_IN,
+            nft::SET_PORT_TCP_OUT,
+            nft::SET_PORT_UDP_OUT,
+        ] {
             self.run(&nft::flush_set(set))?;
         }
-        for (dir, ip) in entries {
-            let set = nft::set_for(*dir, *ip);
-            self.run(&nft::add_element(set, &ip.to_string()))?;
+        for spec in specs {
+            let Some(ip) = spec.remote_ip else { continue };
+            match spec.local_port {
+                Some(port) => {
+                    for set in nft::port_sets_for(spec.direction, spec.protocol) {
+                        self.run(&nft::port_element_args(set, &ip.to_string(), port))?;
+                    }
+                }
+                None => {
+                    self.run(&nft::add_element(nft::set_for(spec.direction, ip), &ip.to_string()))?;
+                }
+            }
         }
         Ok(())
     }

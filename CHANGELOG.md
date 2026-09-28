@@ -9,6 +9,13 @@
 
 ### 新增
 
+- **规则模型扩展（B1）**：防火墙 trait 支持可选端口全链路——nftables 端口级
+  拼接集合（`ipv4_addr . inet_service`，4 个新集合 + 4 条链规则），`add_block`
+  按 `local_port` 分派 IP 级/端口级（**此前端口被静默放大为封全端口**），
+  `any` 协议 = tcp+udp 双集合；trait `remove` 改收完整 `BlockSpec`（janitor/
+  删规则处由规则行构造，语义不再丢失），`resync` 携带完整 spec（端口级规则
+  重启后可重灌）；Windows COM 按名字删除不受影响；规则表加 `tag` 可选标签
+  （API/GUI 表单可填，列表展示，审计可解释性）；旧「仅 IP」规则完全兼容
 - **价值指标仪表（B5）**：`store::metrics_since` 三个单查询取数（口径写死：
   proposed=窗口内建议数、applied=采纳数、fp=窗口内误报来源数、
   auto_blocks=快路径自动封禁次数，以 handle_detection 固定文案「已自动封禁」

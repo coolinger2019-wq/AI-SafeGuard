@@ -107,6 +107,54 @@ fn block_spec_still_validates() {
         remote_ip: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))),
         local_port: None,
         note: "nft".into(),
+            tag: String::new(),
     };
     assert!(spec.describe().contains("203.0.113.7"));
+}
+
+#[test]
+fn port_level_rule_construction() {
+    use aisafeguard_firewall::nft;
+
+    // 拼接集合创建
+    assert_eq!(
+        nft::add_port_set("blk4_tcp_in"),
+        ["add", "set", "inet", "aisafeguard", "blk4_tcp_in", "{", "type", "ipv4_addr", ".", "inet_service", ";", "}"]
+    );
+
+    // 元素：ip . port
+    assert_eq!(
+        nft::port_element_args("blk4_tcp_in", "203.0.113.7", 2222),
+        ["add", "element", "inet", "aisafeguard", "blk4_tcp_in", "{ 203.0.113.7 . 2222 }"]
+    );
+    assert_eq!(
+        nft::port_element_args_delete("blk4_udp_out", "198.51.100.5", 53),
+        ["delete", "element", "inet", "aisafeguard", "blk4_udp_out", "{ 198.51.100.5 . 53 }"]
+    );
+
+    // 链规则：入站 saddr+dport，出站 daddr+sport
+    assert_eq!(
+        nft::drop_rule_port_for("blk_in", "blk4_tcp_in", "tcp", false),
+        ["add", "rule", "inet", "aisafeguard", "blk_in", "ip saddr", ".", "tcp", "dport", "@blk4_tcp_in", "drop"]
+    );
+    assert_eq!(
+        nft::drop_rule_port_for("blk_out", "blk4_udp_out", "udp", true),
+        ["add", "rule", "inet", "aisafeguard", "blk_out", "ip daddr", ".", "udp", "sport", "@blk4_udp_out", "drop"]
+    );
+
+    // 分派：any 协议 → tcp+udp 两个集合；单协议 → 一个
+    use aisafeguard_firewall::{BlockSpec, Direction, Protocol};
+    let spec_any = BlockSpec {
+        direction: Direction::In,
+        protocol: Protocol::Any,
+        remote_ip: Some("203.0.113.7".parse().unwrap()),
+        local_port: Some(2222),
+        note: String::new(),
+        tag: String::new(),
+    };
+    let sets = nft::port_sets_for(spec_any.direction, spec_any.protocol);
+    assert_eq!(sets, ["blk4_tcp_in", "blk4_udp_in"]);
+
+    let spec_tcp = BlockSpec { protocol: Protocol::Tcp, ..spec_any.clone() };
+    assert_eq!(nft::port_sets_for(spec_tcp.direction, spec_tcp.protocol), ["blk4_tcp_in"]);
 }

@@ -286,8 +286,15 @@ impl EngineHandle {
             return Err(Error::Firewall(format!("拒绝删除非 AI-SafeGuard 规则: {}", row.name)));
         }
         let direction = if row.direction == "in" { Direction::In } else { Direction::Out };
-        let remote_ip = row.remote_ip.parse::<IpAddr>().ok();
-        self.firewall.remove(&row.name, remote_ip, direction)?;
+        let spec = BlockSpec {
+            direction,
+            protocol: row.protocol.parse().unwrap_or(Protocol::Any),
+            remote_ip: row.remote_ip.parse::<IpAddr>().ok(),
+            local_port: row.local_port,
+            note: row.note.clone(),
+            tag: row.tag.clone(),
+        };
+        self.firewall.remove(&row.name, &spec)?;
         self.store.delete_rule(id)?;
         self.bus.publish(SecurityEvent::FirewallRuleRemoved {
             ts: now_ts(),
@@ -328,6 +335,7 @@ impl EngineHandle {
             remote_ip,
             local_port: p.local_port,
             note: format!("AI 建议 #{}: {}", p.id, p.reason),
+            tag: "AI".into(),
         };
         // 灰度执行（AI 深度介入 v1）：AI 建议应用即短 TTL 试运行，到期自动解封；
         // AI 明确给了 ttl_secs 用它的，否则用配置的默认灰度时长。人工"转正"才延长。
@@ -509,6 +517,7 @@ pub(crate) fn apply_block(
         spec.local_port,
         origin,
         &spec.note,
+        &spec.tag,
         expires_ts,
     )?;
     bus.publish(SecurityEvent::FirewallRuleAdded {
@@ -613,6 +622,7 @@ fn handle_detection(
         remote_ip: Some(ip),
         local_port: None,
         note: format!("检测器自动封禁（TTL {}s）: {evidence}", dcfg.ttl_secs),
+        tag: "检测器".into(),
     };
     match apply_block(sink.fw, sink.store, sink.bus, &spec, "engine", Some(now_ts() + dcfg.ttl_secs)) {
         Ok(row) => {
@@ -823,9 +833,15 @@ pub fn spawn_expiry_janitor(eng: &Arc<EngineHandle>) {
             };
             for row in expired {
                 let name = row.name.clone();
-                let direction = if row.direction == "in" { Direction::In } else { Direction::Out };
-                let remote_ip = row.remote_ip.parse::<IpAddr>().ok();
-                if let Err(e) = eng.firewall.remove(&name, remote_ip, direction) {
+                let spec = BlockSpec {
+                    direction: if row.direction == "in" { Direction::In } else { Direction::Out },
+                    protocol: row.protocol.parse().unwrap_or(Protocol::Any),
+                    remote_ip: row.remote_ip.parse::<IpAddr>().ok(),
+                    local_port: row.local_port,
+                    note: row.note.clone(),
+                    tag: row.tag.clone(),
+                };
+                if let Err(e) = eng.firewall.remove(&name, &spec) {
                     tracing::warn!("解封规则 {name} 失败: {e}");
                 }
                 let _ = eng.store.delete_rule(row.id);
@@ -1288,6 +1304,7 @@ pub async fn run_intel_refresh(eng: &Arc<EngineHandle>, cfg: &aisafeguard_core::
                 remote_ip: Some(ip),
                 local_port: None,
                 note: format!("威胁情报自动封禁（{} / TTL 3 天）", e.source),
+            tag: "情报".into(),
             };
             if eng
                 .add_block_ex(&spec, "intel", Some(now + 3 * 86400))
@@ -1335,8 +1352,9 @@ mod tests {
                 .push((name.to_string(), spec.clone()));
             Ok(())
         }
-        fn remove(&self, name: &str, _ip: Option<IpAddr>, _d: Direction) -> Result<()> {
+        fn remove(&self, name: &str, spec: &BlockSpec) -> Result<()> {
             self.removed.lock().expect("mock 锁中毒").push(name.to_string());
+            let _ = spec;
             Ok(())
         }
     }
@@ -1465,6 +1483,7 @@ mod tests {
             remote_ip: None,
             local_port: None,
             note: "空".into(),
+            tag: String::new(),
         };
         assert!(apply_block(&f.fw, &f.store, &f.bus, &spec, "test", None).is_err());
         assert!(f.fw.added.lock().unwrap().is_empty());

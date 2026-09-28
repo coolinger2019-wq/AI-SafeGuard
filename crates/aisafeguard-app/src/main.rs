@@ -499,22 +499,25 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
     // 启动时把 DB 中已启用的来源 IP 封禁同步回防火墙
     // （nftables 的 set 是易失的；Windows COM 规则持久，resync 为空实现）
     if let Ok(rules) = engine.store.list_rules() {
-        let entries: Vec<(aisafeguard_firewall::Direction, std::net::IpAddr)> = rules
+        let specs: Vec<aisafeguard_firewall::BlockSpec> = rules
             .iter()
             .filter(|r| r.enabled && !r.remote_ip.is_empty())
             .filter_map(|r| {
-                let direction = if r.direction == "in" {
-                    aisafeguard_firewall::Direction::In
-                } else {
-                    aisafeguard_firewall::Direction::Out
-                };
-                r.remote_ip
-                    .parse::<std::net::IpAddr>()
-                    .ok()
-                    .map(|ip| (direction, ip))
+                Some(aisafeguard_firewall::BlockSpec {
+                    direction: if r.direction == "in" {
+                        aisafeguard_firewall::Direction::In
+                    } else {
+                        aisafeguard_firewall::Direction::Out
+                    },
+                    protocol: r.protocol.parse().unwrap_or(aisafeguard_firewall::Protocol::Any),
+                    remote_ip: r.remote_ip.parse::<std::net::IpAddr>().ok(),
+                    local_port: r.local_port,
+                    note: r.note.clone(),
+                    tag: r.tag.clone(),
+                })
             })
             .collect();
-        if let Err(e) = engine.firewall.resync(&entries) {
+        if let Err(e) = engine.firewall.resync(&specs) {
             tracing::warn!("防火墙规则同步失败: {e}");
         }
     }

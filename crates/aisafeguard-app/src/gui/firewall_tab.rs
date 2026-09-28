@@ -52,6 +52,14 @@ impl AisafeApp {
                         .hint_text("可选，会写进防火墙规则描述"),
                 );
                 ui.end_row();
+
+                ui.label("标签");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.new_tag)
+                        .desired_width(380.0)
+                        .hint_text("可选，来源/用途分组（如「蜜罐」「办公网段」）"),
+                );
+                ui.end_row();
             });
         ui.add_space(6.0);
         if ui
@@ -100,6 +108,9 @@ impl AisafeApp {
                         row.col(|ui| {
                             let ip = if r.remote_ip.is_empty() { "任意".into() } else { r.remote_ip.clone() };
                             ui.label(RichText::new(ip).monospace().size(12.0));
+                            if !r.tag.is_empty() {
+                                ui.label(RichText::new(format!("#{}", r.tag)).size(10.0).color(text_dim()));
+                            }
                         });
                         row.col(|ui| {
                             let p = r.local_port.map(|p| p.to_string()).unwrap_or_else(|| "任意".into());
@@ -196,6 +207,7 @@ impl AisafeApp {
             } else {
                 self.new_note.trim().to_string()
             },
+            tag: self.new_tag.trim().to_string(),
         };
         match self.eng.add_block(&spec, "manual") {
             Ok(_) => {
@@ -203,6 +215,7 @@ impl AisafeApp {
                 self.new_ip.clear();
                 self.new_port.clear();
                 self.new_note.clear();
+                self.new_tag.clear();
             }
             Err(e) => self.set_toast(format!("添加失败: {e}")),
         }

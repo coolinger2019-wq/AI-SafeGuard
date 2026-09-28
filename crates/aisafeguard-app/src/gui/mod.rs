@@ -59,6 +59,7 @@ pub struct AisafeApp {
     new_dir_out: bool,
     new_proto_idx: usize,
     new_note: String,
+    new_tag: String,
     // 事件过滤
     event_filter: String,
     // 设置草稿（None = 未编辑；进入设置页时从引擎取）
@@ -128,6 +129,7 @@ impl AisafeApp {
             new_dir_out: false,
             new_proto_idx: 0,
             new_note: String::new(),
+            new_tag: String::new(),
             event_filter: String::new(),
             settings_draft: None,
             settings_interval: String::new(),

@@ -211,13 +211,14 @@ impl Firewall for CompositeFirewall {
         Ok(())
     }
 
-    fn remove(&self, name: &str, remote_ip: Option<IpAddr>, direction: Direction) -> Result<()> {
+    fn remove(&self, name: &str, spec: &BlockSpec) -> Result<()> {
         // 两层都清：base 失败（如元素/表已不存在）不阻断加速层清理，
         // 否则 XDP map 会残留"nft 看不见的封禁"；原样返回 base 的结果保持 API 诚实
-        let base_result = self.base.remove(name, remote_ip, direction);
+        let base_result = self.base.remove(name, spec);
         #[cfg(target_os = "linux")]
-        if direction == Direction::In {
-            if let Some(IpAddr::V4(ip)) = remote_ip {
+        if spec.direction == Direction::In && spec.local_port.is_none() {
+            // 端口级规则不进 XDP map（只镜像 IP 级），无需清理
+            if let Some(IpAddr::V4(ip)) = spec.remote_ip {
                 if let Some(fast) = self.fast.lock().expect("XDP 状态锁中毒").as_mut() {
                     if let Err(e) = fast.unblock(ip) {
                         tracing::warn!("XDP 解封 {ip} 失败: {e}");
@@ -228,15 +229,15 @@ impl Firewall for CompositeFirewall {
         base_result
     }
 
-    fn resync(&self, entries: &[(Direction, IpAddr)]) -> Result<()> {
-        self.base.resync(entries)?;
+    fn resync(&self, specs: &[BlockSpec]) -> Result<()> {
+        self.base.resync(specs)?;
         #[cfg(target_os = "linux")]
         {
-            let desired: Vec<Ipv4Addr> = entries
+            let desired: Vec<Ipv4Addr> = specs
                 .iter()
-                .filter(|(d, _)| *d == Direction::In)
-                .filter_map(|(_, ip)| match ip {
-                    IpAddr::V4(v4) => Some(*v4),
+                .filter(|s| s.direction == Direction::In && s.local_port.is_none())
+                .filter_map(|s| match s.remote_ip {
+                    Some(IpAddr::V4(v4)) => Some(v4),
                     _ => None,
                 })
                 .collect();
@@ -260,6 +261,7 @@ mod tests {
             remote_ip: ip,
             local_port: port,
             note: "test".into(),
+            tag: String::new(),
         }
     }
 

@@ -116,6 +116,8 @@ struct AddRuleBody {
     remote_ip: Option<String>,
     local_port: Option<u16>,
     note: Option<String>,
+    /// 可选标签（0.4.0 B1）：来源/用途分组
+    tag: Option<String>,
 }
 
 async fn add_rule(State(s): State<AppState>, Json(body): Json<AddRuleBody>) -> Response {
@@ -155,6 +157,7 @@ async fn add_rule(State(s): State<AppState>, Json(body): Json<AddRuleBody>) -> R
         remote_ip,
         local_port: body.local_port,
         note: body.note.unwrap_or_else(|| "API 手动添加".into()),
+        tag: body.tag.clone().unwrap_or_default(),
     };
     match s.engine.add_block(&spec, "manual") {
         Ok(row) => Json(row).into_response(),

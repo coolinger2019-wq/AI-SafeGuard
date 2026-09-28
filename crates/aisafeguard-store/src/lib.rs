@@ -43,6 +43,8 @@ pub struct RuleRow {
     pub note: String,
     /// 非空 = 自动封禁，到期由解封任务移除；手动规则为 NULL。
     pub expires_ts: Option<i64>,
+    /// 可选标签（0.4.0 B1）：来源/用途分组，展示与审计用
+    pub tag: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,7 +162,8 @@ CREATE TABLE IF NOT EXISTS rules (
     origin     TEXT NOT NULL DEFAULT 'manual',
     enabled    INTEGER NOT NULL DEFAULT 1,
     note       TEXT NOT NULL DEFAULT '',
-    expires_ts INTEGER
+    expires_ts INTEGER,
+    tag        TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS proposals (
@@ -296,6 +299,7 @@ impl Store {
             "ALTER TABLE rules ADD COLUMN expires_ts INTEGER",
             "ALTER TABLE proposals ADD COLUMN ttl_secs INTEGER",
             "ALTER TABLE fed_members ADD COLUMN cert_fp TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE rules ADD COLUMN tag TEXT NOT NULL DEFAULT ''",
         ] {
             let _ = conn.execute(sql, []); // 列已存在时报错，忽略
         }
@@ -675,14 +679,15 @@ impl Store {
         local_port: Option<u16>,
         origin: &str,
         note: &str,
+        tag: &str,
         expires_ts: Option<i64>,
     ) -> Result<RuleRow> {
         let ts = aisafeguard_core::now_ts();
         self.lock()?
             .execute(
-                "INSERT INTO rules (created_ts, name, direction, protocol, remote_ip, local_port, origin, enabled, note, expires_ts)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9)",
-                params![ts, name, direction, protocol, remote_ip, local_port, origin, note, expires_ts],
+                "INSERT INTO rules (created_ts, name, direction, protocol, remote_ip, local_port, origin, enabled, note, tag, expires_ts)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10)",
+                params![ts, name, direction, protocol, remote_ip, local_port, origin, note, tag, expires_ts],
             )
             .map_err(|e| Error::Store(e.to_string()))?;
         let id = self
@@ -704,6 +709,7 @@ impl Store {
             origin: origin.into(),
             enabled: true,
             note: note.into(),
+            tag: tag.into(),
             expires_ts,
         })
     }
@@ -712,7 +718,7 @@ impl Store {
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, created_ts, name, direction, protocol, remote_ip, local_port, origin, enabled, note, expires_ts
+                "SELECT id, created_ts, name, direction, protocol, remote_ip, local_port, origin, enabled, note, tag, expires_ts
                  FROM rules ORDER BY id DESC",
             )
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -729,7 +735,8 @@ impl Store {
                     origin: r.get(7)?,
                     enabled: r.get::<_, i64>(8)? != 0,
                     note: r.get(9)?,
-                    expires_ts: r.get(10)?,
+                    tag: r.get(10)?,
+                    expires_ts: r.get(11)?,
                 })
             })
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -1298,7 +1305,7 @@ mod tests {
     fn rules_expiry_and_proposals() {
         let store = tmp_store("rp");
         let rule = store
-            .insert_rule("aisafeguard-blk-x", "in", "tcp", "203.0.113.9", Some(22), "manual", "test", None)
+            .insert_rule("aisafeguard-blk-x", "in", "tcp", "203.0.113.9", Some(22), "manual", "test", "ssh", None)
             .unwrap();
         assert_eq!(store.count_rules().unwrap(), 1);
         assert!(store.get_rule(rule.id).unwrap().is_some());
@@ -1313,6 +1320,7 @@ mod tests {
                 None,
                 "engine",
                 "freq",
+                "检测器",
                 Some(aisafeguard_core::now_ts() - 10),
             )
             .unwrap();
