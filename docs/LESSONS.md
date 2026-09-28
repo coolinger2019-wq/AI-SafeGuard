@@ -118,3 +118,24 @@
 - **低阈值实验配置是自扰源**：把 `syn_flood_rate` 调到 4 后，测试脚本自己的 curl 轮询
   就成了"对 7420 端口的洪水"来源。实验阈值调低前先想清楚测试自身流量会不会成为被测样本；
   判定事件里出现"自己"不一定是 bug，先查传感器视角。
+
+## 0.3 第六批 · 组织协同 mTLS（2026-09-28）
+
+- **TLS 加密后端要主动钉死，feature 合并会悄悄换 provider**：rustls 0.23 默认
+  provider 是 aws-lc-rs（Windows 构建需要 CMake/NASM）；reqwest 的 rustls-tls 走
+  ring，而 axum-server 的 tls-rustls 特性按默认拉 aws-lc-rs——一旦引入，feature
+  按并集合并，整个依赖树就背上 C 工具链。对策：手写 accept 循环（tokio-rustls +
+  rustls 都显式 `default-features=false, features=["ring", …]`），不引 axum-server。
+  引任何 TLS 相关 crate 前先 `cargo tree` 查 ring vs aws-lc-rs。
+- **rcgen 0.13 的 issuer 形参是 `Certificate`，不是 `CertificateParams`**：
+  `from_ca_cert_pem`（需 x509-parser 特性）只能取回"签发元数据"（DN 等），要签发
+  就用同一参数+同一密钥 `self_signed` 重建 issuer 元数据对象——SKI/AKI 由公钥确定性
+  派生，DN 从文件读取，重建的 DER 不落盘，链验证照样过。另外 `SanType::DnsName`
+  收 `Ia5String`（ASCII），非 ASCII 主机名要在入口拒掉。
+- **axum Router 不实现 hyper 的 Service trait**（它实现 tower 的，且请求体是
+  `Incoming`）：hyper_util 的连接驱动要经 `TowerToHyperService` 适配——
+  `Router.layer(Extension(每连接状态))` + 该适配器是"per-connection 注入 TLS 对端
+  信息"的最短路径，不需要 axum-server 也不需要 service_fn/oneshot 手动搬 body。
+- **跨进程身份的"绑定"要防抢注**：node↔证书指纹用 TOFU（首见登记）就有抢注窗口——
+  先写明风险边界（需先持有 CA 签发证书 + 时序窗口）与恢复路径（管理员删成员记录），
+  把彻底解法（吊销列表、quorum 印证）挂到 0.4，比假装没有这个窗口诚实。

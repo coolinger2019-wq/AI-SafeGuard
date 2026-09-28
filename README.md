@@ -2,7 +2,7 @@
 
 用 Rust 编写的模块化终端安全软件。**蜜罐诱捕 → 事件流水线 → 快路径频次检测 / AI 慢路径分析 → 防火墙处置** 的端到端闭环，带本地图形界面。
 
-> 当前版本 **0.3.5**（检测平台 MVP + AI 深度介入 v1 + 事件外发：syslog 远程转发 / webhook 告警 / 暴露面定时扫描，Windows + Linux）。设计文档见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，路线图见 [docs/ROADMAP.md](docs/ROADMAP.md)，ISO 27001 对照见 [docs/COMPLIANCE.md](docs/COMPLIANCE.md)，NGFW/分布式演进见 [docs/NGFW_EVOLUTION.md](docs/NGFW_EVOLUTION.md)。
+> 当前版本 **0.3.6**（检测平台 MVP + AI 深度介入 v1 + 事件外发 + 组织协同 mTLS，Windows + Linux）。设计文档见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，路线图见 [docs/ROADMAP.md](docs/ROADMAP.md)，ISO 27001 对照见 [docs/COMPLIANCE.md](docs/COMPLIANCE.md)，NGFW/分布式演进见 [docs/NGFW_EVOLUTION.md](docs/NGFW_EVOLUTION.md)。
 
 ## 当前功能
 
@@ -19,7 +19,7 @@
 - **威胁情报**：Feodo C2 源 + 本地蜜罐源，高置信度自动封禁，命中随 AI 分析送评
 - **日志远程转发**（默认关闭）：事件总线 → RFC 5424 syslog 收集器（UDP/TCP），severity 统一口径（detection/封禁=warning、蜜罐命中=notice），best-effort 不阻塞引擎，完整性以本地哈希链为准
 - **告警通知**（默认关闭）：达到阈值的事件 POST JSON 到 webhook 接收端（企业微信/钉钉/Slack 兼容网关或自建），最低严重度四档可配
-- **组织协同**（骨架）：协调者/agent 双角色，事件上报、情报同步、AI 建议推送（本地复验、仅慢路径）
+- **组织协同**（骨架）：协调者/agent 双角色，事件上报、情报同步、AI 建议推送（本地复验、仅慢路径）；mTLS 每节点证书（`fed init-ca` / `fed issue-cert`，node↔证书指纹绑定，协调者独立 mTLS 监听面）
 - **本地 API**：`127.0.0.1` + Bearer token，供脚本与未来的远程控制台使用
 
 ## 构建与运行

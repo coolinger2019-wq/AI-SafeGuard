@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.5"
+version = "0.3.6"
 edition = "2024"
 license = "MIT"
 authors = ["coolinger (vibe coding)"]
@@ -37,6 +37,16 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 keyring = { version = "3", default-features = false, features = ["windows-native"] }
 sha2 = "0.10"
+# 组织协同 mTLS（0.3.6）：rcgen 签发组织 CA 与节点证书（ring 后端与 reqwest 的
+# rustls-tls 同一加密栈）；tokio-rustls 手写 accept 循环做 /fed 独立 mTLS 面。
+# 注意：不走 axum-server 的 tls-rustls 特性——rustls 默认 provider 是 aws-lc-rs
+# （Windows 构建要 CMake/NASM），feature 合并会悄悄引入；显式 ring 保持依赖树纯净。
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring", "pem", "x509-parser"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+base64 = "0.22"
+hyper-util = { version = "0.1", features = ["service"] }
+time = { version = "0.3", default-features = false, features = ["std"] }
 etherparse = "0.18"
 # Linux 采样捕获（AF_PACKET 原始套接字，安全 API，仅 Linux 目标编译）。
 # time 特性：rustix 1.1.5 的 net 单独启用时 linux_raw 后端缺 timespec（sockopt 需要）

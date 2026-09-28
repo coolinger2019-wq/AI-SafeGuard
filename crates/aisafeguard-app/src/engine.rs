@@ -506,7 +506,7 @@ fn self_surface_json(eng: &EngineHandle) -> String {
         "fed": {
             "enabled": cfg.fed.enabled,
             "role": cfg.fed.role,
-            "auth": "组织令牌（环境变量 AISAFEGUARD_FED_TOKEN）；mTLS 每节点证书为后续加固项",
+            "auth": "mTLS：独立监听面，客户端证书须链到组织 CA（fed init-ca / issue-cert 签发），node↔证书指纹绑定",
         },
         "honeypot": "TCP 蜜罐端口有意对攻击者暴露（诱捕面，非攻击面）",
     })

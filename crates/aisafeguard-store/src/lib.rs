@@ -198,7 +198,8 @@ CREATE TABLE IF NOT EXISTS intel (
 
 CREATE TABLE IF NOT EXISTS fed_members (
     node      TEXT PRIMARY KEY,
-    last_seen INTEGER NOT NULL
+    last_seen INTEGER NOT NULL,
+    cert_fp   TEXT NOT NULL DEFAULT ''
 );
 
 -- 误报反馈（AI 深度介入 v1）：用户判定为误报的来源，自动封禁/自动应用跳过，
@@ -282,6 +283,7 @@ impl Store {
             "ALTER TABLE events ADD COLUMN hash TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE rules ADD COLUMN expires_ts INTEGER",
             "ALTER TABLE proposals ADD COLUMN ttl_secs INTEGER",
+            "ALTER TABLE fed_members ADD COLUMN cert_fp TEXT NOT NULL DEFAULT ''",
         ] {
             let _ = conn.execute(sql, []); // 列已存在时报错，忽略
         }
@@ -996,24 +998,51 @@ impl Store {
 
     // ---------- 组织协同 ----------
 
-    pub fn upsert_fed_member(&self, node: &str, ts: i64) -> Result<()> {
-        self.lock()?
-            .execute(
-                "INSERT INTO fed_members (node, last_seen) VALUES (?1, ?2)
-                 ON CONFLICT(node) DO UPDATE SET last_seen = excluded.last_seen",
-                params![node, ts],
+    /// 成员注册/心跳：node ↔ 证书指纹首次绑定（TOFU），之后每次上报校验指纹一致。
+    pub fn upsert_fed_member(&self, node: &str, ts: i64, cert_fp: &str) -> Result<bool> {
+        let conn = self.lock()?;
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT cert_fp FROM fed_members WHERE node = ?1",
+                params![node],
+                |r| r.get(0),
             )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
             .map_err(|e| Error::Store(e.to_string()))?;
-        Ok(())
+        match existing {
+            // 已注册：指纹必须一致（证书被盗用冒充其他节点在此被拒）
+            Some(fp) if fp == cert_fp => {
+                conn.execute(
+                    "UPDATE fed_members SET last_seen = ?2 WHERE node = ?1",
+                    params![node, ts],
+                )
+                .map_err(|e| Error::Store(e.to_string()))?;
+                Ok(true)
+            }
+            Some(_) => Ok(false),
+            // 首次登记
+            None => {
+                conn.execute(
+                    "INSERT INTO fed_members (node, last_seen, cert_fp) VALUES (?1, ?2, ?3)",
+                    params![node, ts, cert_fp],
+                )
+                .map_err(|e| Error::Store(e.to_string()))?;
+                Ok(true)
+            }
+        }
     }
 
-    pub fn list_fed_members(&self) -> Result<Vec<(String, i64)>> {
+    pub fn list_fed_members(&self) -> Result<Vec<(String, String, i64)>> {
         let conn = self.lock()?;
         let mut stmt = conn
-            .prepare("SELECT node, last_seen FROM fed_members ORDER BY last_seen DESC")
+            .prepare("SELECT node, cert_fp, last_seen FROM fed_members ORDER BY last_seen DESC")
             .map_err(|e| Error::Store(e.to_string()))?;
         let rows = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .map_err(|e| Error::Store(e.to_string()))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| Error::Store(e.to_string()))
@@ -1061,6 +1090,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         Store::open(&dir.join("t.db")).unwrap()
+    }
+
+    /// fed 成员 node ↔ 证书指纹 TOFU 绑定：首登、同指纹心跳、异指纹拒绝。
+    #[test]
+    fn fed_member_cert_pinning() {
+        let store = tmp_store("fed-pin");
+        assert!(store.upsert_fed_member("agent1", 100, "fp-a").unwrap());
+        assert_eq!(store.list_fed_members().unwrap().len(), 1);
+        // 同指纹心跳：刷新 last_seen，不产生新行
+        assert!(store.upsert_fed_member("agent1", 200, "fp-a").unwrap());
+        let rows = store.list_fed_members().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], ("agent1".into(), "fp-a".into(), 200));
+        // 异指纹：拒绝（证书冒用/更换都在此拦下，换证需管理员删成员记录）
+        assert!(!store.upsert_fed_member("agent1", 300, "fp-b").unwrap());
+        assert_eq!(store.list_fed_members().unwrap()[0].2, 200);
+        // 另一节点独立登记
+        assert!(store.upsert_fed_member("agent2", 400, "fp-b").unwrap());
+        assert_eq!(store.list_fed_members().unwrap().len(), 2);
     }
 
     fn hit(store: &Store, ip: &str, summary: &str) {

@@ -2,6 +2,57 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.3.6] - 2026-09-28
+
+按 ROADMAP 0.3 推进第六批：组织协同 mTLS 每节点证书加固 [A.5.15]——
+组织共享令牌整体移除（无兼容层），节点身份改由 X.509 证书承载。
+
+### 新增
+
+- **PKI 工具链**：`aisafeguard fed init-ca`（生成组织 CA，自签 10 年，
+  `<数据目录>/fed/ca.pem` + `ca-key.pem`；已存在时明确拒绝——覆盖 CA = 全网信任
+  重置，绝不能静默发生）；`aisafeguard fed issue-cert <node> [--san <dns|ip> ...]`
+  （签发节点证书，默认 SAN = 节点名，协调者需追加对外地址的 SAN；
+  clientAuth + serverAuth 双 EKU 一证两用；输出 SHA-256 指纹供核对）。
+  rcgen 0.13 签发（ring 后端，与 reqwest 的 rustls-tls 同一加密栈）
+- **协调者独立 mTLS 监听面**：`[fed].listen_addr`（默认 0.0.0.0:7421），
+  rustls WebPkiClientVerifier **强制**客户端证书链到组织 CA；手写 accept 循环
+  （tokio-rustls + TowerToHyperService）——不走 axum-server 的 tls-rustls 特性，
+  避免 feature 合并悄悄引入 aws-lc-rs provider（Windows 构建需 CMake/NASM）。
+  /fed 路由整体从本地 API（127.0.0.1:7420）迁出
+- **node ↔ 证书指纹 TOFU 绑定**：首次接触登记 `cert_fp`（fed_members 表新列），
+  之后每次请求校验指纹一致——一张失窃证书冒用其他节点名在此被拦（403）；
+  换证需管理员删除成员记录重新登记
+- **agent mTLS 客户端**：reqwest 携带本节点证书身份 + 组织 CA 验证协调者；
+  证书材料（默认 `<数据目录>/fed/{ca,cert,key}.pem` 或 `certs/<node>.pem`）
+  惰性加载——缺失只降级留痕（60s 限频），补齐文件后下一轮自动恢复
+- 配置 `[fed]` 新增 `listen_addr` / `ca_path` / `cert_path` / `key_path`
+  （空 = 数据目录 fed/ 默认位置；节点证书对另回退 `certs/<node>.pem`）；
+  移除 `AISAFEGUARD_FED_TOKEN` 环境变量与 `effective_token()`
+- 单测：cert_fp SHA-256 已知向量、节点名校验、PKI 全流程（init-ca → issue-cert
+  → 读回证书/私钥 → 指纹一致；重复 init-ca 拒绝）、store 指纹绑定（首登/心跳/
+  异指纹拒绝/多成员）
+
+### 变更
+
+- fed_members 表加 `cert_fp` 列（ALTER 兼容存量库）；`GET /fed/members` 返回指纹
+- AI `<self_endpoints>` 段的 fed 鉴权描述同步为 mTLS 现状
+
+### 已知限制
+
+- node↔指纹为 TOFU：攻击者若在真实节点之前用合法证书抢注节点名可完成绑定
+  （需先持有组织 CA 签发的证书，风险窗口限于首个上报周期）；证书吊销列表
+  （CRL/OCSP）与 quorum 印证属 0.4
+- 协调者 mTLS 面按配置对外监听（默认 0.0.0.0:7421）——这是组织同步的必要暴露，
+  暴露面盘点会将其计入
+- 时钟窗校验（±1h）沿用 0.3.0；节点间 NTP 同步仍是部署前提
+
+### 实测（WSL2 Ubuntu 24.04，2026-09-28）
+
+- 双实例（coord1 + agent1）真 TLS 握手：agent 15s 一轮上报，协调者事件流出现
+  `fed:agent1` 蜜罐命中；成员表指纹与签发输出一致
+- 负路径：无客户端证书 → TLS 握手被拒；agent2 合法证书冒用 node=agent1 → 403
+
 ## [0.3.5] - 2026-09-28
 
 按 ROADMAP 0.3 推进第五批：事件外发与自动化——日志远程转发（syslog/SIEM）+

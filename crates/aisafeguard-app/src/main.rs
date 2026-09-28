@@ -90,6 +90,7 @@ fn main() -> anyhow::Result<()> {
     let mut cfg_path: Option<PathBuf> = None;
     let mut data_dir: Option<PathBuf> = None;
     let mut command: Option<(String, Option<String>)> = None;
+    let mut fed_sans: Vec<String> = Vec::new();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -118,6 +119,36 @@ fn main() -> anyhow::Result<()> {
                     Some(p) => command = Some(("export-events".into(), Some(p.clone()))),
                     None => {
                         eprintln!("用法: aisafeguard export-events <输出.jsonl>");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "fed" => {
+                i += 1;
+                match args.get(i).map(|s| s.as_str()) {
+                    Some("init-ca") => command = Some(("fed-init-ca".into(), None)),
+                    Some("issue-cert") => {
+                        i += 1;
+                        match args.get(i) {
+                            Some(node) => command = Some(("fed-issue-cert".into(), Some(node.clone()))),
+                            None => {
+                                eprintln!("用法: aisafeguard fed issue-cert <node> [--san <dns|ip> ...]");
+                                std::process::exit(2);
+                            }
+                        }
+                    }
+                    _ => {
+                        eprintln!("用法: aisafeguard fed init-ca | fed issue-cert <node> [--san ...]");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--san" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => fed_sans.push(v.clone()),
+                    None => {
+                        eprintln!("--san 需要一个值（DNS 名或 IP）");
                         std::process::exit(2);
                     }
                 }
@@ -190,6 +221,14 @@ fn main() -> anyhow::Result<()> {
                 }
                 #[cfg(windows)]
                 return Ok(());
+            }
+            "fed-init-ca" => return fed::cmd_init_ca(&resolve_cfg(cfg_path, data_dir)?.0.data_dir()),
+            "fed-issue-cert" => {
+                let Some(node) = arg else {
+                    eprintln!("用法: aisafeguard fed issue-cert <node> [--san <dns|ip> ...]");
+                    std::process::exit(2);
+                };
+                return fed::cmd_issue_cert(&resolve_cfg(cfg_path, data_dir)?.0.data_dir(), &node, &fed_sans);
             }
             _ => unreachable!(),
         }
@@ -422,7 +461,7 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
         rt.spawn(async move { api::serve(engine).await });
     }
 
-    // 组织协同（0.3 骨架）：coordinator 挂 /fed 路由，agent 起上报任务
+    // 组织协同（0.3）：coordinator 起独立 mTLS 监听面，agent 起上报任务
     if cfg.fed.enabled {
         if !cfg.fed.valid_role() || cfg.fed.node.is_empty() {
             bus.publish(SecurityEvent::engine(
@@ -434,20 +473,33 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
                 "coordinator" => {
                     bus.publish(SecurityEvent::engine(
                         "info",
-                        format!("组织协同：本节点为协调者（{}）", cfg.fed.node),
+                        format!(
+                            "组织协同：本节点为协调者（{}），mTLS 面监听 {}",
+                            cfg.fed.node, cfg.fed.listen_addr
+                        ),
                     ));
-                    // 路由在 api::serve 内按配置挂载
+                    let eng = engine.clone();
+                    let bus = bus.clone();
+                    rt.spawn(async move {
+                        if let Err(e) = fed::serve_coordinator(eng).await {
+                            // 材料缺失/端口占用等只降级留痕，不影响引擎其余功能
+                            bus.publish(SecurityEvent::engine(
+                                "error",
+                                format!("组织协同 mTLS 面未启动：{e}"),
+                            ));
+                        }
+                    });
                 }
                 "agent" => {
-                    if cfg.fed.coordinator.is_empty() || cfg.fed.effective_token().is_empty() {
+                    if cfg.fed.coordinator.is_empty() {
                         bus.publish(SecurityEvent::engine(
                             "error",
-                            "组织协同：agent 需要 coordinator 地址与组织令牌",
+                            "组织协同：agent 需要 coordinator 地址（https://协调者:7421）",
                         ));
                     } else {
                         bus.publish(SecurityEvent::engine(
                             "info",
-                            format!("组织协同：agent {} → {}", cfg.fed.node, cfg.fed.coordinator),
+                            format!("组织协同：agent {} → {}（mTLS）", cfg.fed.node, cfg.fed.coordinator),
                         ));
                         fed::spawn_fed_agent_task(&engine);
                     }

@@ -23,11 +23,6 @@ struct AppState {
 
 pub async fn serve(engine: Arc<EngineHandle>) {
     let port = engine.config().api.port;
-    let fed_coordinator = {
-        let cfg = engine.config();
-        cfg.fed.enabled && cfg.fed.role == "coordinator"
-    };
-    let fed_engine = engine.clone();
     let state = AppState { engine };
     let app = Router::new()
         .route("/api/status", get(status))
@@ -50,13 +45,6 @@ pub async fn serve(engine: Arc<EngineHandle>) {
         .route("/api/ai/analyze", post(ai_analyze))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
         .with_state(state);
-
-    // 组织协同路由：独立鉴权（组织令牌），仅 coordinator 角色挂载
-    let app = if fed_coordinator {
-        app.merge(crate::fed::fed_router(fed_engine))
-    } else {
-        app
-    };
 
     match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
         Ok(listener) => {

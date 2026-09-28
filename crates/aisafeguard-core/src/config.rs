@@ -267,19 +267,30 @@ impl Default for IntelConfig {
     }
 }
 
-/// 组织协同骨架（0.3，设计见 docs/NGFW_EVOLUTION.md §6）。
-/// v1 用组织共享令牌鉴权；mTLS 每节点证书为后续加固项。
+/// 组织协同（0.3，设计见 docs/NGFW_EVOLUTION.md §6）。
+/// 0.3.6 起鉴权 = mTLS 每节点证书（组织 CA 签发，node↔证书指纹绑定），
+/// 组织共享令牌已整体移除（无兼容层）。证书文件不进配置文件本身，只记路径。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FedConfig {
     pub enabled: bool,
     /// off | coordinator | agent
     pub role: String,
-    /// 节点名（上报时标识自己，[a-zA-Z0-9_-]）
+    /// 节点名（上报时标识自己，[a-zA-Z0-9_-]{1,32}；需与签发证书时的节点名一致）
     pub node: String,
-    /// agent 角色：协调者地址，如 http://192.168.1.10:7420
+    /// agent 角色：协调者地址，如 https://192.168.1.10:7421
     pub coordinator: String,
     pub interval_secs: u64,
+    /// coordinator 角色：/fed 面 mTLS 监听地址（独立于 127.0.0.1 的本地 API）
+    pub listen_addr: String,
+    /// 组织 CA 证书路径（agent 用于验证协调者；coordinator 用于验证 agent）。
+    /// 空 = <数据目录>/fed/ca.pem
+    pub ca_path: String,
+    /// 本节点证书路径（coordinator 的服务端证书 = agent 的客户端证书）。
+    /// 空 = <数据目录>/fed/cert.pem
+    pub cert_path: String,
+    /// 本节点私钥路径。空 = <数据目录>/fed/key.pem
+    pub key_path: String,
 }
 
 impl Default for FedConfig {
@@ -290,20 +301,15 @@ impl Default for FedConfig {
             node: String::new(),
             coordinator: String::new(),
             interval_secs: 60,
+            listen_addr: "0.0.0.0:7421".into(),
+            ca_path: String::new(),
+            cert_path: String::new(),
+            key_path: String::new(),
         }
     }
 }
 
 impl FedConfig {
-    pub fn effective_token(&self) -> String {
-        // 组织令牌只走环境变量 AISAFEGUARD_FED_TOKEN——它是能向全网注入
-        // 情报的凭据，和 AI Key 一样不进配置文件。
-        std::env::var("AISAFEGUARD_FED_TOKEN")
-            .ok()
-            .filter(|v| !v.is_empty())
-            .unwrap_or_default()
-    }
-
     pub fn valid_role(&self) -> bool {
         matches!(self.role.as_str(), "off" | "coordinator" | "agent")
     }
