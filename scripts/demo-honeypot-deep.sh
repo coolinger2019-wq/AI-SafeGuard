@@ -41,8 +41,16 @@ EOF
 
 echo "═══ 1) 启动引擎(假 Shell + MySQL 3307 + Redis 6380)═══"
 "$BIN" --headless --config "$DEMO_DIR/cfg.toml" --data-dir "$DEMO_DIR" &
-sleep 2
-TOKEN=$(cat "$DEMO_DIR/api-token")
+TOKEN=""
+for i in $(seq 1 40); do
+    # 就绪 = 引擎已写出 token 且 ssh 蜜罐端口可连(冷启动可能 >2s)
+    [ -z "$TOKEN" ] && [ -f "$DEMO_DIR/api-token" ] && TOKEN=$(cat "$DEMO_DIR/api-token")
+    if [ -n "$TOKEN" ] && (timeout 1 bash -c "echo > /dev/tcp/127.0.0.1/2222") 2>/dev/null; then
+        break
+    fi
+    sleep 0.5
+done
+[ -n "$TOKEN" ] || { echo "引擎未就绪(无 api-token)"; exit 1; }
 
 echo "═══ 2) SSH 假 Shell:paramiko 实连回放 ═══"
 python3 "$(dirname "$0")/replay-ssh-shell.py" 127.0.0.1 2222
