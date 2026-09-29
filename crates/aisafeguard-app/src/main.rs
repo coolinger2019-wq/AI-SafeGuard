@@ -378,20 +378,29 @@ fn main() -> anyhow::Result<()> {
         let elevated = aisafeguard_firewall::create_backend().is_elevated();
         let console: Arc<dyn Console> = if elevated {
             let (cfg, cfg_path) = resolve_cfg(cfg_path, data_dir)?;
-            let bundle = assemble_engine(cfg, cfg_path)?;
             println!("内嵌引擎模式（管理员）");
-            Arc::new(engine::EmbeddedConsole(bundle.engine))
+            embedded_console(cfg, cfg_path)?
         } else if let Some(rc) = remote::probe_service() {
             println!("远程控制台模式：已连接 AI-SafeGuard 服务");
             Arc::new(rc)
         } else {
             println!("未检测到提权服务，回退内嵌模式（防火墙功能需管理员）");
             let (cfg, cfg_path) = resolve_cfg(cfg_path, data_dir)?;
-            let bundle = assemble_engine(cfg, cfg_path)?;
-            Arc::new(engine::EmbeddedConsole(bundle.engine))
+            embedded_console(cfg, cfg_path)?
         };
         gui::run(console)
     }
+}
+
+/// 内嵌控制台组装。runtime 故意泄漏：所有引擎后台任务（蜜罐监听/API/事件入库/
+/// TTL 清扫）都跑在 `EngineBundle.rt` 上，bundle 在本函数返回后即销毁——若 runtime
+/// 随之 drop，任务全部被中止，引擎只剩同步读（GUI 显示的「监听中」来自配置快照，
+/// 是假象；0.2 服务化引入 bundle 起的静默僵尸）。GUI 进程生命周期 = runtime
+/// 生命周期，泄漏先例同 init_tracing 的 guard（std::mem::forget）。
+fn embedded_console(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<Arc<dyn Console>> {
+    let bundle = assemble_engine(cfg, cfg_path)?;
+    std::mem::forget(bundle.rt);
+    Ok(Arc::new(engine::EmbeddedConsole(bundle.engine)))
 }
 
 fn resolve_cfg(

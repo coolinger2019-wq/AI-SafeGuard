@@ -2,6 +2,32 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.5.7] - 2026-09-29
+
+修复内嵌 GUI 模式引擎静默失效（0.2 服务化引入 EngineBundle 起的存量 bug）。
+
+### 修复
+
+- **内嵌 GUI 的 runtime 生命周期**：所有引擎后台任务（蜜罐监听/API 服务/事件
+  入库/TTL 清扫/AI 定时分析）都跑在 `EngineBundle.rt` 上，而 GUI 组装路径在
+  `assemble_engine` 返回后立即 drop 了 bundle——runtime 被中止，蜜罐端口绑定
+  成功也随即消失（事件库只剩启动记录，无绑定成败留痕；GUI「监听中」来自
+  配置快照，是假象）。修复：`embedded_console()` 组装时
+  `std::mem::forget(bundle.rt)`（进程生命周期 = runtime 生命周期），提权内嵌
+  与回退内嵌两条路径统一收敛到该函数
+- **影响范围**：0.2-0.5.6 的内嵌 GUI 模式（管理员/回退）均受影响；0.5.6
+  Windows exe 仅 `--headless` 可用；服务模式（引擎在服务进程）与远程控制台
+  不受影响；Linux headless/WSL 演示不受影响
+- **可见症状**：浏览器访问蜜罐端口无应答且无事件；GUI 蜜罐页显示监听但
+  计数恒零；实时事件流停止滚动
+
+### 验证
+
+- GUI 启动 → netstat 8081/7420 LISTENING → 浏览器 `http://localhost:8081/admin`
+  返回假登录页 → 事件库记录 honeypot_hit（含 HttpHint v2 标签）→ 「误报」
+  一键闭环可用
+- `cargo test --workspace` 全绿
+
 ## [0.5.6] - 2026-09-29
 
 地基版 Batch 3 + 文档收官（任务拆分见 docs/ROADMAP-0.5.3.md）：HTTP 蜜罐明显比「空端口监听」好用；仍不进行中交互。
