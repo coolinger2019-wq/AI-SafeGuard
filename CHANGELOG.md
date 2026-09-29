@@ -6,6 +6,18 @@
 
 按 ROADMAP-0.5 Batch E（解析与 L7 复用）启动。
 
+### 修复
+
+- **Windows release 构建爆栈（0.3.1 引入，用户实测暴露）**：`service install`
+  等多数命令报 `thread 'main' has overflowed its stack`。根因 = windivert.c
+  静态编入时其全局 `memcpy`/`memset` 定义（`#pragma function`）劫持了整个
+  进程的 CRT intrinsic，堆初始化被污染。修法 = `[patch.crates-io]` 指向
+  仓库内 fork（third_party/windivert-sys）去掉该段劫持；static 特性保留
+  （分发语义不变：仅需 WinDivert64.sys 放 exe 目录）。git 二分 + stub
+  实验定位，详见 docs/LESSONS.md 第八批
+- 同步修复：dirs 调用点曾疑似崩溃点（误），恢复原实现；未上线的 env-var
+  实验代码移除
+
 ### 新增
 
 - **统一事件字段（E6）**：`SecurityEvent::Detection` 新增 `http_hint`

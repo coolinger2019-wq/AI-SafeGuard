@@ -5238,8 +5238,6 @@ dependencies = [
 [[package]]
 name = "windivert-sys"
 version = "0.11.0-beta.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2eace207a00d158e8340b0f9217f1f7e379eaedf364a21edb92109f0e8eb0778"
 dependencies = [
  "cc",
  "thiserror 2.0.21",

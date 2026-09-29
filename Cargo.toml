@@ -18,6 +18,11 @@ edition = "2024"
 license = "MIT"
 authors = ["coolinger (vibe coding)"]
 
+[patch.crates-io]
+# 0.5.0：static 特性下 windivert.c 的全局 memcpy/memset 劫持 CRT intrinsic，
+# release 构建进程早期堆损坏爆栈（0.3.1 引入）。fork 去劫持，见 docs/LESSONS.md。
+windivert-sys = { path = "third_party/windivert-sys" }
+
 [workspace.dependencies]
 aisafeguard-core = { path = "crates/aisafeguard-core" }
 aisafeguard-store = { path = "crates/aisafeguard-store" }

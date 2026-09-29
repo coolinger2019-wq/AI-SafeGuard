@@ -168,3 +168,27 @@
   stable/它要 nightly）、产物 .o 提交入库 + sha256 校验文件、主程序
   include_bytes 嵌入——目标机零工具链依赖，构建脚本 `ebpf/build.sh` 只在改
   ebpf 源码后跑。快路径程序的红线：解析失败一律 PASS（快速层绝不拖垮转发）。
+
+## 0.5 批次 · Windows service install 爆栈（2026-09-29）
+
+- **C 代码静态编入时 `#pragma function(memcpy/memset)` 是全局符号劫持**：
+  windivert.c 为自身防护定义了全局 memcpy/memset（MSVC 下把 CRT intrinsic
+  重定向到它的逐字节实现），静态链入 exe 后**整个进程**的 CRT 调用点都被
+  重定向——release 下进程早期堆损坏，爆栈点随机（default_path、token、
+  verify-log 等无关大堆操作），debug 档因堆 layout 不同而不崩。0.3.1 引入，
+  git 二分（0.2.0 正常 / 0.3.0 正常 / 0.3.1 崩）+ stub 实验（去 windivert
+  恢复）双重定位。修法：`[patch.crates-io]` 指向仓库内 fork
+  （third_party/windivert-sys），去掉该段劫持，其余 vendor 原样。
+- **爆栈类问题的定位顺序**：①git 二分找引入点（每点全量重编）；②stub 掉
+  嫌疑依赖确认因果；③读依赖 C 源码找全局符号/运行时钩子（memcpy/memset/
+  DllMain/atexit/TLS）。"爆栈点随机 + debug 不崩 + 与命令逻辑无关" = 堆
+  损坏特征，不要在 Rust 侧找递归。
+- **vendored DLL 特性不是 static 的替代品**（LESSONS 第一批已记：加载期
+  依赖拖死整个程序）——本次复验：vendored 下 exe 启动即报缺 WinDivert.dll。
+  可选功能的三条路里，静态编入（修符号劫持）或系统库显式链接才是正解。
+- **cargo build 双跑管道是自欺重灾区**：`build | grep error; build | tail`
+  第二个 100% Fresh，"Finished 0.45s" 会让人以为刚编过。验证产物变化：
+  看文件时间戳 + `build -v` 的 Fresh 计数；不确定就 `touch` 强制。
+- **fork 上游 C 依赖的正确姿势**：`[patch.crates-io]` + 仓库内
+  `third_party/` 副本 + 补丁处留 FORK PATCH 注释（原因、现象、上游 issue
+  线索）；副本不追求最小 diff，保升级时可用 diff 重放。

@@ -16,6 +16,10 @@ tracing.workspace = true
 # 零额外文件），运行期仅当开启捕获时才需要在 exe 旁放置官方签名的 WinDivert64.sys，
 # 缺文件/缺管理员权限由上层优雅降级（检测平台 MVP，见 docs/NGFW_EVOLUTION.md §2.2）。
 [target.'cfg(windows)'.dependencies]
+# 0.5.0 修复 Windows release 爆栈：static 特性会把 windivert.c 静态编入，
+# 其 #pragma function(memcpy/memset) 全局符号劫持污染 CRT 堆（0.3.1 引入，
+# 0.2 基线正常，git 二分 + stub 实验确认）。改用 vendored DLL（动态链接）：
+# WinDivert.dll 与 WinDivert64.sys 一样随分发、放 exe 同目录。
 windivert = { version = "0.7.0-beta.4", default-features = false, features = ["static"] }
 
 # Linux 采样捕获：AF_PACKET 原始套接字（安全 API；需要 CAP_NET_RAW，无权限时优雅降级）
