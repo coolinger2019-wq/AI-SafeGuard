@@ -92,7 +92,8 @@ s = socket.create_connection(("127.0.0.1", 3307), timeout=5)
 hdr = s.recv(4)
 greeting = s.recv(hdr[0] | (hdr[1] << 8))
 assert greeting[0] == 0x0a, "协议版本应为 10"
-print(f"  greeting: {greeting[1:greeting.index(b'\\0')].decode()} (protocol 10)")
+version = greeting[1:greeting.index(b"\x00")].decode()
+print(f"  greeting: {version} (protocol 10)")
 
 # HandshakeResponse41:用户名 root
 resp = struct.pack("<IIB", 0x0001 | 0x0200 | 0x8000 | 0x0800_00, 0x1000000, 0x21) + b"\x00" * 23
