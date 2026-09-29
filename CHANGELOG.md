@@ -92,6 +92,7 @@
 
 - `cargo test --workspace` 全绿（含 explain 单测：TTL 状态机 / 文案 / 摘要清洗 /
   store promoted 往返）
+- 已知限制：复杂策略编辑器不在本批（规则编辑仍走 config.toml / 规则包外置）
 
 ## [0.5.3] - 2026-09-29
 
