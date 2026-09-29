@@ -13,7 +13,7 @@ use aisafeguard_core::now_ts;
 use aisafeguard_l7 as l7;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{watch, Semaphore};
+use tokio::sync::{Semaphore, watch};
 
 const MAX_CONCURRENT: usize = 64;
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -95,7 +95,10 @@ async fn run_listener(l: ListenerConfig, bus: EventBus, mut shutdown: watch::Rec
             drop(permit);
         });
     }
-    bus.publish(SecurityEvent::engine("info", format!("蜜罐 [{}] 已停止", l.name)));
+    bus.publish(SecurityEvent::engine(
+        "info",
+        format!("蜜罐 [{}] 已停止", l.name),
+    ));
 }
 
 async fn handle_conn(mut stream: TcpStream, listener: String, kind: String, bus: EventBus) {
@@ -119,7 +122,10 @@ async fn handle_conn(mut stream: TcpStream, listener: String, kind: String, bus:
                 || e.kind() == std::io::ErrorKind::TimedOut
                 || e.kind() == std::io::ErrorKind::UnexpectedEof
             {
-                ("连接建立后未发送数据（疑似端口扫描）".to_string(), String::new())
+                (
+                    "连接建立后未发送数据（疑似端口扫描）".to_string(),
+                    String::new(),
+                )
             } else {
                 (format!("会话异常: {e}"), String::new())
             }
@@ -130,10 +136,7 @@ async fn handle_conn(mut stream: TcpStream, listener: String, kind: String, bus:
         ts: now_ts(),
         listener,
         kind,
-        port: stream
-            .local_addr()
-            .map(|a| a.port())
-            .unwrap_or(0),
+        port: stream.local_addr().map(|a| a.port()).unwrap_or(0),
         remote_ip,
         remote_port,
         summary,
@@ -146,12 +149,14 @@ async fn ssh_session(s: &mut TcpStream) -> Result<(String, String), std::io::Err
     s.write_all(b"SSH-2.0-OpenSSH_9.6\r\n").await?;
     let (n, buf) = read_with_timeout(s, READ_TIMEOUT).await?;
     let text = sanitize(&buf[..n], MAX_PAYLOAD);
-    let summary = l7::first_line(&text).unwrap_or_else(|| "SSH banner 已发送，等待客户端报文".into());
+    let summary =
+        l7::first_line(&text).unwrap_or_else(|| "SSH banner 已发送，等待客户端报文".into());
     Ok((summary, text))
 }
 
 async fn telnet_session(s: &mut TcpStream) -> Result<(String, String), std::io::Error> {
-    s.write_all(b"Welcome to Ubuntu 22.04 LTS\r\nlogin: ").await?;
+    s.write_all(b"Welcome to Ubuntu 22.04 LTS\r\nlogin: ")
+        .await?;
     let (n, buf) = read_with_timeout(s, READ_TIMEOUT).await?;
     let text = sanitize(&buf[..n], MAX_PAYLOAD);
     let summary = l7::first_line(&text)
@@ -206,7 +211,10 @@ async fn read_with_timeout(
             let n = res?;
             Ok((n, buf))
         }
-        Err(_) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "read timeout")),
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "read timeout",
+        )),
     }
 }
 

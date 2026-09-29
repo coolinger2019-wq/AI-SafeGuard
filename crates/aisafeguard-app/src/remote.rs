@@ -8,10 +8,10 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context};
 use aisafeguard_core::config::AppConfig;
 use aisafeguard_firewall::BlockSpec;
 use aisafeguard_store::{AiRunRow, EventRow, ProposalRow, RuleRow, StatsSummary};
+use anyhow::{Context, anyhow};
 use reqwest::blocking::Client;
 use serde_json::json;
 
@@ -62,16 +62,16 @@ impl RemoteConsole {
         }
     }
 
-    fn check(&self, resp: reqwest::blocking::Response) -> anyhow::Result<reqwest::blocking::Response> {
+    fn check(
+        &self,
+        resp: reqwest::blocking::Response,
+    ) -> anyhow::Result<reqwest::blocking::Response> {
         let status = resp.status();
         if status.is_success() {
             Ok(resp)
         } else {
             let body = resp.json::<serde_json::Value>().unwrap_or_default();
-            let msg = body["error"]
-                .as_str()
-                .unwrap_or("未知错误")
-                .to_string();
+            let msg = body["error"].as_str().unwrap_or("未知错误").to_string();
             Err(anyhow!("HTTP {status}: {msg}"))
         }
     }
@@ -96,7 +96,11 @@ impl RemoteConsole {
         self.check(resp)
     }
 
-    fn post_json<T: serde::Serialize>(&self, path: &str, body: &T) -> anyhow::Result<reqwest::blocking::Response> {
+    fn post_json<T: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &T,
+    ) -> anyhow::Result<reqwest::blocking::Response> {
         let resp = self
             .http
             .post(format!("{}{}", self.base, path))
@@ -110,7 +114,9 @@ impl RemoteConsole {
 
 impl Console for RemoteConsole {
     fn version(&self) -> String {
-        self.status().map(|s| s.version).unwrap_or_else(|_| "?".into())
+        self.status()
+            .map(|s| s.version)
+            .unwrap_or_else(|_| "?".into())
     }
 
     fn config_paths(&self) -> (String, String) {
@@ -167,8 +173,8 @@ impl Console for RemoteConsole {
         if v["ts"].is_null() {
             return Ok(None);
         }
-        let snap: crate::engine::ExposureSnapshot = serde_json::from_value(v)
-            .map_err(|e| anyhow!("解析暴露面快照失败: {e}"))?;
+        let snap: crate::engine::ExposureSnapshot =
+            serde_json::from_value(v).map_err(|e| anyhow!("解析暴露面快照失败: {e}"))?;
         Ok(Some(snap))
     }
 
@@ -238,9 +244,17 @@ impl Console for RemoteConsole {
         Ok(body["removed"].as_u64().unwrap_or(0) as usize)
     }
 
-    fn mark_false_positive(&self, ip: &str, note: &str, _local_port: Option<u16>) -> anyhow::Result<(i64, usize)> {
+    fn mark_false_positive(
+        &self,
+        ip: &str,
+        note: &str,
+        _local_port: Option<u16>,
+    ) -> anyhow::Result<(i64, usize)> {
         let v: serde_json::Value = self
-            .post_json("/api/feedback", &serde_json::json!({ "remote_ip": ip, "note": note }))?
+            .post_json(
+                "/api/feedback",
+                &serde_json::json!({ "remote_ip": ip, "note": note }),
+            )?
             .json()?;
         Ok((
             v["dismissed_proposals"].as_i64().unwrap_or(0),
@@ -293,10 +307,8 @@ impl Console for RemoteConsole {
             loop {
                 // 按 id 升序转发差量；首次只对齐水位不回灌历史
                 if let Ok(rows) = console.list_events(200, None) {
-                    let mut new_rows: Vec<EventRow> = rows
-                        .into_iter()
-                        .filter(|e| e.id > last_id)
-                        .collect();
+                    let mut new_rows: Vec<EventRow> =
+                        rows.into_iter().filter(|e| e.id > last_id).collect();
                     new_rows.sort_by_key(|e| e.id);
                     if let Some(max_id) = new_rows.last().map(|e| e.id) {
                         if last_id == 0 {
@@ -305,12 +317,13 @@ impl Console for RemoteConsole {
                         } else {
                             for e in new_rows {
                                 last_id = last_id.max(e.id);
-                                if tx.send(LiveEvent {
-                                    kind: e.kind,
-                                    ts: e.ts,
-                                    summary: e.summary,
-                                })
-                                .is_err()
+                                if tx
+                                    .send(LiveEvent {
+                                        kind: e.kind,
+                                        ts: e.ts,
+                                        summary: e.summary,
+                                    })
+                                    .is_err()
                                 {
                                     return;
                                 }

@@ -254,7 +254,12 @@ impl Firewall for CompositeFirewall {
 mod tests {
     use super::*;
 
-    fn spec(direction: Direction, protocol: Protocol, ip: Option<IpAddr>, port: Option<u16>) -> BlockSpec {
+    fn spec(
+        direction: Direction,
+        protocol: Protocol,
+        ip: Option<IpAddr>,
+        port: Option<u16>,
+    ) -> BlockSpec {
         BlockSpec {
             direction,
             protocol,
@@ -269,27 +274,52 @@ mod tests {
     fn mirrorable_matches_ip_level_inbound_only() {
         // 完全符合：In + Any + 无端口 + IPv4
         assert_eq!(
-            mirrorable(&spec(Direction::In, Protocol::Any, Some("203.0.113.7".parse().unwrap()), None)),
+            mirrorable(&spec(
+                Direction::In,
+                Protocol::Any,
+                Some("203.0.113.7".parse().unwrap()),
+                None
+            )),
             Some("203.0.113.7".parse().unwrap())
         );
         // 出站不镜像
         assert_eq!(
-            mirrorable(&spec(Direction::Out, Protocol::Any, Some("203.0.113.7".parse().unwrap()), None)),
+            mirrorable(&spec(
+                Direction::Out,
+                Protocol::Any,
+                Some("203.0.113.7".parse().unwrap()),
+                None
+            )),
             None
         );
         // 带端口不镜像（XDP 无端口粒度）
         assert_eq!(
-            mirrorable(&spec(Direction::In, Protocol::Any, Some("203.0.113.7".parse().unwrap()), Some(2222))),
+            mirrorable(&spec(
+                Direction::In,
+                Protocol::Any,
+                Some("203.0.113.7".parse().unwrap()),
+                Some(2222)
+            )),
             None
         );
         // 细粒度协议不镜像（避免封 TCP 丢 UDP 的语义放大）
         assert_eq!(
-            mirrorable(&spec(Direction::In, Protocol::Tcp, Some("203.0.113.7".parse().unwrap()), None)),
+            mirrorable(&spec(
+                Direction::In,
+                Protocol::Tcp,
+                Some("203.0.113.7".parse().unwrap()),
+                None
+            )),
             None
         );
         // IPv6 暂不镜像
         assert_eq!(
-            mirrorable(&spec(Direction::In, Protocol::Any, Some("2001:db8::1".parse().unwrap()), None)),
+            mirrorable(&spec(
+                Direction::In,
+                Protocol::Any,
+                Some("2001:db8::1".parse().unwrap()),
+                None
+            )),
             None
         );
     }

@@ -7,8 +7,8 @@ mod settings_tab;
 pub(crate) mod theme;
 
 use std::collections::VecDeque;
-use std::sync::mpsc::Receiver;
 use std::sync::Arc;
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use aisafeguard_core::config::AppConfig;
@@ -21,8 +21,9 @@ use crate::engine::StatusReport;
 // 语义取色（多套配色方案可切换，定义与调色板见 gui/theme.rs）。
 // 子页面的 `use super::*` 依赖这些再导出。
 pub(crate) use theme::{
-    accent, accent_soft, banner_bg, banner_text, bg_card, bg_panel, bg_sidebar, border, danger, ok,
-    on_accent, orange, purple, text as text_color, text_dim, toast_bg, toast_text, warn, ThemeId,
+    ThemeId, accent, accent_soft, banner_bg, banner_text, bg_card, bg_panel, bg_sidebar, border,
+    danger, ok, on_accent, orange, purple, text as text_color, text_dim, toast_bg, toast_text,
+    warn,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -100,7 +101,11 @@ pub fn run(console: Arc<dyn Console>) -> anyhow::Result<()> {
         Box::new(move |cc| {
             load_fonts(&cc.egui_ctx);
             theme::apply(&cc.egui_ctx, theme_id, font_scale);
-            Ok(Box::new(AisafeApp::new(console, rx, (theme_id, font_scale))))
+            Ok(Box::new(AisafeApp::new(
+                console,
+                rx,
+                (theme_id, font_scale),
+            )))
         }),
     )
     .map_err(|e| anyhow::anyhow!("GUI 异常退出: {e}"))
@@ -148,7 +153,10 @@ impl AisafeApp {
     /// 当前期望的界面偏好：设置页草稿优先（切主题/字号即时预览），否则用已保存值。
     fn desired_ui(&self) -> (ThemeId, f32) {
         match &self.settings_draft {
-            Some(d) => (ThemeId::from_str(&d.ui.theme), theme::normalize_font_scale(d.ui.font_scale)),
+            Some(d) => (
+                ThemeId::from_str(&d.ui.theme),
+                theme::normalize_font_scale(d.ui.font_scale),
+            ),
             None => self.ui_prefs,
         }
     }
@@ -187,7 +195,12 @@ impl AisafeApp {
                 ui.add_space(22.0);
                 ui.horizontal(|ui| {
                     ui.add_space(18.0);
-                    ui.label(RichText::new("AI-SafeGuard").size(24.0).strong().color(accent()));
+                    ui.label(
+                        RichText::new("AI-SafeGuard")
+                            .size(24.0)
+                            .strong()
+                            .color(accent()),
+                    );
                 });
                 ui.horizontal(|ui| {
                     ui.add_space(18.0);
@@ -216,7 +229,11 @@ impl AisafeApp {
                         } else {
                             text_dim()
                         });
-                        let fill = if selected { accent_soft() } else { Color32::TRANSPARENT };
+                        let fill = if selected {
+                            accent_soft()
+                        } else {
+                            Color32::TRANSPARENT
+                        };
                         if ui
                             .add(
                                 egui::Button::new(text)
@@ -259,11 +276,11 @@ impl AisafeApp {
     }
 
     fn toast_ui(&mut self, ctx: &egui::Context) {
-    let expired = self
-        .toast
-        .as_ref()
-        .map(|(at, _)| at.elapsed() >= Duration::from_secs(4))
-        .unwrap_or(false);
+        let expired = self
+            .toast
+            .as_ref()
+            .map(|(at, _)| at.elapsed() >= Duration::from_secs(4))
+            .unwrap_or(false);
         if expired {
             self.toast = None;
         }
@@ -343,9 +360,10 @@ fn load_fonts(ctx: &egui::Context) {
             let mut fonts = egui::FontDefinitions::default();
             // Windows 自带的符号字体：覆盖 ⌂ ⛨ ◉ ✦ 等默认字体缺失的字形
             if let Ok(sym) = std::fs::read("C:/Windows/Fonts/seguisym.ttf") {
-                fonts
-                    .font_data
-                    .insert("sym".into(), std::sync::Arc::new(egui::FontData::from_owned(sym)));
+                fonts.font_data.insert(
+                    "sym".into(),
+                    std::sync::Arc::new(egui::FontData::from_owned(sym)),
+                );
                 fonts
                     .families
                     .entry(egui::FontFamily::Proportional)
@@ -358,9 +376,10 @@ fn load_fonts(ctx: &egui::Context) {
                     .push("sym".into());
             }
             // 追加在末尾：拉丁字符用默认字体，缺失字形依次回退 sym → cjk
-            fonts
-                .font_data
-                .insert("cjk".into(), std::sync::Arc::new(egui::FontData::from_owned(data)));
+            fonts.font_data.insert(
+                "cjk".into(),
+                std::sync::Arc::new(egui::FontData::from_owned(data)),
+            );
             fonts
                 .families
                 .entry(egui::FontFamily::Proportional)

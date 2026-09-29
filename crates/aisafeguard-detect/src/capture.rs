@@ -109,7 +109,8 @@ fn open_error_reason(e: windivert::error::WinDivertError) -> String {
     match e {
         WinDivertError::Open(o) => match o {
             WinDivertOpenError::MissingSYS => {
-                "缺少 WinDivert64.sys 驱动文件（需与程序同目录，见 docs/NGFW_EVOLUTION.md）".to_string()
+                "缺少 WinDivert64.sys 驱动文件（需与程序同目录，见 docs/NGFW_EVOLUTION.md）"
+                    .to_string()
             }
             WinDivertOpenError::AccessDenied => {
                 "需要管理员权限（引擎以服务模式运行时才可捕获）".to_string()
@@ -248,7 +249,11 @@ mod tests {
     /// 构造以太网帧（可选单层 VLAN）。
     fn eth_frame(etype: u16, with_vlan: bool, payload: &[u8]) -> Vec<u8> {
         let mut out = vec![0u8; if with_vlan { 18 } else { 14 }];
-        out[12..14].copy_from_slice(&if with_vlan { 0x8100u16.to_be_bytes() } else { etype.to_be_bytes() });
+        out[12..14].copy_from_slice(&if with_vlan {
+            0x8100u16.to_be_bytes()
+        } else {
+            etype.to_be_bytes()
+        });
         if with_vlan {
             out[16..18].copy_from_slice(&etype.to_be_bytes());
         }
@@ -258,7 +263,9 @@ mod tests {
 
     #[test]
     fn l3_payload_strips_ethernet() {
-        let ip = [0x45u8, 0, 0, 20, 0, 0, 0, 0, 64, 6, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8];
+        let ip = [
+            0x45u8, 0, 0, 20, 0, 0, 0, 0, 64, 6, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8,
+        ];
         let f = eth_frame(0x0800, false, &ip);
         assert_eq!(l3_payload(&f), Some(&ip[..]));
 
@@ -280,7 +287,7 @@ mod tests {
 
     #[test]
     fn mode_filter_matches_platform_semantics() {
-        use crate::inspect::testkit::{data_frame, frame, syn_frame, TcpFrame};
+        use crate::inspect::testkit::{TcpFrame, data_frame, frame, syn_frame};
         let syn = syn_frame("203.0.113.7", 80, 40000);
         // 纯 SYN：control / full 都放
         assert!(passes_mode_filter(&syn, false));

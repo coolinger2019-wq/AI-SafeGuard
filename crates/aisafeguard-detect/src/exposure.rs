@@ -143,10 +143,7 @@ pub fn hex_addr_to_string(hex: &str, v6: bool) -> String {
             let v = u32::from_str_radix(chunk, 16).unwrap_or(0);
             bytes.extend_from_slice(&v.to_le_bytes());
         }
-        std::net::Ipv6Addr::from(
-            bytes.try_into().unwrap_or([0u8; 16]),
-        )
-        .to_string()
+        std::net::Ipv6Addr::from(bytes.try_into().unwrap_or([0u8; 16])).to_string()
     } else {
         let v = u32::from_str_radix(hex, 16).unwrap_or(0);
         std::net::Ipv4Addr::from(v.to_le_bytes()).to_string()

@@ -11,7 +11,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use aisafeguard_core::error::{Error, Result};
 use aisafeguard_core::event::SecurityEvent;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -290,7 +290,8 @@ impl Store {
             .map_err(|e| Error::Store(e.to_string()))?;
         conn.pragma_update(None, "synchronous", "NORMAL")
             .map_err(|e| Error::Store(e.to_string()))?;
-        conn.execute_batch(SCHEMA).map_err(|e| Error::Store(e.to_string()))?;
+        conn.execute_batch(SCHEMA)
+            .map_err(|e| Error::Store(e.to_string()))?;
         let store = Self {
             conn: Mutex::new(conn),
         };
@@ -326,7 +327,9 @@ impl Store {
             return Ok(());
         }
         let unchained: i64 = conn
-            .query_row("SELECT COUNT(*) FROM events WHERE hash = ''", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM events WHERE hash = ''", [], |r| {
+                r.get(0)
+            })
             .map_err(|e| Error::Store(e.to_string()))?;
         if unchained > 0 {
             let rows: Vec<ChainSeedRow> = {
@@ -351,7 +354,15 @@ impl Store {
             };
             let mut prev = String::new();
             for (id, ts, kind, listener, remote_ip, remote_port, summary, payload) in rows {
-                let canonical = canonical_event(ts, &kind, &listener, &remote_ip, remote_port, &summary, &payload);
+                let canonical = canonical_event(
+                    ts,
+                    &kind,
+                    &listener,
+                    &remote_ip,
+                    remote_port,
+                    &summary,
+                    &payload,
+                );
                 let h = chain_hash(&prev, &canonical);
                 conn.execute(
                     "UPDATE events SET prev_hash = ?2, hash = ?3 WHERE id = ?1",
@@ -423,10 +434,21 @@ impl Store {
         let kind = ev.kind();
         let conn = self.lock()?;
         let prev_hash: String = conn
-            .query_row("SELECT hash FROM events ORDER BY id DESC LIMIT 1", [], |r| r.get(0))
+            .query_row(
+                "SELECT hash FROM events ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
             .unwrap_or_default();
-        let canonical =
-            canonical_event(ts, kind, &listener, &remote_ip, remote_port, &summary, &payload);
+        let canonical = canonical_event(
+            ts,
+            kind,
+            &listener,
+            &remote_ip,
+            remote_port,
+            &summary,
+            &payload,
+        );
         let hash = chain_hash(&prev_hash, &canonical);
         conn.execute(
             "INSERT INTO events (ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, prev_hash, hash)
@@ -452,25 +474,22 @@ impl Store {
         let mut stmt = conn.prepare(sql).map_err(|e| Error::Store(e.to_string()))?;
         let like = ip_filter.map(|s| format!("%{s}%"));
         let rows = stmt
-            .query_map(
-                params![like, limit],
-                |r| {
-                    Ok(EventRow {
-                        id: r.get(0)?,
-                        ts: r.get(1)?,
-                        kind: r.get(2)?,
-                        listener: r.get(3)?,
-                        remote_ip: r.get(4)?,
-                        remote_port: r.get::<_, i64>(5)? as u16,
-                        summary: r.get(6)?,
-                        payload: r.get(7)?,
-                        http_hint: r.get(8)?,
-                        tls_fp: r.get(9)?,
-                        prev_hash: r.get(10)?,
-                        hash: r.get(11)?,
-                    })
-                },
-            )
+            .query_map(params![like, limit], |r| {
+                Ok(EventRow {
+                    id: r.get(0)?,
+                    ts: r.get(1)?,
+                    kind: r.get(2)?,
+                    listener: r.get(3)?,
+                    remote_ip: r.get(4)?,
+                    remote_port: r.get::<_, i64>(5)? as u16,
+                    summary: r.get(6)?,
+                    payload: r.get(7)?,
+                    http_hint: r.get(8)?,
+                    tls_fp: r.get(9)?,
+                    prev_hash: r.get(10)?,
+                    hash: r.get(11)?,
+                })
+            })
             .map_err(|e| Error::Store(e.to_string()))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| Error::Store(e.to_string()))
@@ -512,7 +531,12 @@ impl Store {
                 |r| r.get(0),
             )
             .map_err(|e| Error::Store(e.to_string()))?;
-        Ok(ValueMetrics { proposed, applied, fp, auto_blocks })
+        Ok(ValueMetrics {
+            proposed,
+            applied,
+            fp,
+            auto_blocks,
+        })
     }
 
     pub fn stats_since(&self, since: i64) -> Result<StatsSummary> {
@@ -624,8 +648,11 @@ impl Store {
             .map_err(|e| Error::Store(e.to_string()))?;
         let deleted = conn.changes();
         if let Some(succ) = successor {
-            conn.execute("UPDATE events SET prev_hash = '' WHERE id = ?1", params![succ])
-                .map_err(|e| Error::Store(e.to_string()))?;
+            conn.execute(
+                "UPDATE events SET prev_hash = '' WHERE id = ?1",
+                params![succ],
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
         }
         Ok(deleted as usize)
     }
@@ -732,11 +759,9 @@ impl Store {
             .map_err(|e| Error::Store(e.to_string()))?;
         let id = self
             .lock()?
-            .query_row(
-                "SELECT id FROM rules WHERE name = ?1",
-                params![name],
-                |r| r.get(0),
-            )
+            .query_row("SELECT id FROM rules WHERE name = ?1", params![name], |r| {
+                r.get(0)
+            })
             .map_err(|e| Error::Store(e.to_string()))?;
         Ok(RuleRow {
             id,
@@ -823,7 +848,11 @@ impl Store {
 
     // ---------- AI 建议 ----------
 
-    pub fn pending_proposal_exists(&self, remote_ip: &str, local_port: Option<u16>) -> Result<bool> {
+    pub fn pending_proposal_exists(
+        &self,
+        remote_ip: &str,
+        local_port: Option<u16>,
+    ) -> Result<bool> {
         let n: i64 = self
             .lock()?
             .query_row(
@@ -925,7 +954,12 @@ impl Store {
             .map_err(|e| Error::Store(e.to_string()))
     }
 
-    pub fn set_proposal_status(&self, id: i64, status: &str, applied_rule_id: Option<i64>) -> Result<()> {
+    pub fn set_proposal_status(
+        &self,
+        id: i64,
+        status: &str,
+        applied_rule_id: Option<i64>,
+    ) -> Result<()> {
         self.lock()?
             .execute(
                 "UPDATE proposals SET status = ?2, applied_rule_id = ?3 WHERE id = ?1",
@@ -938,13 +972,15 @@ impl Store {
     /// 某来源 IP 的独立协同上报节点数（0.4.0 C3 quorum）：
     /// 事件 listener 形如 `fed:<节点>:<监听器>`，按节点去重。
     pub fn fed_reporter_count(&self, remote_ip: &str, since: i64) -> Result<i64> {
-        let n: i64 = self.lock()?.query_row(
-            "SELECT COUNT(DISTINCT listener) FROM events
+        let n: i64 = self
+            .lock()?
+            .query_row(
+                "SELECT COUNT(DISTINCT listener) FROM events
              WHERE remote_ip = ?1 AND ts >= ?2 AND listener LIKE 'fed:%'",
-            params![remote_ip, since],
-            |r| r.get(0),
-        )
-        .map_err(|e| Error::Store(e.to_string()))?;
+                params![remote_ip, since],
+                |r| r.get(0),
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
         Ok(n)
     }
 
@@ -1019,7 +1055,12 @@ impl Store {
         Ok(n)
     }
 
-    pub fn list_active_feedback(&self, now: i64, suppress_ttl_secs: i64, limit: u32) -> Result<Vec<FpRow>> {
+    pub fn list_active_feedback(
+        &self,
+        now: i64,
+        suppress_ttl_secs: i64,
+        limit: u32,
+    ) -> Result<Vec<FpRow>> {
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
@@ -1079,7 +1120,10 @@ impl Store {
     // ---------- 威胁情报 ----------
 
     /// upsert：同 value 更新来源/置信度/过期时间，first_seen 保留最初值
-    pub fn upsert_intel(&self, entries: &[(String, String, String, String, i64, i64)]) -> Result<usize> {
+    pub fn upsert_intel(
+        &self,
+        entries: &[(String, String, String, String, i64, i64)],
+    ) -> Result<usize> {
         let conn = self.lock()?;
         let mut n = 0;
         for (source, kind, value, confidence, first_seen, expires_ts) in entries {
@@ -1217,7 +1261,8 @@ mod tests {
     use super::*;
 
     fn tmp_store(name: &str) -> Store {
-        let dir = std::env::temp_dir().join(format!("aisafeguard-test-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("aisafeguard-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         Store::open(&dir.join("t.db")).unwrap()
@@ -1229,15 +1274,46 @@ mod tests {
         let store = tmp_store("metrics");
         let now = aisafeguard_core::now_ts();
         // 窗口内：2 条建议（1 条 applied）、1 条误报、1 次自动封禁
-        store.insert_proposal("glm", "high", "in", "any", "203.0.113.1", None, Some(900), "r1", "a").unwrap();
-        store.insert_proposal("glm", "high", "in", "any", "203.0.113.2", None, Some(900), "r2", "a").unwrap();
+        store
+            .insert_proposal(
+                "glm",
+                "high",
+                "in",
+                "any",
+                "203.0.113.1",
+                None,
+                Some(900),
+                "r1",
+                "a",
+            )
+            .unwrap();
+        store
+            .insert_proposal(
+                "glm",
+                "high",
+                "in",
+                "any",
+                "203.0.113.2",
+                None,
+                Some(900),
+                "r2",
+                "a",
+            )
+            .unwrap();
         let ids: Vec<i64> = {
             let conn = store.lock().unwrap();
-            let mut st = conn.prepare("SELECT id FROM proposals ORDER BY id").unwrap();
-            st.query_map([], |r| r.get(0)).unwrap().map(|x| x.unwrap()).collect()
+            let mut st = conn
+                .prepare("SELECT id FROM proposals ORDER BY id")
+                .unwrap();
+            st.query_map([], |r| r.get(0))
+                .unwrap()
+                .map(|x| x.unwrap())
+                .collect()
         };
         store.set_proposal_status(ids[0], "applied", None).unwrap();
-        store.insert_fp_feedback("203.0.113.9", now, "fp", None).unwrap();
+        store
+            .insert_fp_feedback("203.0.113.9", now, "fp", None)
+            .unwrap();
         // 真实链路：「已自动封禁」文本在 kind=engine 的事件里（handle_detection 固定文案）
         store
             .insert_event(&aisafeguard_core::event::SecurityEvent::Engine {
@@ -1260,7 +1336,9 @@ mod tests {
     #[test]
     fn fp_feedback_clear() {
         let store = tmp_store("fp-clear");
-        store.insert_fp_feedback("203.0.113.9", 100, "test", None).unwrap();
+        store
+            .insert_fp_feedback("203.0.113.9", 100, "test", None)
+            .unwrap();
         assert!(store.active_fp("203.0.113.9", 150, 10_000, None).unwrap());
         assert_eq!(store.clear_fp_feedback("203.0.113.9").unwrap(), 1);
         assert!(!store.active_fp("203.0.113.9", 150, 10_000, None).unwrap());
@@ -1273,7 +1351,11 @@ mod tests {
     fn fed_reporter_count_dedupes_by_node() {
         let store = tmp_store("fed-q");
         let now = aisafeguard_core::now_ts();
-        for (node, ip) in [("agent1", "203.0.113.7"), ("agent2", "203.0.113.7"), ("agent1", "203.0.113.7")] {
+        for (node, ip) in [
+            ("agent1", "203.0.113.7"),
+            ("agent2", "203.0.113.7"),
+            ("agent1", "203.0.113.7"),
+        ] {
             store
                 .insert_event(&aisafeguard_core::event::SecurityEvent::HoneypotHit {
                     ts: now,
@@ -1287,8 +1369,14 @@ mod tests {
                 })
                 .unwrap();
         }
-        assert_eq!(store.fed_reporter_count("203.0.113.7", now - 60).unwrap(), 2);
-        assert_eq!(store.fed_reporter_count("198.51.100.1", now - 60).unwrap(), 0);
+        assert_eq!(
+            store.fed_reporter_count("203.0.113.7", now - 60).unwrap(),
+            2
+        );
+        assert_eq!(
+            store.fed_reporter_count("198.51.100.1", now - 60).unwrap(),
+            0
+        );
     }
 
     /// 端口粒度抑制（0.4.0 B4）：IP 级记录抑制任何处置；端口级记录仅抑制对应端口。
@@ -1296,13 +1384,32 @@ mod tests {
     fn fp_port_scope() {
         let store = tmp_store("fp-port");
         // 端口级记录：仅 2222
-        store.insert_fp_feedback("203.0.113.9", 100, "仅 2222", Some(2222)).unwrap();
-        assert!(store.active_fp("203.0.113.9", 150, 10_000, Some(2222)).unwrap());
-        assert!(!store.active_fp("203.0.113.9", 150, 10_000, Some(8081)).unwrap());
-        assert!(!store.active_fp("203.0.113.9", 150, 10_000, None).unwrap(), "端口级记录不抑制来源级检测");
+        store
+            .insert_fp_feedback("203.0.113.9", 100, "仅 2222", Some(2222))
+            .unwrap();
+        assert!(
+            store
+                .active_fp("203.0.113.9", 150, 10_000, Some(2222))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .active_fp("203.0.113.9", 150, 10_000, Some(8081))
+                .unwrap()
+        );
+        assert!(
+            !store.active_fp("203.0.113.9", 150, 10_000, None).unwrap(),
+            "端口级记录不抑制来源级检测"
+        );
         // 改标为 IP 级（最后一次标记决定粒度）→ 任何处置都抑制
-        store.insert_fp_feedback("203.0.113.9", 200, "按 IP", None).unwrap();
-        assert!(store.active_fp("203.0.113.9", 250, 10_000, Some(8081)).unwrap());
+        store
+            .insert_fp_feedback("203.0.113.9", 200, "按 IP", None)
+            .unwrap();
+        assert!(
+            store
+                .active_fp("203.0.113.9", 250, 10_000, Some(8081))
+                .unwrap()
+        );
         assert!(store.active_fp("203.0.113.9", 250, 10_000, None).unwrap());
     }
 
@@ -1368,7 +1475,8 @@ mod tests {
 
     #[test]
     fn hash_chain_verifies_and_detects_tamper() {
-        let dir = std::env::temp_dir().join(format!("aisafeguard-test-chain-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("aisafeguard-test-chain-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("t.db");
@@ -1402,7 +1510,8 @@ mod tests {
     fn export_writes_jsonl() {
         let store = tmp_store("export");
         hit(&store, "203.0.113.7", "a");
-        let dir = std::env::temp_dir().join(format!("aisafeguard-test-export-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("aisafeguard-test-export-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let out = dir.join("events.jsonl");
         let n = store.export_events(&out).unwrap();
@@ -1416,11 +1525,26 @@ mod tests {
     fn rules_expiry_and_proposals() {
         let store = tmp_store("rp");
         let rule = store
-            .insert_rule("aisafeguard-blk-x", "in", "tcp", "203.0.113.9", Some(22), "manual", "test", "ssh", None)
+            .insert_rule(
+                "aisafeguard-blk-x",
+                "in",
+                "tcp",
+                "203.0.113.9",
+                Some(22),
+                "manual",
+                "test",
+                "ssh",
+                None,
+            )
             .unwrap();
         assert_eq!(store.count_rules().unwrap(), 1);
         assert!(store.get_rule(rule.id).unwrap().is_some());
-        assert!(store.expired_rules(aisafeguard_core::now_ts()).unwrap().is_empty());
+        assert!(
+            store
+                .expired_rules(aisafeguard_core::now_ts())
+                .unwrap()
+                .is_empty()
+        );
 
         let _auto = store
             .insert_rule(
@@ -1440,10 +1564,26 @@ mod tests {
         assert_eq!(expired[0].name, "aisafeguard-blk-auto");
 
         let pid = store
-            .insert_proposal("m", "high", "in", "tcp", "203.0.113.9", Some(22), None, "扫描", "分析")
+            .insert_proposal(
+                "m",
+                "high",
+                "in",
+                "tcp",
+                "203.0.113.9",
+                Some(22),
+                None,
+                "扫描",
+                "分析",
+            )
             .unwrap();
-        assert!(store.pending_proposal_exists("203.0.113.9", Some(22)).unwrap());
-        store.set_proposal_status(pid, "applied", Some(rule.id)).unwrap();
+        assert!(
+            store
+                .pending_proposal_exists("203.0.113.9", Some(22))
+                .unwrap()
+        );
+        store
+            .set_proposal_status(pid, "applied", Some(rule.id))
+            .unwrap();
         let p = store.get_proposal(pid).unwrap().unwrap();
         assert_eq!(p.status, "applied");
 

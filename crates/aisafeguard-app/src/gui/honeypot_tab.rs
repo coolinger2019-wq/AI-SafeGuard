@@ -15,7 +15,10 @@ impl AisafeApp {
             .as_ref()
             .map(|s| s.listeners.clone())
             .unwrap_or_default();
-        section(ui, format!("监听器（{} 个，修改监听需重启）", listeners.len()));
+        section(
+            ui,
+            format!("监听器（{} 个，修改监听需重启）", listeners.len()),
+        );
         ui.horizontal_wrapped(|ui| {
             for l in &listeners {
                 let hits = self
@@ -44,7 +47,11 @@ impl AisafeApp {
                                 .color(text_dim()),
                         );
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("●").color(if enabled { ok() } else { text_dim() }).size(12.0));
+                            ui.label(
+                                RichText::new("●")
+                                    .color(if enabled { ok() } else { text_dim() })
+                                    .size(12.0),
+                            );
                             ui.label(
                                 RichText::new(if enabled { "运行中" } else { "已停止" })
                                     .size(12.0)
@@ -74,10 +81,12 @@ impl AisafeApp {
         );
         ui.add_space(6.0);
         ui.label(
-            RichText::new("默认端口为非特权高位端口（2222/8081/2323/1337）。要监听 22/80/23 等标准端口，\
-请编辑 config.toml 中 [honeypot.listeners] 并以管理员身份运行。")
-                .size(13.0)
-                .color(text_dim()),
+            RichText::new(
+                "默认端口为非特权高位端口（2222/8081/2323/1337）。要监听 22/80/23 等标准端口，\
+请编辑 config.toml 中 [honeypot.listeners] 并以管理员身份运行。",
+            )
+            .size(13.0)
+            .color(text_dim()),
         );
     }
 }

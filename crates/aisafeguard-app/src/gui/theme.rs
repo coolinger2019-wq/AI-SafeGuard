@@ -52,7 +52,12 @@ impl ThemeId {
     }
 
     pub fn all() -> [ThemeId; 4] {
-        [ThemeId::DeepBlue, ThemeId::Light, ThemeId::Warm, ThemeId::Contrast]
+        [
+            ThemeId::DeepBlue,
+            ThemeId::Light,
+            ThemeId::Warm,
+            ThemeId::Contrast,
+        ]
     }
 
     pub fn spec(self) -> &'static ThemeSpec {
@@ -63,7 +68,6 @@ impl ThemeId {
             ThemeId::Contrast => &CONTRAST,
         }
     }
-
 }
 
 /// 一套配色方案的全部语义色。
@@ -113,7 +117,6 @@ pub struct ThemeSpec {
 // ---------- 四套方案 ----------
 
 static DEEP_BLUE: ThemeSpec = ThemeSpec {
-
     name: "深邃蓝（深色）",
     desc: "默认深色，长时盯屏舒适，背景非纯黑",
     dark: true,
@@ -146,7 +149,6 @@ static DEEP_BLUE: ThemeSpec = ThemeSpec {
 };
 
 static LIGHT: ThemeSpec = ThemeSpec {
-
     name: "浅色办公",
     desc: "亮环境/打印友好，白底深字高可读",
     dark: false,
@@ -179,7 +181,6 @@ static LIGHT: ThemeSpec = ThemeSpec {
 };
 
 static WARM: ThemeSpec = ThemeSpec {
-
     name: "暖色护眼",
     desc: "低蓝光暖调，夜间/长时间值守更轻松",
     dark: true,
@@ -212,7 +213,6 @@ static WARM: ThemeSpec = ThemeSpec {
 };
 
 static CONTRAST: ThemeSpec = ThemeSpec {
-
     name: "高对比（无障碍）",
     desc: "纯黑底白字，弱视/强光环境可读性优先",
     dark: true,
@@ -379,7 +379,11 @@ pub fn apply(ctx: &egui::Context, id: ThemeId, font_scale: f32) {
             v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.border);
         });
     }
-    ctx.set_theme(if spec.dark { egui::Theme::Dark } else { egui::Theme::Light });
+    ctx.set_theme(if spec.dark {
+        egui::Theme::Dark
+    } else {
+        egui::Theme::Light
+    });
     ctx.set_zoom_factor(normalize_font_scale(font_scale));
 }
 
@@ -433,7 +437,11 @@ mod tests {
     fn luminance(c: Color32) -> f32 {
         let f = |v: u8| {
             let s = v as f32 / 255.0;
-            if s <= 0.04045 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
+            if s <= 0.04045 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
         };
         0.2126 * f(c.r()) + 0.7152 * f(c.g()) + 0.0722 * f(c.b())
     }

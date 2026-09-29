@@ -5,7 +5,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, Request, State};
-use axum::http::{header::AUTHORIZATION, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -33,7 +33,10 @@ pub async fn serve(engine: Arc<EngineHandle>) {
         .route("/api/proposals", get(list_proposals))
         .route("/api/proposals/{id}/apply", post(apply_proposal))
         .route("/api/proposals/{id}/dismiss", post(dismiss_proposal))
-        .route("/api/feedback", get(list_feedback).post(mark_false_positive))
+        .route(
+            "/api/feedback",
+            get(list_feedback).post(mark_false_positive),
+        )
         .route("/api/feedback/{value}", delete(clear_feedback))
         .route("/api/stats", get(stats))
         .route("/api/exposure", get(get_exposure))
@@ -41,7 +44,10 @@ pub async fn serve(engine: Arc<EngineHandle>) {
         .route("/api/intel", get(get_intel))
         .route("/api/intel/refresh", post(refresh_intel))
         .route("/api/config", get(get_config).post(put_config))
-        .route("/api/ai/key", get(ai_key_present).post(ai_key_set).delete(ai_key_delete))
+        .route(
+            "/api/ai/key",
+            get(ai_key_present).post(ai_key_set).delete(ai_key_delete),
+        )
         .route("/api/ai/runs", get(ai_runs))
         .route("/api/ai/analyze", post(ai_analyze))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
@@ -78,7 +84,11 @@ async fn auth(
 }
 
 fn err_resp(e: aisafeguard_core::error::Error) -> Response {
-    (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response()
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "error": e.to_string() })),
+    )
+        .into_response()
 }
 
 async fn status(State(s): State<AppState>) -> Json<crate::engine::StatusReport> {
@@ -91,10 +101,7 @@ struct EventsQuery {
     ip: Option<String>,
 }
 
-async fn events(
-    State(s): State<AppState>,
-    Query(q): Query<EventsQuery>,
-) -> Response {
+async fn events(State(s): State<AppState>, Query(q): Query<EventsQuery>) -> Response {
     let limit = q.limit.unwrap_or(100).min(1000);
     match s.engine.list_events(limit, q.ip.as_deref()) {
         Ok(rows) => Json(rows).into_response(),
@@ -127,7 +134,7 @@ async fn add_rule(State(s): State<AppState>, Json(body): Json<AddRuleBody>) -> R
         other => {
             return err_resp(aisafeguard_core::error::Error::Firewall(format!(
                 "direction 必须是 in/out，得到 {other}"
-            )))
+            )));
         }
     };
     let protocol = match body.protocol.as_deref().unwrap_or("any") {
@@ -137,7 +144,7 @@ async fn add_rule(State(s): State<AppState>, Json(body): Json<AddRuleBody>) -> R
         other => {
             return err_resp(aisafeguard_core::error::Error::Firewall(format!(
                 "protocol 必须是 any/tcp/udp，得到 {other}"
-            )))
+            )));
         }
     };
     let remote_ip = match body.remote_ip.as_deref() {
@@ -147,7 +154,7 @@ async fn add_rule(State(s): State<AppState>, Json(body): Json<AddRuleBody>) -> R
             Err(e) => {
                 return err_resp(aisafeguard_core::error::Error::Firewall(format!(
                     "remote_ip 非法: {e}"
-                )))
+                )));
             }
         },
     };
@@ -210,8 +217,15 @@ struct FeedbackBody {
 }
 
 /// 误报反馈：记录（30 天抑制）+ 解除该来源自动封禁 + 收弃 pending 建议。
-async fn mark_false_positive(State(s): State<AppState>, Json(body): Json<FeedbackBody>) -> Response {
-    match s.engine.mark_false_positive(&body.remote_ip, body.note.as_deref().unwrap_or(""), body.local_port) {
+async fn mark_false_positive(
+    State(s): State<AppState>,
+    Json(body): Json<FeedbackBody>,
+) -> Response {
+    match s.engine.mark_false_positive(
+        &body.remote_ip,
+        body.note.as_deref().unwrap_or(""),
+        body.local_port,
+    ) {
         Ok((dismissed, removed)) => Json(json!({
             "ok": true,
             "dismissed_proposals": dismissed,
@@ -257,7 +271,11 @@ async fn ai_analyze(State(s): State<AppState>) -> Response {
     if s.engine.trigger_analysis() {
         Json(json!({ "ok": true, "message": "分析已开始" })).into_response()
     } else {
-        (StatusCode::CONFLICT, Json(json!({ "error": "已有分析在运行" }))).into_response()
+        (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "已有分析在运行" })),
+        )
+            .into_response()
     }
 }
 

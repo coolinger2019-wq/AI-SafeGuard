@@ -121,16 +121,11 @@ impl AisafeApp {
                 ui.end_row();
 
                 ui.label("API 地址（OpenAI 兼容）");
-                ui.add(
-                    egui::TextEdit::singleline(&mut draft.ai.base_url)
-                        .desired_width(440.0),
-                );
+                ui.add(egui::TextEdit::singleline(&mut draft.ai.base_url).desired_width(440.0));
                 ui.end_row();
 
                 ui.label("模型");
-                ui.add(
-                    egui::TextEdit::singleline(&mut draft.ai.model).desired_width(240.0),
-                );
+                ui.add(egui::TextEdit::singleline(&mut draft.ai.model).desired_width(240.0));
                 ui.end_row();
 
                 ui.label("自动应用建议");
@@ -142,7 +137,11 @@ impl AisafeApp {
                     .selected_text(&draft.ai.auto_apply_min_severity)
                     .show_ui(ui, |ui| {
                         for s in ["low", "medium", "high", "critical"] {
-                            ui.selectable_value(&mut draft.ai.auto_apply_min_severity, s.to_string(), s);
+                            ui.selectable_value(
+                                &mut draft.ai.auto_apply_min_severity,
+                                s.to_string(),
+                                s,
+                            );
                         }
                     });
                 ui.end_row();
@@ -154,9 +153,7 @@ impl AisafeApp {
                 ui.end_row();
 
                 ui.label("单条 payload 上送上限（字符）");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.settings_snippet).desired_width(120.0),
-                );
+                ui.add(egui::TextEdit::singleline(&mut self.settings_snippet).desired_width(120.0));
                 ui.end_row();
             });
 
@@ -170,13 +167,18 @@ impl AisafeApp {
                 ui.checkbox(&mut draft.detect.enabled, "（端口扫描 / 暴力探测判定）");
                 ui.end_row();
                 ui.label("自动封禁");
-                ui.checkbox(&mut draft.detect.auto_block, "（TTL 到期自动解封，内网地址永不自动封禁）");
+                ui.checkbox(
+                    &mut draft.detect.auto_block,
+                    "（TTL 到期自动解封，内网地址永不自动封禁）",
+                );
                 ui.end_row();
             });
         ui.label(
-            RichText::new("阈值（扫描端口数/窗口/次数/TTL）在 config.toml [detect] 中调整，保存后即时生效。")
-                .size(11.0)
-                .color(text_dim()),
+            RichText::new(
+                "阈值（扫描端口数/窗口/次数/TTL）在 config.toml [detect] 中调整，保存后即时生效。",
+            )
+            .size(11.0)
+            .color(text_dim()),
         );
 
         ui.add_space(14.0);
@@ -214,7 +216,11 @@ impl AisafeApp {
                 if !cap.enabled {
                     chip(ui, "未启用", text_dim());
                 } else if cap.active {
-                    chip(ui, &format!("采样中 · {} · {}", cap.backend, cap.mode), ok());
+                    chip(
+                        ui,
+                        &format!("采样中 · {} · {}", cap.backend, cap.mode),
+                        ok(),
+                    );
                 } else {
                     chip(ui, "不可用", warn());
                 }
@@ -243,9 +249,7 @@ impl AisafeApp {
                 ui.checkbox(&mut draft.api.enabled, "（仅监听 127.0.0.1）");
                 ui.end_row();
                 ui.label("端口（需重启）");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.settings_port).desired_width(120.0),
-                );
+                ui.add(egui::TextEdit::singleline(&mut self.settings_port).desired_width(120.0));
                 ui.end_row();
             });
 
@@ -272,8 +276,16 @@ impl AisafeApp {
                 egui::ComboBox::from_id_salt("syslog-protocol")
                     .selected_text(&draft.syslog.protocol)
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut draft.syslog.protocol, "udp".to_string(), "udp（RFC 5426）");
-                        ui.selectable_value(&mut draft.syslog.protocol, "tcp".to_string(), "tcp（换行分帧）");
+                        ui.selectable_value(
+                            &mut draft.syslog.protocol,
+                            "udp".to_string(),
+                            "udp（RFC 5426）",
+                        );
+                        ui.selectable_value(
+                            &mut draft.syslog.protocol,
+                            "tcp".to_string(),
+                            "tcp（换行分帧）",
+                        );
                     });
                 ui.end_row();
             });
@@ -309,7 +321,11 @@ impl AisafeApp {
                             ("notice", "notice（含蜜罐命中/AI 建议）"),
                             ("info", "info（全部事件）"),
                         ] {
-                            ui.selectable_value(&mut draft.notify.min_severity, v.to_string(), label);
+                            ui.selectable_value(
+                                &mut draft.notify.min_severity,
+                                v.to_string(),
+                                label,
+                            );
                         }
                     });
                 ui.end_row();
@@ -372,8 +388,16 @@ impl AisafeApp {
                 egui::ComboBox::from_id_salt("xdp-mode")
                     .selected_text(&draft.xdp.mode)
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut draft.xdp.mode, "skb".to_string(), "skb（generic XDP，所有网卡可用）");
-                        ui.selectable_value(&mut draft.xdp.mode, "native".to_string(), "native（驱动级，更快，需网卡支持）");
+                        ui.selectable_value(
+                            &mut draft.xdp.mode,
+                            "skb".to_string(),
+                            "skb（generic XDP，所有网卡可用）",
+                        );
+                        ui.selectable_value(
+                            &mut draft.xdp.mode,
+                            "native".to_string(),
+                            "native（驱动级，更快，需网卡支持）",
+                        );
                     });
                 ui.end_row();
             });
@@ -396,9 +420,13 @@ impl AisafeApp {
             );
         }
         ui.label(
-            RichText::new(concat!("AI-SafeGuard ", env!("CARGO_PKG_VERSION"), " · © 2026 coolinger · vibe coding"))
-                .size(12.0)
-                .color(text_color()),
+            RichText::new(concat!(
+                "AI-SafeGuard ",
+                env!("CARGO_PKG_VERSION"),
+                " · © 2026 coolinger · vibe coding"
+            ))
+            .size(12.0)
+            .color(text_color()),
         );
         ui.label(
             RichText::new("MIT License · 安全软件 · 仅供授权环境防御性使用")
@@ -446,7 +474,11 @@ impl AisafeApp {
             }
             chip(
                 ui,
-                if stored { "已存入凭据管理器" } else { "未存储" },
+                if stored {
+                    "已存入凭据管理器"
+                } else {
+                    "未存储"
+                },
                 if stored { ok() } else { text_dim() },
             );
         });

@@ -177,8 +177,7 @@ pub mod nft {
             "inet".into(),
             TABLE.into(),
             chain.into(),
-            "{ type filter hook <hook> priority mangle ; policy accept ; }"
-                .replace("<hook>", hook),
+            "{ type filter hook <hook> priority mangle ; policy accept ; }".replace("<hook>", hook),
         ]
     }
 
@@ -294,7 +293,13 @@ pub mod nft {
     }
 
     pub fn flush_set(set: &str) -> Vec<String> {
-        vec!["flush".into(), "set".into(), "inet".into(), TABLE.into(), set.into()]
+        vec![
+            "flush".into(),
+            "set".into(),
+            "inet".into(),
+            TABLE.into(),
+            set.into(),
+        ]
     }
 
     pub fn list_chain(chain: &str) -> Vec<String> {
@@ -331,8 +336,12 @@ pub mod nft {
     ) -> Vec<&'static str> {
         use crate::{Direction, Protocol};
         let (tcp, udp) = match (direction, protocol) {
-            (Direction::In, Protocol::Tcp) | (Direction::Out, Protocol::Tcp) => (Some(SET_PORT_TCP_IN), None),
-            (Direction::In, Protocol::Udp) | (Direction::Out, Protocol::Udp) => (None, Some(SET_PORT_UDP_IN)),
+            (Direction::In, Protocol::Tcp) | (Direction::Out, Protocol::Tcp) => {
+                (Some(SET_PORT_TCP_IN), None)
+            }
+            (Direction::In, Protocol::Udp) | (Direction::Out, Protocol::Udp) => {
+                (None, Some(SET_PORT_UDP_IN))
+            }
             (Direction::In, _) => (Some(SET_PORT_TCP_IN), Some(SET_PORT_UDP_IN)),
             (Direction::Out, _) => (Some(SET_PORT_TCP_OUT), Some(SET_PORT_UDP_OUT)),
         };
@@ -397,7 +406,9 @@ impl Firewall for WindowsFirewall {
 
     fn add_block(&self, name: &str, spec: &BlockSpec) -> Result<()> {
         use std::collections::HashSet;
-        use windows_firewall::{Action, Address, Direction as WfDirection, FirewallRule, Port, Protocol as WfProtocol};
+        use windows_firewall::{
+            Action, Address, Direction as WfDirection, FirewallRule, Port, Protocol as WfProtocol,
+        };
 
         // typed-builder 的条件字段无法链式续写，必填项走 builder，可选项走 setter
         let mut rule = FirewallRule::builder()
@@ -427,7 +438,9 @@ impl Firewall for WindowsFirewall {
 
     fn remove(&self, name: &str, _spec: &BlockSpec) -> Result<()> {
         if !name.starts_with(RULE_PREFIX) {
-            return Err(Error::Firewall(format!("拒绝删除非 AI-SafeGuard 规则: {name}")));
+            return Err(Error::Firewall(format!(
+                "拒绝删除非 AI-SafeGuard 规则: {name}"
+            )));
         }
         match windows_firewall::rule_exists(name) {
             Ok(false) => Ok(()),
@@ -511,7 +524,12 @@ impl NftablesBackend {
         if self.setup.get().is_some() {
             return Ok(());
         }
-        self.run(&nft::add_table().iter().map(|s| s.to_string()).collect::<Vec<_>>())?;
+        self.run(
+            &nft::add_table()
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+        )?;
         for (set, v6) in [
             (nft::SET_IN4, false),
             (nft::SET_IN6, true),
@@ -540,7 +558,12 @@ impl NftablesBackend {
             (nft::CHAIN_OUT, nft::SET_OUT4, true),
             (nft::CHAIN_OUT, nft::SET_OUT6, true),
         ] {
-            let listing = self.run(&nft::list_chain(chain).iter().map(|s| s.to_string()).collect::<Vec<_>>())?;
+            let listing = self.run(
+                &nft::list_chain(chain)
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>(),
+            )?;
             if listing.contains(&format!("@{set}")) {
                 continue;
             }
@@ -555,7 +578,12 @@ impl NftablesBackend {
             (nft::CHAIN_OUT, nft::SET_PORT_TCP_OUT, "tcp", true),
             (nft::CHAIN_OUT, nft::SET_PORT_UDP_OUT, "udp", true),
         ] {
-            let listing = self.run(&nft::list_chain(chain).iter().map(|s| s.to_string()).collect::<Vec<_>>())?;
+            let listing = self.run(
+                &nft::list_chain(chain)
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>(),
+            )?;
             if listing.contains(&format!("@{set}")) {
                 continue;
             }
@@ -663,7 +691,10 @@ impl Firewall for NftablesBackend {
                     }
                 }
                 None => {
-                    self.run(&nft::add_element(nft::set_for(spec.direction, ip), &ip.to_string()))?;
+                    self.run(&nft::add_element(
+                        nft::set_for(spec.direction, ip),
+                        &ip.to_string(),
+                    ))?;
                 }
             }
         }

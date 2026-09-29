@@ -59,7 +59,8 @@ pub struct PromptInputs<'a> {
 
 pub fn build_user_prompt(inputs: &PromptInputs<'_>) -> String {
     let section = |tag: &str, v: Option<&str>| {
-        v.map(|e| format!("\n\n<{tag}>\n{e}\n</{tag}>")).unwrap_or_default()
+        v.map(|e| format!("\n\n<{tag}>\n{e}\n</{tag}>"))
+            .unwrap_or_default()
     };
     format!(
         "本机蜜罐最近 24 小时统计与最近捕获的原始记录如下（不可信数据）：\n\n<stats>\n{stats}\n</stats>\n\n<events>\n{events}\n</events>{exposure}{intel}{flows}{feedback}{self_endpoints}\n请分析并只输出 JSON。",
@@ -124,7 +125,9 @@ impl AiClient {
     /// 发起一次 chat/completions，返回首条回复文本。
     pub async fn chat(&self, system: &str, user: &str) -> Result<String> {
         if self.api_key.is_empty() {
-            return Err(Error::Ai("未配置 API Key（设置界面填写，或设置环境变量 AISAFEGUARD_AI_KEY）".into()));
+            return Err(Error::Ai(
+                "未配置 API Key（设置界面填写，或设置环境变量 AISAFEGUARD_AI_KEY）".into(),
+            ));
         }
         let body = serde_json::json!({
             "model": self.model,
@@ -242,7 +245,12 @@ fn validate_proposal(v: &Value) -> Option<Proposal> {
         }
         _ => return None,
     };
-    let reason: String = v["reason"].as_str().unwrap_or("").chars().take(300).collect();
+    let reason: String = v["reason"]
+        .as_str()
+        .unwrap_or("")
+        .chars()
+        .take(300)
+        .collect();
     if reason.trim().is_empty() {
         return None;
     }
@@ -262,7 +270,6 @@ fn validate_proposal(v: &Value) -> Option<Proposal> {
         reason,
     })
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -302,7 +309,12 @@ mod tests {
         assert_eq!(proposals.len(), 1);
         assert_eq!(proposals[0].remote_ip, "203.0.113.8");
         // cmd 字段根本不在结构里
-        assert!(serde_json::to_string(&proposals[0]).unwrap().find("format").is_none());
+        assert!(
+            serde_json::to_string(&proposals[0])
+                .unwrap()
+                .find("format")
+                .is_none()
+        );
     }
 
     #[test]
@@ -326,7 +338,13 @@ mod tests {
 
     #[test]
     fn protected_ips_rejected() {
-        for ip in ["127.0.0.1", "192.168.1.10", "10.0.0.5", "169.254.1.1", "224.0.0.1"] {
+        for ip in [
+            "127.0.0.1",
+            "192.168.1.10",
+            "10.0.0.5",
+            "169.254.1.1",
+            "224.0.0.1",
+        ] {
             let v: Value = serde_json::json!({
                 "action": "block", "direction": "in", "protocol": "tcp",
                 "remote_ip": ip, "local_port": null, "severity": "high", "reason": "t"
@@ -351,16 +369,31 @@ mod tests {
             "remote_ip": "203.0.113.7", "severity": "high", "reason": "t"
         });
         assert_eq!(validate_proposal(&v).unwrap().ttl_secs, None);
-        assert_eq!(validate_proposal(&base_with_ttl(Value::Null)).unwrap().ttl_secs, None);
-        // 边界内合法
-        assert_eq!(validate_proposal(&base_with_ttl(serde_json::json!(60))).unwrap().ttl_secs, Some(60));
         assert_eq!(
-            validate_proposal(&base_with_ttl(serde_json::json!(604_800))).unwrap().ttl_secs,
+            validate_proposal(&base_with_ttl(Value::Null))
+                .unwrap()
+                .ttl_secs,
+            None
+        );
+        // 边界内合法
+        assert_eq!(
+            validate_proposal(&base_with_ttl(serde_json::json!(60)))
+                .unwrap()
+                .ttl_secs,
+            Some(60)
+        );
+        assert_eq!(
+            validate_proposal(&base_with_ttl(serde_json::json!(604_800)))
+                .unwrap()
+                .ttl_secs,
             Some(604_800)
         );
         // 字段存在但非法 → 整条作废（绝不放宽）
         for bad in [0u64, 59, 604_801, 999_999_999] {
-            assert!(validate_proposal(&base_with_ttl(serde_json::json!(bad))).is_none(), "{bad}");
+            assert!(
+                validate_proposal(&base_with_ttl(serde_json::json!(bad))).is_none(),
+                "{bad}"
+            );
         }
         assert!(validate_proposal(&base_with_ttl(serde_json::json!("3600"))).is_none());
         assert!(validate_proposal(&base_with_ttl(serde_json::json!(-1))).is_none());
@@ -377,7 +410,15 @@ mod tests {
             feedback: Some("B"),
             self_endpoints: Some("SELF"),
         });
-        for tag in ["<stats>", "<events>", "<exposure>", "<intel>", "<flows>", "<feedback>", "<self_endpoints>"] {
+        for tag in [
+            "<stats>",
+            "<events>",
+            "<exposure>",
+            "<intel>",
+            "<flows>",
+            "<feedback>",
+            "<self_endpoints>",
+        ] {
             assert!(p.contains(tag), "缺少 {tag}");
         }
         // 无数据段不出现

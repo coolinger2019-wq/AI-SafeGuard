@@ -68,8 +68,13 @@ mod tests {
     #[test]
     fn parse_feodo_tolerates_garbage() {
         assert!(parse_feodo_ipblocklist("").is_empty());
-        assert!(parse_feodo_ipblocklist("# only comments
+        assert!(
+            parse_feodo_ipblocklist(
+                "# only comments
 
-").is_empty());
+"
+            )
+            .is_empty()
+        );
     }
 }

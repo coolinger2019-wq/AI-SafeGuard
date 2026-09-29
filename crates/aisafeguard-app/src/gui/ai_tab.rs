@@ -12,13 +12,21 @@ impl AisafeApp {
             ui.horizontal_wrapped(|ui| {
                 chip(
                     ui,
-                    if ai.enabled { "AI 已启用" } else { "AI 未启用" },
+                    if ai.enabled {
+                        "AI 已启用"
+                    } else {
+                        "AI 未启用"
+                    },
                     if ai.enabled { ok() } else { text_dim() },
                 );
                 chip(
                     ui,
                     &format!("Key: {}", ai.key_source),
-                    if ai.key_source == "未配置" { warn() } else { text_dim() },
+                    if ai.key_source == "未配置" {
+                        warn()
+                    } else {
+                        text_dim()
+                    },
                 );
                 chip(ui, &ai.model, accent());
                 chip(
@@ -88,31 +96,36 @@ impl AisafeApp {
                     .show(ui, |ui| {
                         for e in snap.entries.iter().take(30) {
                             ui.label(
-                                RichText::new(format!(
-                                    "{}  {}  [{}]",
-                                    e.addr, e.process, e.proto
-                                ))
-                                .monospace()
-                                .size(12.0),
+                                RichText::new(format!("{}  {}  [{}]", e.addr, e.process, e.proto))
+                                    .monospace()
+                                    .size(12.0),
                             );
                         }
                         if snap.entries.len() > 30 {
-                            ui.label(RichText::new(format!("…其余 {} 项", snap.entries.len() - 30)).size(11.0).color(text_dim()));
+                            ui.label(
+                                RichText::new(format!("…其余 {} 项", snap.entries.len() - 30))
+                                    .size(11.0)
+                                    .color(text_dim()),
+                            );
                         }
                     });
             }
             None => {
                 ui.label(
-                    RichText::new("尚未扫描。扫描会枚举本机监听端口与归属进程，并作为下次 AI 分析的输入。")
-                        .size(13.0)
-                        .color(text_dim()),
+                    RichText::new(
+                        "尚未扫描。扫描会枚举本机监听端口与归属进程，并作为下次 AI 分析的输入。",
+                    )
+                    .size(13.0)
+                    .color(text_dim()),
                 );
             }
         }
         ui.horizontal(|ui| {
             if ui.button("立即扫描暴露面").clicked() {
                 match self.eng.scan_exposure() {
-                    Ok(entries) => self.set_toast(format!("扫描完成：{} 个监听端点", entries.len())),
+                    Ok(entries) => {
+                        self.set_toast(format!("扫描完成：{} 个监听端点", entries.len()))
+                    }
                     Err(e) => self.set_toast(format!("扫描失败: {e}")),
                 }
                 self.refresh_cache();
@@ -143,9 +156,11 @@ impl AisafeApp {
         section(ui, format!("待处理建议（{}）", pending.len()));
         if pending.is_empty() {
             ui.label(
-                RichText::new("暂无待处理建议。蜜罐捕获到攻击行为后，点击「立即分析」生成封禁建议。")
-                    .color(text_dim())
-                    .size(13.0),
+                RichText::new(
+                    "暂无待处理建议。蜜罐捕获到攻击行为后，点击「立即分析」生成封禁建议。",
+                )
+                .color(text_dim())
+                .size(13.0),
             );
         }
         for p in &pending {
@@ -234,7 +249,10 @@ impl AisafeApp {
         }
 
         ui.add_space(10.0);
-        section(ui, "价值指标（口径：采纳率 = 采纳/建议，误报率 = 误报/采纳）");
+        section(
+            ui,
+            "价值指标（口径：采纳率 = 采纳/建议，误报率 = 误报/采纳）",
+        );
         if let Some(st) = &self.cache.status {
             for (label, m) in [("近 24h", &st.metrics_24h), ("近 7 天", &st.metrics_7d)] {
                 let adopt_rate = if m.proposed > 0 {
@@ -249,11 +267,13 @@ impl AisafeApp {
                 };
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(label).strong().size(13.0));
-                    ui.label(RichText::new(format!(
-                        "建议 {} · 采纳 {}（{}）· 误报 {}（{}）· 自动封禁 {}",
-                        m.proposed, m.applied, adopt_rate, m.fp, fp_rate, m.auto_blocks
-                    ))
-                    .size(12.0));
+                    ui.label(
+                        RichText::new(format!(
+                            "建议 {} · 采纳 {}（{}）· 误报 {}（{}）· 自动封禁 {}",
+                            m.proposed, m.applied, adopt_rate, m.fp, fp_rate, m.auto_blocks
+                        ))
+                        .size(12.0),
+                    );
                 });
             }
         }
@@ -281,7 +301,10 @@ impl AisafeApp {
                 if ui.button("清除抑制").clicked() {
                     match self.eng.clear_false_positive(&f.value) {
                         Ok(1) => {
-                            self.set_toast(format!("已清除 {} 的误报抑制（恢复自动封禁资格）", f.value));
+                            self.set_toast(format!(
+                                "已清除 {} 的误报抑制（恢复自动封禁资格）",
+                                f.value
+                            ));
                             self.refresh_cache();
                         }
                         Ok(_) => {}
@@ -294,13 +317,19 @@ impl AisafeApp {
         ui.add_space(10.0);
         section(ui, "运行记录");
         if self.cache.runs.is_empty() {
-            ui.label(RichText::new("尚无 AI 分析记录。").color(text_dim()).size(13.0));
+            ui.label(
+                RichText::new("尚无 AI 分析记录。")
+                    .color(text_dim())
+                    .size(13.0),
+            );
         }
         for r in &self.cache.runs {
             ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(if r.ok { "✓" } else { "✗" }).color(if r.ok { ok() } else { danger() }),
-                );
+                ui.label(RichText::new(if r.ok { "✓" } else { "✗" }).color(if r.ok {
+                    ok()
+                } else {
+                    danger()
+                }));
                 ui.label(RichText::new(fmt_ts(r.ts)).size(12.0).color(text_dim()));
                 ui.label(RichText::new(&r.summary).size(12.0));
             });

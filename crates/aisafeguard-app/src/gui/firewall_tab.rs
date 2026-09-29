@@ -6,9 +6,17 @@ impl AisafeApp {
         ui.label(RichText::new("防火墙").size(22.0).strong());
         ui.add_space(10.0);
 
-        let elevated = self.cache.status.as_ref().map(|s| s.elevated).unwrap_or(false);
+        let elevated = self
+            .cache
+            .status
+            .as_ref()
+            .map(|s| s.elevated)
+            .unwrap_or(false);
         if !elevated {
-            warn_banner(ui, "未以管理员身份运行：添加/删除防火墙规则会失败。请关闭后以管理员身份重新启动 AI-SafeGuard。");
+            warn_banner(
+                ui,
+                "未以管理员身份运行：添加/删除防火墙规则会失败。请关闭后以管理员身份重新启动 AI-SafeGuard。",
+            );
         }
 
         section(ui, "手动封禁");
@@ -87,7 +95,16 @@ impl AisafeApp {
             .column(egui_extras::Column::exact(110.0))
             .column(egui_extras::Column::remainder())
             .header(22.0, |mut header| {
-                for name in ["规则名", "方向", "协议", "来源 IP", "端口", "来源", "创建时间", ""] {
+                for name in [
+                    "规则名",
+                    "方向",
+                    "协议",
+                    "来源 IP",
+                    "端口",
+                    "来源",
+                    "创建时间",
+                    "",
+                ] {
                     header.col(|ui| {
                         ui.strong(name);
                     });
@@ -106,14 +123,25 @@ impl AisafeApp {
                             ui.label(RichText::new(proto_up(&r.protocol)).size(12.0));
                         });
                         row.col(|ui| {
-                            let ip = if r.remote_ip.is_empty() { "任意".into() } else { r.remote_ip.clone() };
+                            let ip = if r.remote_ip.is_empty() {
+                                "任意".into()
+                            } else {
+                                r.remote_ip.clone()
+                            };
                             ui.label(RichText::new(ip).monospace().size(12.0));
                             if !r.tag.is_empty() {
-                                ui.label(RichText::new(format!("#{}", r.tag)).size(10.0).color(text_dim()));
+                                ui.label(
+                                    RichText::new(format!("#{}", r.tag))
+                                        .size(10.0)
+                                        .color(text_dim()),
+                                );
                             }
                         });
                         row.col(|ui| {
-                            let p = r.local_port.map(|p| p.to_string()).unwrap_or_else(|| "任意".into());
+                            let p = r
+                                .local_port
+                                .map(|p| p.to_string())
+                                .unwrap_or_else(|| "任意".into());
                             ui.label(RichText::new(p).size(12.0));
                         });
                         row.col(|ui| {
@@ -126,7 +154,11 @@ impl AisafeApp {
                             ui.label(RichText::new(text).size(12.0).color(color));
                         });
                         row.col(|ui| {
-                            ui.label(RichText::new(fmt_ts(r.created_ts)).size(11.0).color(text_dim()));
+                            ui.label(
+                                RichText::new(fmt_ts(r.created_ts))
+                                    .size(11.0)
+                                    .color(text_dim()),
+                            );
                         });
                         row.col(|ui| {
                             let rid = r.id;
@@ -152,13 +184,23 @@ impl AisafeApp {
                                                 })
                                             })
                                             .unwrap_or_default();
-                                        self.set_toast(format!("规则 #{rid} 已转正（封禁至 {until}）"));
+                                        self.set_toast(format!(
+                                            "规则 #{rid} 已转正（封禁至 {until}）"
+                                        ));
                                     }
                                     Err(e) => self.set_toast(format!("转正失败: {e}")),
                                 }
                                 self.refresh_cache();
                             }
-                            if ui.add(egui::Button::new(RichText::new("删除").size(12.0).color(danger())).fill(Color32::TRANSPARENT)).clicked() {
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new("删除").size(12.0).color(danger()),
+                                    )
+                                    .fill(Color32::TRANSPARENT),
+                                )
+                                .clicked()
+                            {
                                 match self.eng.remove_rule(rid) {
                                     Ok(()) => self.set_toast(format!("规则 #{rid} 已删除")),
                                     Err(e) => self.set_toast(format!("删除失败: {e}")),
@@ -198,7 +240,11 @@ impl AisafeApp {
             _ => Protocol::Any,
         };
         let spec = BlockSpec {
-            direction: if self.new_dir_out { Direction::Out } else { Direction::In },
+            direction: if self.new_dir_out {
+                Direction::Out
+            } else {
+                Direction::In
+            },
             protocol,
             remote_ip,
             local_port,

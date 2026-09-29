@@ -10,7 +10,7 @@
 use std::ffi::OsString;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use windows_service::{
     define_windows_service,
     service::{
@@ -61,8 +61,8 @@ pub fn install() -> Result<()> {
 }
 
 pub fn uninstall() -> Result<()> {
-    let manager =
-        ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).map_err(service_err)?;
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .map_err(service_err)?;
     let service = manager
         .open_service(SERVICE_NAME, ServiceAccess::DELETE)
         .map_err(service_err)?;
@@ -71,8 +71,8 @@ pub fn uninstall() -> Result<()> {
 }
 
 pub fn start() -> Result<()> {
-    let manager =
-        ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).map_err(service_err)?;
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .map_err(service_err)?;
     let service = manager
         .open_service(SERVICE_NAME, ServiceAccess::START)
         .map_err(service_err)?;
@@ -81,8 +81,8 @@ pub fn start() -> Result<()> {
 }
 
 pub fn stop() -> Result<()> {
-    let manager =
-        ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).map_err(service_err)?;
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .map_err(service_err)?;
     let service = manager
         .open_service(SERVICE_NAME, ServiceAccess::STOP)
         .map_err(service_err)?;
@@ -110,24 +110,37 @@ fn service_main(_args: Vec<OsString>) {
 
 fn run_service_body() -> windows_service::Result<()> {
     let (tx, rx) = std::sync::mpsc::channel::<()>();
-    let status_handle = service_control_handler::register(SERVICE_NAME, move |control| match control {
-        ServiceControl::Stop => {
-            let _ = tx.send(());
-            ServiceControlHandlerResult::NoError
-        }
-        ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
-        _ => ServiceControlHandlerResult::NotImplemented,
-    })?;
-    set_status(&status_handle, ServiceState::StartPending, ServiceControlAccept::STOP)?;
+    let status_handle =
+        service_control_handler::register(SERVICE_NAME, move |control| match control {
+            ServiceControl::Stop => {
+                let _ = tx.send(());
+                ServiceControlHandlerResult::NoError
+            }
+            ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+            _ => ServiceControlHandlerResult::NotImplemented,
+        })?;
+    set_status(
+        &status_handle,
+        ServiceState::StartPending,
+        ServiceControlAccept::STOP,
+    )?;
 
     let result = {
         let status_handle = &status_handle;
         crate::run_engine_until_stop(&rx, &|| {
-            let _ = set_status(status_handle, ServiceState::Running, ServiceControlAccept::STOP);
+            let _ = set_status(
+                status_handle,
+                ServiceState::Running,
+                ServiceControlAccept::STOP,
+            );
         })
     };
 
-    let _ = set_status(&status_handle, ServiceState::Stopped, ServiceControlAccept::empty());
+    let _ = set_status(
+        &status_handle,
+        ServiceState::Stopped,
+        ServiceControlAccept::empty(),
+    );
     if let Err(e) = result {
         eprintln!("服务运行异常退出: {e}");
     }
@@ -149,4 +162,3 @@ fn set_status(
         process_id: None,
     })
 }
-
