@@ -409,6 +409,22 @@ impl AisafeApp {
             .color(text_dim()),
         );
 
+        // ---------- 蜜饵 canary（0.5.10 H210） ----------
+        ui.add_space(space::M);
+        section(ui, "蜜饵 canary（需重启）");
+        ui.checkbox(
+            &mut draft.honeypot.canary.enabled,
+            "启用蜜饵（默认关）：HTTP 蜜罐内置 /backup.zip 等诱饵资源，下载行为即高价值事件",
+        );
+        ui.label(
+            RichText::new(
+                "诱饵内容带水印 token，外传后可用 `aisafeguard canary-decode <token>` 溯源来源节点与投放时间。\
+水印密钥在 config.toml [honeypot.canary] 配置（空 = 自动生成）；文件系统蜜饵路径也在配置文件中设置（仅 Linux）。",
+            )
+            .size(type_scale::CAPTION)
+            .color(text_dim()),
+        );
+
         // ---------- 假 Shell（0.5.10 H130：中交互能力进 GUI） ----------
         ui.add_space(space::M);
         section(ui, "假 Shell（中交互，需重启）");

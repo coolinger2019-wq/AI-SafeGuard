@@ -33,6 +33,51 @@ const SECRET_KEYS: &[&str] = &["password", "passwd", "pwd", "pass"];
 /// 用户名类表单键名（0.5.10 H200 凭证采集用，词边界匹配）
 const USERNAME_KEYS: &[&str] = &["username", "user", "login", "email", "acct", "user_name"];
 
+/// HTTP 蜜饵资源（0.5.10 H210）：(路径, Content-Type, 内容模板)。
+/// [honeypot.canary].enabled 时对这些路径下发带水印 token 的合成诱饵，
+/// 下载行为本身即事件（比「端口被碰」强得多的信号：攻击者在主动翻东西）。
+/// 红线：内容全部合成——结构对齐真实文件，数据为零值/明显假数据，不得被当
+/// 真实数据引用。注意 /.git/config 同时在 DECOY_PATHS：canary 开启时按蜜饵
+/// 下发（蜜饵信号强于 403 诱饵），关闭时维持 0.5.8 的 403 行为不变。
+const CANARY_RESOURCES: &[(&str, &str, &str)] = &[
+    (
+        "/backup.zip",
+        "application/octet-stream",
+        "PK-DECOY backup manifest (数据为零值，不是真实备份)\narchive: full-2026-01-01.zip\nfiles: 0\ntoken: {token}\n",
+    ),
+    (
+        "/.git/config",
+        "text/plain",
+        "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n[remote \"origin\"]\n\turl = https://git.example.internal/deploy/app.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n# {token}\n",
+    ),
+    (
+        "/id_rsa",
+        "application/octet-stream",
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nDECOY-NOT-A-REAL-KEY {token}\n-----END OPENSSH PRIVATE KEY-----\n",
+    ),
+    (
+        "/db.sql",
+        "text/plain",
+        "-- MySQL dump (DECOY，全部零值数据)\nCREATE TABLE `users` (`id` int, `name` varchar(255));\nINSERT INTO `users` VALUES (0,'zero');\n-- watermark: {token}\n",
+    ),
+];
+
+/// 命中蜜饵资源 → (Content-Type, 填好水印的响应体)。
+/// canary 未启用（状态 None）时恒返回 None——关闭状态行为与 0.5.8 逐字节一致。
+fn canary_response(
+    path: &str,
+    canary: Option<&crate::canary::CanaryState>,
+) -> Option<(&'static str, String)> {
+    let canary = canary?;
+    let lower = path.to_ascii_lowercase();
+    let (_, ctype, tpl) = CANARY_RESOURCES
+        .iter()
+        .find(|(p, _, _)| lower == *p || lower.starts_with(&format!("{p}/")))?;
+    let res = lower.trim_start_matches('/');
+    let token = canary.token(res).unwrap_or_else(|| "AC1.<水印不可用>".into());
+    Some((ctype, tpl.replace("{token}", &token)))
+}
+
 /// 请求路径 → 诱饵路由。path 为去查询串后的前缀（HttpHint.path 语义）；
 /// 精确匹配或子路径（/admin/ → 命中 /admin）。
 pub fn is_login_path(path: &str) -> bool {
@@ -219,7 +264,10 @@ fn generic_page() -> String {
         .into()
 }
 
-pub(crate) async fn http_session(s: &mut TcpStream) -> std::io::Result<SessionOutcome> {
+pub(crate) async fn http_session(
+    s: &mut TcpStream,
+    canary: Option<&crate::canary::CanaryState>,
+) -> std::io::Result<SessionOutcome> {
     let mut buf = read_http_request(s).await?;
     let head_text = String::from_utf8_lossy(&buf).to_string();
     let hint = l7::parse_http_hint(&head_text);
@@ -245,29 +293,47 @@ pub(crate) async fn http_session(s: &mut TcpStream) -> std::io::Result<SessionOu
         }
     }
 
-    // 诱饵路由（F11）：登录路径 → 假登录页；其余诱饵 → 受限页；未匹配 → 通用假页
+    // 诱饵路由（F11 + H210 蜜饵优先）：登录路径 → 假登录页；蜜饵路径 → 带水印
+    // 诱饵文件；其余诱饵 → 受限页；未匹配 → 通用假页
     let is_post = method == "POST";
     let login = hint.is_some() && is_login_path(&path);
     let decoy = hint.is_some() && is_decoy_path(&path);
-    let (status, body) = if hint.is_none() {
-        (b"HTTP/1.1 404 Not Found\r\n".as_slice(), Vec::new())
+    let canary_hit = if hint.is_some() {
+        canary_response(&path, canary)
+    } else {
+        None
+    };
+    let (status, ctype, body): (&[u8], &str, Vec<u8>) = if hint.is_none() {
+        (b"HTTP/1.1 404 Not Found\r\n".as_slice(), "text/html; charset=utf-8", Vec::new())
     } else if login {
         let page = login_page(&path, is_post);
-        (b"HTTP/1.1 200 OK\r\n".as_slice(), page.into_bytes())
+        (
+            b"HTTP/1.1 200 OK\r\n".as_slice(),
+            "text/html; charset=utf-8",
+            page.into_bytes(),
+        )
+    } else if let Some((ctype, content)) = &canary_hit {
+        (
+            b"HTTP/1.1 200 OK\r\n".as_slice(),
+            *ctype,
+            content.clone().into_bytes(),
+        )
     } else if decoy {
         (
             b"HTTP/1.1 403 Forbidden\r\n".as_slice(),
+            "text/html; charset=utf-8",
             decoy_page().into_bytes(),
         )
     } else {
         (
             b"HTTP/1.1 200 OK\r\n".as_slice(),
+            "text/html; charset=utf-8",
             generic_page().into_bytes(),
         )
     };
     s.write_all(
         format!(
-            "{}Content-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nServer: nginx\r\n\r\n",
+            "{}Content-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\nServer: nginx\r\n\r\n",
             String::from_utf8_lossy(status),
             body.len()
         )
@@ -286,6 +352,9 @@ pub(crate) async fn http_session(s: &mut TcpStream) -> std::io::Result<SessionOu
         } else {
             "login:get".into()
         });
+    } else if canary_hit.is_some() {
+        // 蜜饵下载是比「端口被碰」强得多的信号，标签可辨识
+        tags.push("canary".into());
     } else if decoy {
         tags.push("decoy".into());
     }
@@ -426,12 +495,7 @@ mod tests {
         tokio::sync::broadcast::Receiver<SecurityEvent>,
         HoneypotHandle,
     ) {
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = probe.local_addr().unwrap().port();
-        drop(probe);
-        let bus = EventBus::new(64);
-        let rx = bus.subscribe();
-        let cfg = HoneypotConfig {
+        http_listener_cfg(|port| HoneypotConfig {
             enabled: true,
             listeners: vec![ListenerConfig {
                 name: "http".into(),
@@ -440,7 +504,24 @@ mod tests {
                 enabled: true,
             }],
             ..Default::default()
-        };
+        })
+        .await
+    }
+
+    /// 同上，但允许测试自定义完整配置（蜜饵等）
+    async fn http_listener_cfg(
+        f: impl FnOnce(u16) -> HoneypotConfig,
+    ) -> (
+        u16,
+        tokio::sync::broadcast::Receiver<SecurityEvent>,
+        HoneypotHandle,
+    ) {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let bus = EventBus::new(64);
+        let rx = bus.subscribe();
+        let cfg = f(port);
         let handle = start(&cfg, bus, &std::env::temp_dir());
         let mut conn = None;
         for _ in 0..40 {
@@ -543,8 +624,12 @@ mod tests {
     async fn http_decoy_and_generic_pages() {
         let (port, mut rx, _handle) = http_listener().await;
 
-        // /.env → 诱饵响应 403；/index.html → 通用假页
-        for (path, expect_status) in [("/.env", "HTTP/1.1 403"), ("/index.html", "HTTP/1.1 200")] {
+        // /.env → 诱饵响应 403；/index.html → 通用假页；/backup.zip（canary 关）→ 通用假页
+        for (path, expect_status) in [
+            ("/.env", "HTTP/1.1 403"),
+            ("/index.html", "HTTP/1.1 200"),
+            ("/backup.zip", "HTTP/1.1 200"),
+        ] {
             let mut c = tokio::net::TcpStream::connect(("127.0.0.1", port))
                 .await
                 .unwrap();
@@ -567,7 +652,61 @@ mod tests {
                         assert!(http_hint.unwrap().tags.contains(&"decoy".to_string()));
                     } else {
                         assert!(!summary.contains("decoy"));
+                        // canary 关闭：backup.zip 走通用假页，无蜜饵标签（0.5.8 回归）
+                        assert!(!summary.contains("canary"), "实际: {summary}");
                     }
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    /// H210 端到端：canary 开启 → /backup.zip 与 /.git/config 下发带水印的
+    /// 合成诱饵，事件带 canary 标签；水印 token 可离线解码。
+    #[tokio::test]
+    async fn canary_http_resource_serves_token_and_event_tag() {
+        let (port, mut rx, _handle) = http_listener_cfg(|port| HoneypotConfig {
+            enabled: true,
+            canary: aisafeguard_core::config::CanaryConfig {
+                enabled: true,
+                key: "test-key".into(),
+                ..Default::default()
+            },
+            listeners: vec![ListenerConfig {
+                name: "http".into(),
+                port,
+                kind: "http".into(),
+                enabled: true,
+            }],
+            ..Default::default()
+        })
+        .await;
+
+        for path in ["/backup.zip", "/.git/config"] {
+            let mut c = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            c.write_all(format!("GET {path} HTTP/1.1
+Host: x
+
+").as_bytes())
+                .await
+                .unwrap();
+            let mut resp = vec![0u8; 2048];
+            let n = c.read(&mut resp).await.unwrap();
+            let body = String::from_utf8_lossy(&resp[..n]).to_string();
+            assert!(
+                body.starts_with("HTTP/1.1 200 OK"),
+                "{path} 应按蜜饵下发: {body}"
+            );
+            assert!(body.contains("AC1."), "{path} 响应应含水印 token: {body}");
+            drop(c);
+            match wait_hit(&mut rx).await {
+                SecurityEvent::HoneypotHit {
+                    summary, http_hint, ..
+                } => {
+                    assert!(summary.contains("canary"), "实际: {summary}");
+                    assert!(http_hint.unwrap().tags.contains(&"canary".to_string()));
                 }
                 _ => unreachable!(),
             }

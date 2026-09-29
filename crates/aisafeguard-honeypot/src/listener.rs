@@ -55,6 +55,38 @@ pub fn start(cfg: &HoneypotConfig, bus: EventBus, data_dir: &std::path::Path) ->
     let mut listeners = Vec::new();
     let collect_creds = cfg.credentials.enabled;
     if cfg.enabled {
+        // 蜜饵（0.5.10 H210）：默认关；开启时解析水印密钥（显式 key 或
+        // <data_dir>/honeypot/canary.key），并按配置放置文件系统蜜饵
+        let canary = if cfg.canary.enabled {
+            match crate::canary::CanaryState::resolve(&cfg.canary.key, data_dir) {
+                Ok(v) => {
+                    let v = Arc::new(v);
+                    if !cfg.canary.fs_paths.is_empty() {
+                        let placed = crate::canary::place_and_watch_fs_canaries(
+                            &cfg.canary.fs_paths,
+                            &bus,
+                            &v,
+                        );
+                        if placed > 0 {
+                            bus.publish(SecurityEvent::engine(
+                                "info",
+                                format!("文件系统蜜饵已启用: {placed} 处（读取即告警）"),
+                            ));
+                        }
+                    }
+                    Some(v)
+                }
+                Err(e) => {
+                    bus.publish(SecurityEvent::engine(
+                        "error",
+                        format!("蜜饵密钥初始化失败,HTTP 蜜饵停用: {e}"),
+                    ));
+                    None
+                }
+            }
+        } else {
+            None
+        };
         // 假 Shell 运行时：host key 失败 → 降级 banner 低交互并留事件
         let shell = if cfg.shell.enabled {
             match crate::shell::start_runtime(&cfg.shell, data_dir) {
@@ -88,6 +120,7 @@ pub fn start(cfg: &HoneypotConfig, bus: EventBus, data_dir: &std::path::Path) ->
                     bus.clone(),
                     shutdown_rx.clone(),
                     shell.clone(),
+                    canary.clone(),
                     collect_creds,
                 ));
             }
@@ -114,6 +147,7 @@ async fn run_listener(
     bus: EventBus,
     mut shutdown: watch::Receiver<bool>,
     shell: Option<Arc<ShellRuntime>>,
+    canary: Option<Arc<crate::canary::CanaryState>>,
     collect_creds: bool,
 ) {
     let addr = std::net::SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), l.port);
@@ -171,8 +205,9 @@ async fn run_listener(
         let name = l.name.clone();
         let kind = l.kind.clone();
         let shell = shell.clone();
+        let canary = canary.clone();
         tokio::spawn(async move {
-            handle_conn(stream, name, kind, bus, shell, collect_creds).await;
+            handle_conn(stream, name, kind, bus, shell, canary, collect_creds).await;
             drop(interactive_permit);
             drop(permit);
         });
@@ -199,6 +234,7 @@ async fn handle_conn(
     kind: String,
     bus: EventBus,
     shell: Option<Arc<ShellRuntime>>,
+    canary: Option<Arc<crate::canary::CanaryState>>,
     collect_creds: bool,
 ) {
     let (remote_ip, remote_port) = match stream.peer_addr() {
@@ -218,7 +254,7 @@ async fn handle_conn(
             Ok(crate::shell::telnet_shell_session(stream, rt).await)
         }
         "ssh" => protocol::ssh_session(&mut stream).await,
-        "http" => http::http_session(&mut stream).await,
+        "http" => http::http_session(&mut stream, canary.as_deref()).await,
         "telnet" => protocol::telnet_session(&mut stream).await,
         "mysql" => mysql::mysql_session(&mut stream).await,
         "redis" => redis::redis_session(&mut stream).await,
@@ -369,6 +405,7 @@ mod tests {
         let cfg = HoneypotConfig {
             enabled: true,
             credentials: Default::default(),
+            canary: Default::default(),
             shell: aisafeguard_core::config::ShellConfig {
                 enabled: true,
                 telnet_enabled: true,
@@ -603,6 +640,7 @@ mod tests {
         let cfg = HoneypotConfig {
             enabled: true,
             credentials: Default::default(),
+            canary: Default::default(),
             shell: aisafeguard_core::config::ShellConfig {
                 enabled: true,
                 ..Default::default()

@@ -15,5 +15,9 @@ argon2.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# 文件系统蜜饵只读监听（H210 v1 仅 Linux；Windows 用户态无「文件被读取」对等 API）
+notify.workspace = true
+
 [lints]
 workspace = true

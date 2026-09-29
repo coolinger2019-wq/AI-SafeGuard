@@ -125,6 +125,16 @@ fn main() -> anyhow::Result<()> {
                 data_dir = args.get(i).map(PathBuf::from);
             }
             "verify-log" => command = Some(("verify-log".into(), None)),
+            "canary-decode" => {
+                i += 1;
+                match args.get(i) {
+                    Some(t) => command = Some(("canary-decode".into(), Some(t.clone()))),
+                    None => {
+                        eprintln!("用法: aisafeguard canary-decode <token>");
+                        std::process::exit(2);
+                    }
+                }
+            }
             "export-events" => {
                 i += 1;
                 match args.get(i) {
@@ -230,6 +240,7 @@ fn main() -> anyhow::Result<()> {
                 eprintln!(
                     "      aisafeguard verify-log | export-events <out.jsonl> | --print-token | --version"
                 );
+                eprintln!("      aisafeguard canary-decode <token>                (蜜饵水印溯源)");
                 eprintln!("      aisafeguard service install|uninstall|start|stop   (需管理员)");
                 eprintln!(
                     "      aisafeguard --service                              (由服务管理器调用)"
@@ -244,6 +255,7 @@ fn main() -> anyhow::Result<()> {
     if let Some((cmd, arg)) = command {
         match cmd.as_str() {
             "verify-log" => return cmd_verify_log(resolve_cfg(cfg_path, data_dir)?),
+            "canary-decode" => return cmd_canary_decode(resolve_cfg(cfg_path, data_dir)?, arg),
             "export-events" => return cmd_export_events(resolve_cfg(cfg_path, data_dir)?, arg),
             "service-install"
             | "service-uninstall"
@@ -417,6 +429,38 @@ fn resolve_cfg(
         println!("已生成默认配置: {}", cfg_path.display());
     }
     Ok((cfg, cfg_path))
+}
+
+/// H210 蜜饵水印溯源：`aisafeguard canary-decode <token>`。
+/// 密钥来源与引擎侧一致：配置 [honeypot.canary].key 优先，否则读
+/// <data_dir>/honeypot/canary.key（跨节点溯源需拷贝密钥文件或配相同密钥）。
+fn cmd_canary_decode((cfg, _): (AppConfig, PathBuf), token: Option<String>) -> anyhow::Result<()> {
+    let Some(token) = token.filter(|t| !t.trim().is_empty()) else {
+        anyhow::bail!("缺少 token 参数（用法: aisafeguard canary-decode <token>）");
+    };
+    let key = if !cfg.honeypot.canary.key.is_empty() {
+        cfg.honeypot.canary.key.clone()
+    } else {
+        let path = cfg.data_dir().join("honeypot").join("canary.key");
+        std::fs::read_to_string(&path)
+            .map(|s| s.trim().to_string())
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "读取水印密钥失败 {}: {e}（跨节点溯源需拷贝密钥文件，或用 --data-dir 指向密钥所在数据目录）",
+                    path.display()
+                )
+            })?
+    };
+    let payload = aisafeguard_core::canary::decode_token(key.as_bytes(), token.trim())
+        .map_err(|e| anyhow::anyhow!("解码失败: {e}"))?;
+    let ts = chrono::DateTime::from_timestamp(payload.ts, 0)
+        .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|| payload.ts.to_string());
+    println!("蜜饵水印解码成功");
+    println!("  来源节点: {}", payload.node);
+    println!("  投放时间: {ts}");
+    println!("  蜜饵资源: {}", payload.res);
+    Ok(())
 }
 
 fn cmd_verify_log((cfg, _): (AppConfig, PathBuf)) -> anyhow::Result<()> {

@@ -83,6 +83,8 @@ argon2 = "0.6"
 # NetUserEnum、Linux 读 /etc/passwd）。仓库 forbid(unsafe_code)，不能直接调
 # FFI，按 AGENTS 第 5 条选成熟维护库；只开 users 特性收敛依赖面。
 sysinfo = { version = "0.37", default-features = false, features = ["user"] }
+# H210 文件系统蜜饵（0.5.10，仅 Linux 目标编译）：inotify 只读监听「文件被读取」
+notify = "8"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

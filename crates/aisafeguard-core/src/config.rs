@@ -85,6 +85,26 @@ pub struct HoneypotConfig {
     pub shell: ShellConfig,
     /// 凭证采集与本地喷洒检测（0.5.10 H200）
     pub credentials: CredentialConfig,
+    /// 蜜饵 canary（0.5.10 H210）：默认关，显式开启
+    pub canary: CanaryConfig,
+}
+
+/// 蜜饵 canary（0.5.10 H210）：HTTP 内置诱饵资源（/backup.zip 等带水印 token）
+/// 与文件系统诱饵（仅 Linux v1，inotify 监控读取）。水印可离线溯源
+/// （aisafeguard canary-decode <token>）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CanaryConfig {
+    /// 默认关：蜜饵改变 HTTP 蜜罐响应行为并在磁盘放置文件，属显式开启能力
+    pub enabled: bool,
+    /// 水印密钥（任意非空字符串）；空 = 启动时自动生成 32 字节随机值并
+    /// 持久化到 <data_dir>/honeypot/canary.key（0600），canary-decode 默认读
+    /// 同一文件（跨节点溯源需拷贝该文件或配置相同密钥）
+    pub key: String,
+    /// 文件系统蜜饵的绝对路径（仅 Linux v1；Windows 忽略并告警）。
+    /// 启动时：缺失则写入合成诱饵内容并监控读取；已存在则拒绝该条并告警
+    /// （防止覆盖真实文件）。
+    pub fs_paths: Vec<String>,
 }
 
 /// 凭证采集与本地喷洒检测（0.5.10 H200）：蜜罐会话的 用户名/口令 对以
@@ -149,6 +169,7 @@ impl Default for HoneypotConfig {
             enabled: true,
             shell: ShellConfig::default(),
             credentials: CredentialConfig::default(),
+            canary: CanaryConfig::default(),
             listeners: vec![
                 ListenerConfig {
                     name: "ssh".into(),
@@ -668,6 +689,7 @@ impl AppConfig {
             || old.honeypot.listeners != new.honeypot.listeners
             || old.honeypot.shell != new.honeypot.shell
             || old.honeypot.credentials != new.honeypot.credentials
+            || old.honeypot.canary != new.honeypot.canary
         {
             out.push("蜜罐监听");
         }
@@ -845,6 +867,10 @@ mod tests {
         // 分析——不属「新采集面默认关」范畴，但明文永不落盘的断言在 store 测试钉住
         assert!(cfg.honeypot.credentials.enabled);
         assert_eq!(cfg.honeypot.credentials.snapshot_interval_secs, 3600);
+        // 蜜饵默认关（0.5.10 H210 红线）：改变响应行为与放置文件的能力
+        assert!(!cfg.honeypot.canary.enabled);
+        assert!(cfg.honeypot.canary.key.is_empty());
+        assert!(cfg.honeypot.canary.fs_paths.is_empty());
         // AI 默认人工确认
         assert!(!cfg.ai.enabled);
         assert!(!cfg.ai.auto_apply);

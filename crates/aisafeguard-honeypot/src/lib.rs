@@ -8,6 +8,7 @@
 //! 模块划分（0.5.9 H102）：[`listener`] 监听与并发预算、`http` HTTP 协议仿真、
 //! `protocol` banner 级协议仿真；本文件是门面：公共 API 重导出 + 攻击者输入清洗。
 
+mod canary;
 mod cred;
 mod http;
 mod listener;
