@@ -103,6 +103,7 @@ fn load_or_generate_host_key(path: &Path) -> std::io::Result<PrivateKey> {
             #[cfg(unix)]
             {
                 use std::io::Write;
+                use std::os::unix::fs::OpenOptionsExt;
                 let mut f = std::fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
