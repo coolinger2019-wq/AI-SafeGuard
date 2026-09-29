@@ -15,6 +15,7 @@ use aisafeguard_store::{AiRunRow, EventRow, ProposalRow, RuleRow, StatsSummary, 
 use serde::{Deserialize, Serialize};
 
 use crate::console::Console;
+use crate::explain::RuleExplain;
 
 /// 采样捕获运行状态（检测平台 MVP）：捕获任务启动/失败/退出都写在这里，
 /// StatusReport 与 GUI/API 只读展示。
@@ -393,6 +394,11 @@ impl EngineHandle {
         self.store.list_rules()
     }
 
+    /// 规则展示模型（0.5.4 F1）：GUI 与 /api/rules 共用，可解释封禁。
+    pub fn list_rules_explain(&self) -> Result<Vec<RuleExplain>> {
+        Ok(RuleExplain::of_list(self.store.list_rules()?))
+    }
+
     pub fn list_proposals(&self, status: Option<&str>, limit: u32) -> Result<Vec<ProposalRow>> {
         self.store.list_proposals(status, limit)
     }
@@ -570,7 +576,7 @@ impl EngineHandle {
             )));
         }
         let expires = now_ts() + self.config().ai.promote_ttl_secs as i64;
-        self.store.update_rule_expires(id, Some(expires))?;
+        self.store.mark_promoted(id, expires)?;
         let until = chrono::DateTime::from_timestamp(expires, 0)
             .map(|d| {
                 d.with_timezone(&chrono::Local)
@@ -584,6 +590,7 @@ impl EngineHandle {
         ));
         let mut updated = row;
         updated.expires_ts = Some(expires);
+        updated.promoted = true;
         Ok(updated)
     }
 
@@ -1653,8 +1660,8 @@ impl Console for EmbeddedConsole {
             .map_err(anyhow::Error::msg)
     }
 
-    fn list_rules(&self) -> anyhow::Result<Vec<RuleRow>> {
-        self.0.list_rules().map_err(anyhow::Error::msg)
+    fn list_rules(&self) -> anyhow::Result<Vec<crate::explain::RuleExplain>> {
+        self.0.list_rules_explain().map_err(anyhow::Error::msg)
     }
 
     fn list_proposals(&self, status: Option<&str>, limit: u32) -> anyhow::Result<Vec<ProposalRow>> {

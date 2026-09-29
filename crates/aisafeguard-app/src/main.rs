@@ -1,6 +1,7 @@
 mod api;
 mod console;
 mod engine;
+mod explain;
 mod fed;
 mod forward;
 mod gui;

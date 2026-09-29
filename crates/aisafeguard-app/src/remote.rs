@@ -142,7 +142,7 @@ impl Console for RemoteConsole {
         Ok(self.get(&path)?.json()?)
     }
 
-    fn list_rules(&self) -> anyhow::Result<Vec<RuleRow>> {
+    fn list_rules(&self) -> anyhow::Result<Vec<crate::explain::RuleExplain>> {
         Ok(self.get("/api/rules")?.json()?)
     }
 

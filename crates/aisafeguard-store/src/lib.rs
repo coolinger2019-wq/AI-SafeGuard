@@ -51,6 +51,8 @@ pub struct RuleRow {
     pub expires_ts: Option<i64>,
     /// 可选标签（0.4.0 B1）：来源/用途分组，展示与审计用
     pub tag: String,
+    /// 灰度规则已人工转正（0.5.4 F1/F3）：TTL 曾延长到 promote_ttl_secs
+    pub promoted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,7 +176,8 @@ CREATE TABLE IF NOT EXISTS rules (
     enabled    INTEGER NOT NULL DEFAULT 1,
     note       TEXT NOT NULL DEFAULT '',
     expires_ts INTEGER,
-    tag        TEXT NOT NULL DEFAULT ''
+    tag        TEXT NOT NULL DEFAULT '',
+    promoted   INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS proposals (
@@ -317,6 +320,7 @@ impl Store {
             "ALTER TABLE events ADD COLUMN http_hint TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE events ADD COLUMN tls_fp TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE events ADD COLUMN tls_ja4 TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE rules ADD COLUMN promoted INTEGER NOT NULL DEFAULT 0",
         ] {
             let _ = conn.execute(sql, []); // 列已存在时报错，忽略
         }
@@ -784,8 +788,8 @@ impl Store {
         let ts = aisafeguard_core::now_ts();
         self.lock()?
             .execute(
-                "INSERT INTO rules (created_ts, name, direction, protocol, remote_ip, local_port, origin, enabled, note, tag, expires_ts)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10)",
+                "INSERT INTO rules (created_ts, name, direction, protocol, remote_ip, local_port, origin, enabled, note, tag, expires_ts, promoted)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10, 0)",
                 params![ts, name, direction, protocol, remote_ip, local_port, origin, note, tag, expires_ts],
             )
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -808,6 +812,7 @@ impl Store {
             note: note.into(),
             tag: tag.into(),
             expires_ts,
+            promoted: false,
         })
     }
 
@@ -815,7 +820,7 @@ impl Store {
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, created_ts, name, direction, protocol, remote_ip, local_port, origin, enabled, note, tag, expires_ts
+                "SELECT id, created_ts, name, direction, protocol, remote_ip, local_port, origin, enabled, note, tag, expires_ts, promoted
                  FROM rules ORDER BY id DESC",
             )
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -834,6 +839,7 @@ impl Store {
                     note: r.get(9)?,
                     tag: r.get(10)?,
                     expires_ts: r.get(11)?,
+                    promoted: r.get::<_, i64>(12)? != 0,
                 })
             })
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -867,11 +873,12 @@ impl Store {
             .collect())
     }
 
-    /// 转正：延长规则 TTL（灰度 → 长期）。只改记账，防火墙规则本体不动。
-    pub fn update_rule_expires(&self, id: i64, expires_ts: Option<i64>) -> Result<()> {
+    /// 转正：延长规则 TTL（灰度 → 长期）并落转正标记（0.5.4 F3）。
+    /// 只改记账，防火墙规则本体不动。
+    pub fn mark_promoted(&self, id: i64, expires_ts: i64) -> Result<()> {
         self.lock()?
             .execute(
-                "UPDATE rules SET expires_ts = ?2 WHERE id = ?1",
+                "UPDATE rules SET expires_ts = ?2, promoted = 1 WHERE id = ?1",
                 params![id, expires_ts],
             )
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -1656,5 +1663,32 @@ mod tests {
 
         store.insert_ai_run("glm-4.7", true, "ok").unwrap();
         assert_eq!(store.list_ai_runs(5).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn promote_marks_rule_and_extends_ttl() {
+        // 0.5.4 F1/F3：转正 = TTL 延长 + promoted 标记，读回一致
+        let store = tmp_store("promo");
+        let rule = store
+            .insert_rule(
+                "aisafeguard-blk-ai",
+                "in",
+                "any",
+                "198.51.100.8",
+                None,
+                "ai",
+                "AI 建议 #1: 试封",
+                "AI",
+                Some(aisafeguard_core::now_ts() + 600),
+            )
+            .unwrap();
+        assert!(!store.list_rules().unwrap()[0].promoted);
+
+        let promoted_until = aisafeguard_core::now_ts() + 86_400 * 30;
+        store.mark_promoted(rule.id, promoted_until).unwrap();
+        let rows = store.list_rules().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].promoted);
+        assert_eq!(rows[0].expires_ts, Some(promoted_until));
     }
 }

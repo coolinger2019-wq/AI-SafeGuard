@@ -86,13 +86,14 @@ impl AisafeApp {
         let rules = self.cache.rules.clone();
         egui_extras::TableBuilder::new(ui)
             .striped(true)
-            .column(egui_extras::Column::exact(190.0))
-            .column(egui_extras::Column::exact(60.0))
-            .column(egui_extras::Column::exact(60.0))
-            .column(egui_extras::Column::exact(130.0))
-            .column(egui_extras::Column::exact(70.0))
-            .column(egui_extras::Column::exact(60.0))
-            .column(egui_extras::Column::exact(110.0))
+            .column(egui_extras::Column::exact(150.0))
+            .column(egui_extras::Column::exact(52.0))
+            .column(egui_extras::Column::exact(52.0))
+            .column(egui_extras::Column::exact(120.0))
+            .column(egui_extras::Column::exact(52.0))
+            .column(egui_extras::Column::exact(64.0))
+            .column(egui_extras::Column::exact(150.0))
+            .column(egui_extras::Column::exact(170.0))
             .column(egui_extras::Column::remainder())
             .header(22.0, |mut header| {
                 for name in [
@@ -102,7 +103,8 @@ impl AisafeApp {
                     "来源 IP",
                     "端口",
                     "来源",
-                    "创建时间",
+                    "原因",
+                    "TTL / 状态",
                     "",
                 ] {
                     header.col(|ui| {
@@ -145,27 +147,40 @@ impl AisafeApp {
                             ui.label(RichText::new(p).size(12.0));
                         });
                         row.col(|ui| {
-                            let (text, color) = match r.origin.as_str() {
-                                "ai" => ("AI", purple()),
-                                "engine" => ("检测器", warn()),
-                                "intel" => ("情报", ok()),
-                                _ => ("手动", text_dim()),
+                            let color = match r.origin.as_str() {
+                                "ai" => purple(),
+                                "engine" => warn(),
+                                "intel" => ok(),
+                                "manual" => text_dim(),
+                                _ => danger(),
                             };
-                            ui.label(RichText::new(text).size(12.0).color(color));
+                            ui.label(RichText::new(&r.source).size(12.0).color(color));
                         });
                         row.col(|ui| {
-                            ui.label(
-                                RichText::new(fmt_ts(r.created_ts))
-                                    .size(11.0)
-                                    .color(text_dim()),
-                            );
+                            // F2：原因摘要一句话；清洗 + 截断在 explain 层完成
+                            ui.label(RichText::new(&r.reason_summary).size(12.0));
+                        });
+                        row.col(|ui| {
+                            // F3：试封中 / 已转正 / 自动封禁 / 手动 固定文案
+                            ui.label(RichText::new(&r.ttl_text).size(11.0));
                         });
                         row.col(|ui| {
                             let rid = r.id;
-                            // 灰度规则（AI 来源 + 带 TTL）可转正：TTL 延长到 promote_ttl_secs
-                            if r.origin == "ai"
+                            // F4：从规则跳到相关事件（按来源 IP 过滤）
+                            if !r.remote_ip.is_empty()
+                                && ui
+                                    .add(egui::Button::new(
+                                        RichText::new("查看事件").size(12.0).color(accent()),
+                                    ))
+                                    .clicked()
+                            {
+                                self.event_filter = r.remote_ip.clone();
+                                self.tab = Tab::Events;
+                                self.refresh_cache();
+                            }
+                            // 灰度规则（试封中）可转正：TTL 延长到 promote_ttl_secs
+                            if r.ttl_state == "trial"
                                 && r.enabled
-                                && r.expires_ts.is_some()
                                 && ui
                                     .add(egui::Button::new(
                                         RichText::new("转正").size(12.0).color(purple()),
@@ -211,6 +226,12 @@ impl AisafeApp {
                     });
                 }
             });
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("来源说明：手动 = 界面/API 人工添加；检测引擎 / AI / 情报 = 自动封禁（AI 为灰度试封，可转正）。")
+                .size(11.0)
+                .color(text_dim()),
+        );
     }
 
     fn apply_manual_rule(&mut self) {

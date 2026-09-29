@@ -86,6 +86,13 @@ impl AisafeApp {
             });
 
         ui.add_space(6.0);
+        if rows.is_empty() && !self.event_filter.trim().is_empty() {
+            ui.label(
+                RichText::new("暂无关联事件（过滤条件无匹配记录）")
+                    .size(13.0)
+                    .color(text_dim()),
+            );
+        }
         ui.label(
             RichText::new("完整 payload（截断存储）可通过本地 API 查看：GET /api/events")
                 .size(11.0)

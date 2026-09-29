@@ -30,7 +30,8 @@ pub trait Console: Send + Sync {
     fn config(&self) -> anyhow::Result<AppConfig>;
     fn status(&self) -> anyhow::Result<StatusReport>;
     fn list_events(&self, limit: u32, ip_filter: Option<&str>) -> anyhow::Result<Vec<EventRow>>;
-    fn list_rules(&self) -> anyhow::Result<Vec<RuleRow>>;
+    /// 规则展示模型（0.5.4 F1）：可解释封禁（来源 / 原因 / TTL 文案）
+    fn list_rules(&self) -> anyhow::Result<Vec<crate::explain::RuleExplain>>;
     fn list_proposals(&self, status: Option<&str>, limit: u32) -> anyhow::Result<Vec<ProposalRow>>;
     fn list_ai_runs(&self, limit: u32) -> anyhow::Result<Vec<AiRunRow>>;
     fn stats_24h(&self) -> anyhow::Result<StatsSummary>;

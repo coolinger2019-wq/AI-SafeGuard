@@ -119,7 +119,7 @@ async fn xdp_clear(State(s): State<AppState>) -> Response {
 }
 
 async fn list_rules(State(s): State<AppState>) -> Response {
-    match s.engine.list_rules() {
+    match s.engine.list_rules_explain() {
         Ok(rows) => Json(rows).into_response(),
         Err(e) => err_resp(e),
     }

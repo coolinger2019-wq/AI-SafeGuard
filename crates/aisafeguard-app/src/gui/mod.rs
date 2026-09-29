@@ -12,11 +12,12 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use aisafeguard_core::config::AppConfig;
-use aisafeguard_store::{AiRunRow, EventRow, ProposalRow, RuleRow, StatsSummary};
+use aisafeguard_store::{AiRunRow, EventRow, ProposalRow, StatsSummary};
 use egui::{Color32, CornerRadius, Frame, Margin, RichText, Stroke};
 
 use crate::console::{Console, LiveEvent};
 use crate::engine::StatusReport;
+use crate::explain::RuleExplain;
 
 // 语义取色（多套配色方案可切换，定义与调色板见 gui/theme.rs）。
 // 子页面的 `use super::*` 依赖这些再导出。
@@ -40,7 +41,7 @@ struct Cache {
     status: Option<StatusReport>,
     stats: StatsSummary,
     events: Vec<EventRow>,
-    rules: Vec<RuleRow>,
+    rules: Vec<RuleExplain>,
     proposals: Vec<ProposalRow>,
     runs: Vec<AiRunRow>,
     feedback: Vec<aisafeguard_store::FpRow>,
