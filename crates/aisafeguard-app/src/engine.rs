@@ -114,18 +114,14 @@ impl RulesState {
         *self.note.lock().expect("规则备注锁中毒") = note.to_string();
     }
 
-    /// （H6 可观测接线后移除本 allow）
-    #[allow(dead_code)]
     pub fn loaded_path(&self) -> String {
         self.loaded_path.lock().expect("规则路径锁中毒").clone()
     }
 
-    #[allow(dead_code)]
     pub fn loaded_sha256(&self) -> String {
         self.loaded_sha256.lock().expect("规则哈希锁中毒").clone()
     }
 
-    #[allow(dead_code)]
     pub fn note(&self) -> String {
         self.note.lock().expect("规则备注锁中毒").clone()
     }
@@ -134,7 +130,6 @@ impl RulesState {
         *self.hits.lock().expect("规则命中锁中毒") += 1;
     }
 
-    #[allow(dead_code)]
     pub fn hits(&self) -> u64 {
         *self.hits.lock().expect("规则命中锁中毒")
     }
@@ -215,6 +210,35 @@ pub struct StatusReport {
     pub metrics_24h: aisafeguard_store::ValueMetrics,
     pub metrics_7d: aisafeguard_store::ValueMetrics,
     pub ai: AiStatus,
+    /// 规则子集引擎状态（0.5.0 H6 可观测）
+    pub rules: RulesStatus,
+    /// JA3 指纹覆盖（0.5.0 H6：24h 内 Detection 事件携带指纹的占比，比率展示层算）
+    pub fingerprint_24h: FingerprintStats,
+}
+
+/// 规则子集引擎运行状态（加载留痕 + 命中计数，GUI/API 只读展示）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RulesStatus {
+    pub enabled: bool,
+    /// 当前是否有生效规则集
+    pub loaded: bool,
+    /// 生效规则条数
+    pub rule_count: usize,
+    /// 已加载规则包路径
+    pub path: String,
+    /// 规则文件 SHA-256 前 16 位（留痕/钉扎比对）
+    pub sha256: String,
+    /// 最近一次加载结果（成功条数或整包拒绝原因）
+    pub note: String,
+    /// 自启动累计命中次数
+    pub hits: u64,
+}
+
+/// JA3 指纹覆盖统计（24h 窗口）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FingerprintStats {
+    pub detections: i64,
+    pub with_fingerprint: i64,
 }
 
 /// Key 来源优先级：环境变量（CI/无头覆盖）> 凭据管理器 > 未配置。
@@ -287,6 +311,29 @@ impl EngineHandle {
                 analyze_interval_secs: cfg.ai.analyze_interval_secs,
                 trial_ttl_secs: cfg.ai.trial_ttl_secs,
                 promote_ttl_secs: cfg.ai.promote_ttl_secs,
+            },
+            rules: {
+                let loaded = self.rules.current();
+                RulesStatus {
+                    enabled: cfg.detect.rules.enabled,
+                    loaded: loaded.is_some(),
+                    rule_count: loaded.as_ref().map(|r| r.rule_count).unwrap_or(0),
+                    path: self.rules.loaded_path(),
+                    sha256: self.rules.loaded_sha256()[..16.min(self.rules.loaded_sha256().len())]
+                        .to_string(),
+                    note: self.rules.note(),
+                    hits: self.rules.hits(),
+                }
+            },
+            fingerprint_24h: {
+                let (detections, with_fingerprint) = self
+                    .store
+                    .detection_fingerprint_stats_since(since)
+                    .unwrap_or((0, 0));
+                FingerprintStats {
+                    detections,
+                    with_fingerprint,
+                }
             },
         }
     }

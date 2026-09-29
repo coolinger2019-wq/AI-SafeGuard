@@ -505,6 +505,27 @@ impl Store {
             .map_err(|e| Error::Store(e.to_string()))
     }
 
+    /// 指纹覆盖统计（0.5.0 H6 可观测）：时间窗内 Detection 事件总数与携带
+    /// JA3 指纹（tls_fp 非空）的条数——比率由展示层计算。
+    pub fn detection_fingerprint_stats_since(&self, since: i64) -> Result<(i64, i64)> {
+        let conn = self.lock()?;
+        let total: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind = 'detection' AND ts >= ?1",
+                params![since],
+                |r| r.get(0),
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        let with_fp: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind = 'detection' AND ts >= ?1 AND tls_fp != ''",
+                params![since],
+                |r| r.get(0),
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok((total, with_fp))
+    }
+
     /// 价值指标（0.4.0 B5）：三个单查询各取一个数，口径见 ValueMetrics 注释。
     /// auto_blocks 以事件 summary 含「已自动封禁」识别（apply_block 的固定文案，
     /// 手动/联邦规则的 firewall_add 文案不同）。
@@ -1266,6 +1287,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         Store::open(&dir.join("t.db")).unwrap()
+    }
+
+    /// 指纹覆盖统计（0.5.0 H6）：Detection 总数与携带 JA3 的条数按窗口计数。
+    #[test]
+    fn fingerprint_stats_counts_detections() {
+        let store = tmp_store("fpstats");
+        let now = aisafeguard_core::now_ts();
+        let detection = |fp: &str| SecurityEvent::Detection {
+            ts: now,
+            kind: "signature".into(),
+            src_ip: "203.0.113.7".into(),
+            confidence: "high".into(),
+            severity: "high".into(),
+            evidence: "e".into(),
+            rule_id: Some("sid:1".into()),
+            http_hint: None,
+            tls_fingerprint: (!fp.is_empty()).then(|| fp.to_string()),
+        };
+        store
+            .insert_event(&detection("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"))
+            .unwrap();
+        store.insert_event(&detection("")).unwrap();
+        store
+            .insert_event(&detection("f1e2d3c4b5a6f7e8d9c0b1a2f3e4d5c6"))
+            .unwrap();
+        // 非 detection 事件不计入
+        store
+            .insert_event(&SecurityEvent::engine("info", "流水"))
+            .unwrap();
+        let (total, with_fp) = store.detection_fingerprint_stats_since(now - 60).unwrap();
+        assert_eq!((total, with_fp), (3, 2));
+        // 窗口外为 0
+        let (t0, f0) = store.detection_fingerprint_stats_since(now + 60).unwrap();
+        assert_eq!((t0, f0), (0, 0));
     }
 
     /// 价值指标口径（0.4.0 B5）：建议数/采纳数/误报数/自动封禁数，按时间窗。
