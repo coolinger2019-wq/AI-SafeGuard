@@ -198,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "aisafeguard-ai"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "aisafeguard-core",
  "reqwest",
@@ -209,7 +209,7 @@ dependencies = [
 
 [[package]]
 name = "aisafeguard-app"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "aisafeguard-ai",
  "aisafeguard-core",
@@ -248,7 +248,7 @@ dependencies = [
 
 [[package]]
 name = "aisafeguard-core"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "aisafeguard-l7",
  "chrono",
@@ -263,7 +263,7 @@ dependencies = [
 
 [[package]]
 name = "aisafeguard-detect"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "aisafeguard-core",
  "etherparse",
@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "aisafeguard-firewall"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "aisafeguard-core",
  "serde",
@@ -287,7 +287,7 @@ dependencies = [
 
 [[package]]
 name = "aisafeguard-honeypot"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "aisafeguard-core",
  "aisafeguard-l7",
@@ -299,7 +299,7 @@ dependencies = [
 
 [[package]]
 name = "aisafeguard-l7"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "md-5",
  "serde",
@@ -308,7 +308,7 @@ dependencies = [
 
 [[package]]
 name = "aisafeguard-rules"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "regex",
  "sha2 0.10.9",
@@ -317,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "aisafeguard-store"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "aisafeguard-core",
  "rusqlite",
@@ -329,7 +329,7 @@ dependencies = [
 
 [[package]]
 name = "aisafeguard-xdp"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "aisafeguard-core",
  "aisafeguard-firewall",

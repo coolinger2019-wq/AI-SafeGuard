@@ -44,7 +44,8 @@ sudo bash scripts/demo-attack.sh   # 或一键演示(含自动封禁与哈希链
 - **Suricata/ET 规则为受限子集**(content/pcre/flow/threshold,范围冻结见 [RULESET_SUBSET.md](docs/RULESET_SUBSET.md)),非完整 Suricata 兼容
 - **深检默认全关**:`[detect.capture]`、`[detect.l7]`、`[detect.rules]`、`[xdp]` 默认 enabled=false,需显式开启
 - **规则引擎默认只告警**:命中只产事件,自动封禁需显式 `auto_block = true`(仍受内网保护约束)
-- **蜜罐是低交互**(HTTP 含假登录页与敏感路径诱饵,SSH/Telnet 维持横幅级);**非中交互蜜罐**(无假 Shell/命令执行),文件诱捕(canary 文件)未实现
+- **蜜罐中交互默认关**:`[honeypot.shell]`(SSH 假 Shell)与 `telnet_enabled`(Telnet 假 Shell)默认 enabled=false,显式开启;MySQL/Redis 蜜罐默认不在监听表,显式配置 kind 即开启;文件诱捕(canary)未实现(0.5.10)
+- **假 Shell 是仿真不是真机**:白名单命令 + 静态假文件系统,永不 fork 真实进程;指纹可被主动探测识别(反识别加固归 0.5.11),russh 客户端自连存在上游兼容问题(paramiko/OpenSSH 不受影响,[NEGATIVE-PATH §6](docs/NEGATIVE-PATH-TESTING.md))
 - **eBPF 流表/XDP 仅 Linux**;Windows 无 eBPF 依赖,能力对等由用户态实现(纯用户态,行为构造性一致)
 - AI 是概率性的:默认人工确认;自动应用 = 可选开关 + 严重度阈值 + 灰度 TTL(到期自动解封)
 - 内网/回环地址永不自动封(硬编码,手动封不禁);误报抑制期内自动封禁跳过
@@ -55,7 +56,7 @@ sudo bash scripts/demo-attack.sh   # 或一键演示(含自动封禁与哈希链
 
 ## 当前能力
 
-- **蜜罐**:SSH/HTTP/Telnet/通用 四种低交互监听;HTTP 带假登录页(GET 下发表单,POST 记提交、密码字段脱敏不落库)与内置敏感路径诱饵(/admin、/.env、/wp-login.php 等),未命中走通用假页;事件含 method/path/UA/标签,GUI 可点开详情看结构化字段
+- **蜜罐**:六种协议——SSH/HTTP/Telnet/通用 低交互(HTTP 假登录页 + 敏感路径诱饵,POST 密码字段脱敏)+ **SSH 假 Shell 中交互**(`[honeypot.shell]` 默认关:任意凭证放行 → 白名单命令仿真(whoami/uname/ls/cat/ps/netstat/wget 等)→ 静态假文件系统 → 逐命令 interaction 留痕)+ **Telnet 假 Shell**(独立开关)+ **MySQL/Redis 蜜罐**(显式配置监听即开启:握手采集、SELECT 空结果集/SHOW 假数据、RESP 假响应、AUTH 口令脱敏);交互会话独立并发上限(8)防资源耗尽;GUI 事件详情可展开交互序列
 - **快路径检测**:频次引擎(扫描/暴破)+ 采样捕获检测器(端口扫描/SYN flood),触发即自动封禁——TTL 到期自动解封,内网/回环永不自动封
 - **流量采样捕获**(默认关闭):WinDivert(Windows)/ AF_PACKET(Linux)被动采样只取副本,control 只看 SYN 元数据、full 带流重组取证(载荷仅可疑时截断留存);可选驱动哈希校验;[Windows 实机验证](docs/WINDOWS-CAPTURE-TESTING.md) / [Linux](docs/LINUX-TESTING.md)
 - **L7 解析与指纹**(`[detect.l7]`,默认关闭):HttpHint(method/path/UA,蜜罐与采样共用同一解析)+ JA3/JA4 客户端指纹(JA4 对齐 FoxIO 官方算法),full 模式重组流前缀解析,字段随 Detection 事件入库;HTTPS 站点经由 JA3/JA4 的 SNI 扩展体现,无独立 SNI 域名字段

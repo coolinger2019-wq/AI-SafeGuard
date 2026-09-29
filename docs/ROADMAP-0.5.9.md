@@ -7,6 +7,8 @@
 > 编号约定:本文件任务号 `Hxxx`。若 0.5.7/0.5.8 已有占位批次,本文档可整体顺延为对应版本号,任务编号不变。
 >
 > **切分决议(2026-09-29 可行性评估后)**:本文档拆为三个发布批次——**0.5.9 = 第一批(仿真深度:H101-H105 + H110 + H120)**、**0.5.10 = 第二批(情报价值:H200 + H210)**、**0.5.11 = 第三批(产品化与反识别:H300/H310/H320/H400)**。文件名保留 0.5.9(首个发布批次)。评估结论:九个任务中八个是现有架构的顺势扩展;唯一架构级新增是 H100 引入 russh(当前 "ssh" 蜜罐只发 banner 不说 SSH 协议)。三处范围修正已直接写进对应任务节,动工前不再另行讨论。
+>
+> **完成状态(2026-09-30)**:**0.5.9 批次全部完成并已发版**。H101 russh(ring 后端)过三道门 + paramiko 实连;H102 模块化 + interaction 事件字段 + 交互并发上限 8;H103 命令仿真层;H104 SSH 接线(host key 持久化/契约三同步);H110 MySQL+Redis 蜜罐;H120 Telnet 对齐;H105 验收(NEGATIVE-PATH §6/§7、THREAT_MODEL 蜜罐攻击面、demo-honeypot-deep.sh、replay-ssh-shell.py)。WSL2 实测:paramiko 全剧本、mysql 8.0.46 CLI、redis-cli 三协议实连全过,实测修复 3 个真 bug(run_stream spawn 语义 / verify-log --data-dir / MySQL 列定义 lenenc 编码),详见 CHANGELOG 0.5.9 与 LESSONS 0.5.9 批次。验收清单中「demo-attack.sh 假 Shell 段」以独立 demo-honeypot-deep.sh 交付(不污染原快路径演示);THREAT_MODEL 攻击面四条已入册。
 
 ---
 
@@ -60,10 +62,10 @@
 - **全局交互会话并发上限(评估新增)**:假 Shell 会话长挂会占满现有全局 64 并发信号量,饿死全部监听器;交互会话独立设小上限(默认 8),触发即优雅拒绝并留事件,列入 THREAT_MODEL「蜜罐被打」攻击面。
 
 **验收**
-- [ ] paramiko 回放脚本:登录 → 执行 5 条内置命令 + 1 条未知命令 → 事件含逐命令序列与假文件系统响应。
-- [ ] `scripts/demo-attack.sh` 新增假 Shell 段,一键演示可见事件。
-- [ ] 负路径实测记录进 `docs/NEGATIVE-PATH-TESTING.md`:组合命令注入、超长输入(≥4KB)、二进制乱码、会话超时。
-- [ ] 蜜罐本身被打(假 Shell 逃逸尝试)列入 `docs/THREAT_MODEL.md` 新增攻击面条目。
+- [x] paramiko 回放脚本:登录 → 执行 5 条内置命令 + 1 条未知命令 → 事件含逐命令序列与假文件系统响应。
+- [x] `scripts/demo-honeypot-deep.sh` 独立演示(假 Shell+MySQL+Redis),一键演示可见事件。
+- [x] 负路径实测记录进 `docs/NEGATIVE-PATH-TESTING.md`:组合命令注入、超长输入(≥4KB)、二进制乱码、会话超时。
+- [x] 蜜罐本身被打(假 Shell 逃逸尝试)列入 `docs/THREAT_MODEL.md` 新增攻击面条目。
 
 **切分:0.5.9 内细分五个子任务(序贯推进)**
 
@@ -91,9 +93,9 @@
 - 假响应数据用内置常量,**不得包含任何真实业务数据**。
 
 **验收**
-- [ ] `mysql -h127.0.0.1 -P3307 -u<user> -p` 实连:错误凭证 → 事件;正确格式交互 → 假结果集。
-- [ ] `redis-cli` 实连:`AUTH`/`SET`/`INFO` 假响应回放,事件完整。
-- [ ] fuzz:随机字节流打两个端口,服务不崩、事件有记录(复用现有结构化模糊测试)。
+- [x] `mysql -h127.0.0.1 -P3307 -u<user> -p` 实连:错误凭证 → 事件;正确格式交互 → 假结果集。
+- [x] `redis-cli` 实连:`AUTH`/`SET`/`INFO` 假响应回放,事件完整。
+- [x] fuzz:随机字节流打两个端口,服务不崩、事件有记录(复用现有结构化模糊测试)。
 
 ### H120 Telnet 假 Shell 对齐 — 规模 S
 

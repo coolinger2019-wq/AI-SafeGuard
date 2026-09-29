@@ -2,6 +2,37 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.5.9] - 2026-09-30
+
+蜜罐深化专项(0.5.9 第一批:仿真深度):SSH/Telnet 假 Shell 中交互 + MySQL/Redis 蜜罐,统一逐命令留痕,全部默认关、显式开启。任务号 H101-H120(见 docs/ROADMAP-0.5.9.md 切分决议);0.5.10(凭证采集/canary)与 0.5.11(模板/反识别)顺延。
+
+### 新增
+
+- **SSH 假 Shell(中交互,H103/H104)**:`[honeypot.shell]` 默认关。启用后 ssh 监听器升级:russh(ring 后端)完成真实 KEX/加密传输 → 任意凭证放行 → 白名单命令仿真(whoami/uname -a/id/pwd/ls/cat/ps/ifconfig/ip addr/netstat/wget/curl/chmod/history/exit)→ 静态假文件系统(/etc/passwd、/etc/shadow 等内置诱饵内容)→ 逐命令 `interaction` 数组进事件;组合命令(`;`/`|`/`&&`)只仿真首个、整行原样留痕;未知命令文案对齐真实 bash;命令数上限(默认 50)+ 120s 空闲超时;支持 exec(非交互单命令);host key 惰性生成持久化 `<data_dir>/honeypot/`(unix 0600),失败降级 banner 模式留事件;SSH 口令不落任何留痕(0.5.10 凭证库接管)
+- **Telnet 假 Shell(H120)**:`telnet_enabled` 独立开关默认关;login/password 后复用同一命令仿真层;IAC 转义剥离(协商/子协商/字面转义);关闭时 banner 模式与 0.5.8 逐字节一致(回归测试钉住)
+- **MySQL 蜜罐(H110)**:显式配置 `kind = "mysql"` 监听即开启。握手 v10 greeting(版本 8.0.36 全合成)、任意凭证放行、COM_QUERY 假响应(SELECT 空结果集/SHOW DATABASES 内置假库/其他 OK)、畸形握手回对齐真实 mysqld 的 Access denied 文案;语句逐条留痕
+- **Redis 蜜罐(H110)**:`kind = "redis"` 同上。RESP 增量解析(数组式+内联式)+ PING/AUTH/INFO/CONFIG/SLAVEOF/SET/GET/KEYS/EVAL 等假响应;AUTH 口令脱敏 `***` 不落明文;复制类命令(SLAVEOF/REPLCONF/PSYNC)高价值行为逐条留痕
+- **逐命令事件字段**:HoneypotHit 增 `interaction`(ShellStep 数组,serde 可选字段,不进哈希链 canonical——存量事件与链校验兼容,store 加列 + GUI 事件详情可展开交互序列)
+- **交互会话独立并发上限**:交互会话独立预算(默认 8)与全局 64 分离,防长会话刷满全局额度饿死其他监听器(跨任务红线)
+- **演示与验收脚本**:`scripts/demo-honeypot-deep.sh`(假 Shell + MySQL + Redis 一键演示,含事件流水与哈希链校验)、`scripts/replay-ssh-shell.py`(paramiko 回放:白名单/组合注入/未知命令/4KB 超长输入逐步断言)
+
+### 修复(WSL 实测抓出)
+
+- **假 Shell 会话事件丢失**:`run_stream().await` 只等到会话任务 spawn,需再 await `RunningSession` 等会话真正结束——否则事件落在空状态(0 条命令)
+- **verify-log `--data-dir` 不生效**:`cmd_verify_log` 收 cfg_path 后重读配置文件,丢弃 CLI 覆盖;改收 resolved AppConfig(与 export-events 同款模式)
+- **MySQL 列定义编码**:ColumnDefinition41 字符串为 lenenc 长度前缀而非 NUL 结尾——真实 mysql 8 客户端把 'd'(0x64) 当长度读爆报 2008 out of memory(MITM 抓包定位;python 协议客户端不解析列定义故自动化未暴露)
+- **Linux 构建**:unix cfg 分支 OpenOptionsExt 导入缺失(Windows 编译期不可见)
+
+### 变更
+
+- 蜜罐 crate 模块化(H102):761 行单文件拆 facade/listener/protocol/http/redis/mysql/shell,会话出口收敛 `SessionOutcome`;安全基线断言新增「假 Shell 默认关」「telnet_enabled 默认关」「默认监听表不含 mysql/redis」;`restart_required` 契约补假 Shell 配置(需重启)
+- 供应链:russh 0.63(ring 后端,显式关默认特性防 aws-lc-rs 引入 CMake/NASM 构建依赖)+ rand 0.10;cargo-deny 校准(epaint_default_fonts 字体许可 OFL-1.1/Ubuntu-font-1.0、RUSTSEC-2026-0192 ttf-parser unmaintained ignore、workspace 路径依赖显式版本)
+
+### 实测(WSL2 Ubuntu 24.04)
+
+- paramiko 全剧本回放 PASS(登录/白名单/组合注入/未知命令/4KB);mysql 8.0.46 CLI 实连(SHOW DATABASES 假库);redis-cli 实连(PING/SET/INFO/SLAVEOF);demo 全流程事件流水 + 哈希链 14/14
+- 已知限制(诚实声明):russh 客户端自连本蜜罐存在上游通道数据兼容问题(paramiko/OpenSSH 不受影响),NEGATIVE-PATH-TESTING §6 明示
+
 ## [0.5.8] - 2026-09-29
 
 GUI 重设计（frontend-ui-engineering 规范落地）：排版比例体系统一、设置页分页、版本标识常驻。规范文档 ui.md 升 v1.1（§8 桌面端落地约定）。

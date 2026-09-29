@@ -213,3 +213,31 @@
 - **rustfmt 跨工具链漂移**：CI/不同人用不同 nightly/rustfmt 版本时，全仓
   `cargo fmt` 会产生大块纯格式 diff。功能提交前先单独提一版
   "fmt 对齐"提交，避免功能 diff 被格式噪声淹没。
+
+## 0.5.9 批次 · 蜜罐深化(2026-09-30)
+
+- **russh run_stream 是"spawn 语义"**:`run_stream(config, stream, handler).await`
+  只等到 SSH-ID 交换并把会话任务 spawn 出去,返回 `RunningSession`——
+  **必须再 `.await` 它**才会等会话真正结束。直接读 handler 内部状态会拿到
+  空数据(假 Shell 会话事件落在"0 条命令",WSL paramiko 实测抓出)。
+  另外 russh↔russh 自连时通道数据/断开通知存在上游兼容问题
+  (paramiko/OpenSSH 不受影响);自动化测试只断言到 auth+prompt,
+  全命令链路交给 paramiko 回放脚本。
+- **MySQL 协议字符串两套编码**:Handshake 里是 NUL 结尾,ColumnDefinition41
+  里是 **lenenc 长度前缀**——写混了,真实 mysql 8 客户端把 'd'(0x64=100)
+  当长度读爆,报 2008 out of memory。python 手写协议客户端不解析列定义,
+  自动化全绿也测不出来——**协议蜜罐必须用原生 CLI(mysql/redis-cli)做
+  实连验收**,MITM 代理抓双向帧是定位利器(30 分钟定位,盲猜耗 1 小时)。
+- **平台分支第三次同款坑**:unix cfg 里的 `OpenOptionsExt::mode()` 在
+  Windows 编译期不检查,推到 WSL 构建才炸。教训升级:凡动 `#[cfg(unix)]`
+  代码,推前先 `wsl cargo check` 一把(与 0.3.5/0.5.1 两次同款)。
+- **`[[honeypot.listeners]]` 是整表替换语义**:配置里写新协议监听时必须把
+  默认四协议一并写全,否则默认监听静默消失(demo 脚本踩过)。serde 容器级
+  default 只在字段整体缺失时生效,给出列表即全量。
+- **CLI 子命令勿重读配置**:`cmd_verify_log(cfg_path)` 收路径后重新
+  `AppConfig::load`,把 resolve_cfg 已应用的 `--data-dir` 覆盖丢了
+  (verify-log 一直校验的是别的数据目录)。修法:收 resolved
+  `(AppConfig, PathBuf)` 元组,与 cmd_export_events 同款。
+- **git 提交链里 `cargo test | grep` 会吞退出码**:`A | grep && B` 的
+  条件是 grep 命中而非测试通过——提交链里用 `cargo test ... &&
+  echo OK` 或看 `${PIPESTATUS[0]}`。

@@ -14,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.8"
+version = "0.5.9"
 edition = "2024"
 license = "MIT"
 authors = ["coolinger (vibe coding)"]
@@ -25,15 +25,15 @@ authors = ["coolinger (vibe coding)"]
 windivert-sys = { path = "third_party/windivert-sys" }
 
 [workspace.dependencies]
-aisafeguard-core = { path = "crates/aisafeguard-core", version = "0.5.8" }
-aisafeguard-store = { path = "crates/aisafeguard-store", version = "0.5.8" }
-aisafeguard-firewall = { path = "crates/aisafeguard-firewall", version = "0.5.8" }
-aisafeguard-l7 = { path = "crates/aisafeguard-l7", version = "0.5.8" }
-aisafeguard-rules = { path = "crates/aisafeguard-rules", version = "0.5.8" }
-aisafeguard-xdp = { path = "crates/aisafeguard-xdp", version = "0.5.8" }
-aisafeguard-honeypot = { path = "crates/aisafeguard-honeypot", version = "0.5.8" }
-aisafeguard-ai = { path = "crates/aisafeguard-ai", version = "0.5.8" }
-aisafeguard-detect = { path = "crates/aisafeguard-detect", version = "0.5.8" }
+aisafeguard-core = { path = "crates/aisafeguard-core", version = "0.5.9" }
+aisafeguard-store = { path = "crates/aisafeguard-store", version = "0.5.9" }
+aisafeguard-firewall = { path = "crates/aisafeguard-firewall", version = "0.5.9" }
+aisafeguard-l7 = { path = "crates/aisafeguard-l7", version = "0.5.9" }
+aisafeguard-rules = { path = "crates/aisafeguard-rules", version = "0.5.9" }
+aisafeguard-xdp = { path = "crates/aisafeguard-xdp", version = "0.5.9" }
+aisafeguard-honeypot = { path = "crates/aisafeguard-honeypot", version = "0.5.9" }
+aisafeguard-ai = { path = "crates/aisafeguard-ai", version = "0.5.9" }
+aisafeguard-detect = { path = "crates/aisafeguard-detect", version = "0.5.9" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "time", "io-util", "signal"] }
