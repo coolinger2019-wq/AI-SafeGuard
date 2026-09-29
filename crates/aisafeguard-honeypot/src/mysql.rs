@@ -112,12 +112,14 @@ fn access_denied_payload(user: &str, host: &str) -> Vec<u8> {
     p
 }
 
-/// 空 RESULTSET 的列定义包(name 为列名)
+/// 空 RESULTSET 的列定义包(name 为列名)。
+/// 列定义的字符串是 **lenenc 长度前缀**(非 NUL 结尾)——NUL 结尾会让真实
+/// mysql 客户端把首字节当长度读爆(2008 out of memory,0.5.9 WSL 实测抓到)。
 fn column_def_payload(name: &str) -> Vec<u8> {
     let mut p = Vec::new();
     for field in ["def", "", "", "", name, ""] {
+        p.push(field.len() as u8);
         p.extend_from_slice(field.as_bytes());
-        p.push(0x00);
     }
     p.push(0x0c); // length of fixed fields
     p.extend_from_slice(&0x21u16.to_le_bytes()); // charset
@@ -393,6 +395,17 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn column_def_uses_lenenc_strings_not_nul() {
+        // Protocol::ColumnDefinition41 字符串为长度前缀;NUL 结尾会让真实
+        // mysql 客户端把 'd'(0x64) 当长度读爆(2008 out of memory)
+        let p = column_def_payload("RESULT");
+        assert_eq!(&p[..4], &[0x03, b'd', b'e', b'f']);
+        assert_eq!(&p[4..5], &[0x00]); // 空 schema lenenc
+        assert!(p.contains(&0x06), "name 应带长度前缀");
+        assert_eq!(&p[p.len() - 3..], &[0xfd, 0x00, 0x00]);
     }
 
     #[test]
