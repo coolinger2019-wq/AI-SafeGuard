@@ -7,15 +7,11 @@ license.workspace = true
 [dependencies]
 aisafeguard-core.workspace = true
 aisafeguard-l7.workspace = true
-tokio.workspace = true
-tracing.workspace = true
-
-[dev-dependencies]
-# H101 spike（examples/ssh_shell_spike.rs）：russh 门禁与互通验证。
-# H104 接线时随实现迁入 [dependencies]。
+# H104：russh SSH 服务端(ring 后端,workspace 注释见根 Cargo.toml)
 russh.workspace = true
 rand.workspace = true
-anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true

@@ -291,7 +291,6 @@ version = "0.5.8"
 dependencies = [
  "aisafeguard-core",
  "aisafeguard-l7",
- "anyhow",
  "rand 0.10.3",
  "russh",
  "tokio",

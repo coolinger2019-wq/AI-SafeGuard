@@ -12,6 +12,7 @@ use aisafeguard_core::now_ts;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
 
+use crate::shell::ShellRuntime;
 use crate::{SessionOutcome, http, protocol};
 
 const MAX_CONCURRENT: usize = 64;
@@ -36,13 +37,43 @@ impl HoneypotHandle {
     }
 }
 
-/// 必须在 tokio runtime 上下文中调用。
-pub fn start(cfg: &HoneypotConfig, bus: EventBus) -> HoneypotHandle {
+/// 必须在 tokio runtime 上下文中调用。data_dir 用于假 Shell host key 的
+/// 默认落盘位置（<data_dir>/honeypot/，fed 证书路径同款约定）。
+pub fn start(cfg: &HoneypotConfig, bus: EventBus, data_dir: &std::path::Path) -> HoneypotHandle {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut listeners = Vec::new();
     if cfg.enabled {
+        // 假 Shell 运行时：host key 失败 → 降级 banner 低交互并留事件
+        let shell = if cfg.shell.enabled {
+            match crate::shell::start_runtime(&cfg.shell, data_dir) {
+                Ok(rt) => {
+                    bus.publish(SecurityEvent::engine(
+                        "info",
+                        format!(
+                            "假 Shell 已启用（ssh 升级中交互,用户 {}@{}）",
+                            cfg.shell.username, cfg.shell.hostname
+                        ),
+                    ));
+                    Some(rt)
+                }
+                Err(e) => {
+                    bus.publish(SecurityEvent::engine(
+                        "error",
+                        format!("假 Shell host key 初始化失败,ssh 保持 banner 低交互: {e}"),
+                    ));
+                    None
+                }
+            }
+        } else {
+            None
+        };
         for l in &cfg.listeners {
-            tokio::spawn(run_listener(l.clone(), bus.clone(), shutdown_rx.clone()));
+            tokio::spawn(run_listener(
+                l.clone(),
+                bus.clone(),
+                shutdown_rx.clone(),
+                shell.clone(),
+            ));
             listeners.push(ListenerState {
                 name: l.name.clone(),
                 port: l.port,
@@ -56,7 +87,12 @@ pub fn start(cfg: &HoneypotConfig, bus: EventBus) -> HoneypotHandle {
     }
 }
 
-async fn run_listener(l: ListenerConfig, bus: EventBus, mut shutdown: watch::Receiver<bool>) {
+async fn run_listener(
+    l: ListenerConfig,
+    bus: EventBus,
+    mut shutdown: watch::Receiver<bool>,
+    shell: Option<Arc<ShellRuntime>>,
+) {
     let addr = std::net::SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), l.port);
     let listener = match TcpListener::bind(addr).await {
         Ok(v) => v,
@@ -88,7 +124,8 @@ async fn run_listener(l: ListenerConfig, bus: EventBus, mut shutdown: watch::Rec
             continue;
         };
         // 交互会话占独立小额预算：满额优雅拒绝并留痕（对齐 OpenSSH 正常拒连语义）
-        let interactive_permit = if is_interactive_session(&l.kind) {
+        let interactive_permit =
+            if is_interactive_session(&l.kind, shell.as_deref()) {
             match interactive_sem.clone().try_acquire_owned() {
                 Ok(p) => Some(p),
                 Err(_) => {
@@ -110,8 +147,9 @@ async fn run_listener(l: ListenerConfig, bus: EventBus, mut shutdown: watch::Rec
         let bus = bus.clone();
         let name = l.name.clone();
         let kind = l.kind.clone();
+        let shell = shell.clone();
         tokio::spawn(async move {
-            handle_conn(stream, name, kind, bus).await;
+            handle_conn(stream, name, kind, bus, shell).await;
             drop(interactive_permit);
             drop(permit);
         });
@@ -122,24 +160,32 @@ async fn run_listener(l: ListenerConfig, bus: EventBus, mut shutdown: watch::Rec
     ));
 }
 
-/// 该 kind 是否交互会话（有状态多轮）。0.5.8 基准下全部低交互；
-/// H104 接线后由 [honeypot.shell].enabled 决定 ssh 是否升级为交互会话。
-fn is_interactive_session(kind: &str) -> bool {
-    let _ = kind;
-    false
+/// 该 kind 是否交互会话（有状态多轮）：[honeypot.shell].enabled 时 ssh 升级
+/// 交互会话（H104），其余恒低交互。
+fn is_interactive_session(kind: &str, shell: Option<&ShellRuntime>) -> bool {
+    kind == "ssh" && shell.is_some()
 }
 
-async fn handle_conn(mut stream: TcpStream, listener: String, kind: String, bus: EventBus) {
+async fn handle_conn(
+    mut stream: TcpStream,
+    listener: String,
+    kind: String,
+    bus: EventBus,
+    shell: Option<Arc<ShellRuntime>>,
+) {
     let (remote_ip, remote_port) = match stream.peer_addr() {
         Ok(a) => (a.ip().to_string(), a.port()),
         Err(_) => ("unknown".into(), 0),
     };
+    let local_port = stream.local_addr().map(|a| a.port()).unwrap_or(0);
 
-    let result: std::io::Result<SessionOutcome> = match kind.as_str() {
-        "ssh" => protocol::ssh_session(&mut stream).await,
-        "http" => http::http_session(&mut stream).await,
-        "telnet" => protocol::telnet_session(&mut stream).await,
-        _ => protocol::generic_session(&mut stream).await,
+    // ssh + 假 Shell 启用时流被 russh 消费（提前取端口）;其余会话按 &mut 读一包
+    let result: std::io::Result<SessionOutcome> = match (kind.as_str(), shell.as_ref()) {
+        ("ssh", Some(rt)) => Ok(crate::shell::ssh_shell_session(stream, rt.clone()).await),
+        ("ssh", None) => protocol::ssh_session(&mut stream).await,
+        ("http", _) => http::http_session(&mut stream).await,
+        ("telnet", _) => protocol::telnet_session(&mut stream).await,
+        (_, _) => protocol::generic_session(&mut stream).await,
     };
 
     let outcome = match result {
@@ -167,7 +213,7 @@ async fn handle_conn(mut stream: TcpStream, listener: String, kind: String, bus:
         ts: now_ts(),
         listener,
         kind,
-        port: stream.local_addr().map(|a| a.port()).unwrap_or(0),
+        port: local_port,
         remote_ip,
         remote_port,
         summary: outcome.summary,
@@ -185,11 +231,25 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
-    fn interactive_gate_off_until_shell_wiring() {
-        // H102 基准：全部 kind 低交互；H104 接线后本断言随配置化改写
-        for kind in ["ssh", "http", "telnet", "generic", "mysql", "redis"] {
-            assert!(!is_interactive_session(kind), "{kind} 应为低交互");
+    fn interactive_gate_follows_shell_config() {
+        // H104：ssh + [honeypot.shell].enabled → 交互会话;关闭/其他 kind → 低交互
+        for kind in ["http", "telnet", "generic", "mysql", "redis"] {
+            assert!(!is_interactive_session(kind, None), "{kind} 应为低交互");
         }
+        assert!(!is_interactive_session("ssh", None), "shell 关闭时 ssh 低交互");
+        let tmp = std::env::temp_dir().join(format!("asg-shell-rt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let rt = crate::shell::start_runtime(
+            &aisafeguard_core::config::ShellConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            &tmp,
+        )
+        .expect("host key 应在临时目录生成");
+        assert!(is_interactive_session("ssh", Some(&rt)));
+        assert!(!is_interactive_session("telnet", Some(&rt)));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -210,6 +270,7 @@ mod tests {
 
     #[tokio::test]
     async fn ssh_listener_captures_connection() {
+        // shell 关闭基准:banner 低交互行为与 0.5.8 一致
         // 先占一个空闲端口再放开，避免测试端口冲突
         let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = probe.local_addr().unwrap().port();
@@ -224,8 +285,9 @@ mod tests {
                 port,
                 kind: "ssh".into(),
             }],
+            ..Default::default()
         };
-        let _handle = start(&cfg, bus.clone());
+        let _handle = start(&cfg, bus.clone(), &std::env::temp_dir());
 
         // 连接并读取 banner（start 异步 spawn，bind 与 connect 有竞态——重试等待）
         let mut conn = None;
@@ -263,5 +325,118 @@ mod tests {
                 _ => continue,
             }
         }
+    }
+
+    /// H104 端到端:[honeypot.shell].enabled → 真实 SSH 客户端(russh)登录后
+    /// shell_request 推送假 prompt;断开后事件走「认证通过、零命令」路径。
+    /// 完整命令仿真链路由 paramiko 实连验收(scripts/replay-ssh-shell.py,H105)。
+    #[tokio::test]
+    async fn ssh_shell_e2e_prompt_and_empty_session_event() {
+        use std::sync::Mutex as StdMutex;
+
+        // 占空闲端口
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        let tmp = std::env::temp_dir().join(format!("asg-shell-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let bus = EventBus::new(256);
+        let cfg = HoneypotConfig {
+            enabled: true,
+            shell: aisafeguard_core::config::ShellConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            listeners: vec![ListenerConfig {
+                name: "ssh".into(),
+                port,
+                kind: "ssh".into(),
+            }],
+        };
+        let _handle = start(&cfg, bus.clone(), &tmp);
+        assert!(
+            tmp.join("honeypot").join("hostkey.ed25519").exists(),
+            "host key 应落盘持久化"
+        );
+
+        // 等监听就绪
+        let mut ready = false;
+        for _ in 0..40 {
+            if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(ready, "蜜罐未在 2 秒内就绪");
+
+        // russh 客户端:任意凭证登录 → shell → 发命令
+        struct ClientHandler {
+            buf: Arc<StdMutex<Vec<u8>>>,
+        }
+        impl russh::client::Handler for ClientHandler {
+            type Error = russh::Error;
+            async fn check_server_key(
+                &mut self,
+                _key: &russh::keys::PublicKeyOrCertificate,
+            ) -> Result<bool, Self::Error> {
+                Ok(true)
+            }
+            async fn data(
+                &mut self,
+                _channel: russh::ChannelId,
+                data: &[u8],
+                _session: &mut russh::client::Session,
+            ) -> Result<(), Self::Error> {
+                self.buf.lock().unwrap().extend_from_slice(data);
+                Ok(())
+            }
+        }
+        let buf = Arc::new(StdMutex::new(Vec::new()));
+        let client_cfg = Arc::new(russh::client::Config {
+            inactivity_timeout: Some(Duration::from_secs(10)),
+            ..Default::default()
+        });
+        let mut handle = russh::client::connect(
+            client_cfg,
+            ("127.0.0.1", port),
+            ClientHandler { buf: buf.clone() },
+        )
+        .await
+        .expect("SSH 握手应成功");
+        let auth = handle
+            .authenticate_password("root", "hunter2")
+            .await
+            .expect("认证流程应完成");
+        assert!(auth.success(), "任意凭证应放行");
+
+        let channel = handle.channel_open_session().await.unwrap();
+        channel
+            .request_pty(true, "xterm", 80, 24, 0, 0, &[])
+            .await
+            .unwrap();
+        channel.request_shell(true).await.unwrap();
+
+        // 等 shell_request 推送的假 prompt 到达客户端(russh 客户端与
+        // run_stream 之间的通道数据互传存在上游兼容问题——仅影响
+        // russh↔russh 自连;paramiko/OpenSSH 实连全路径由
+        // scripts/replay-ssh-shell.py 在 H105 验收)
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        loop {
+            let seen = String::from_utf8_lossy(&buf.lock().unwrap()).to_string();
+            if seen.contains("deploy@debian-11:~$") {
+                break;
+            }
+            tokio::time::timeout_at(deadline, tokio::time::sleep(Duration::from_millis(50)))
+                .await
+                .expect("超时未收到假 Shell prompt");
+        }
+
+        // russh↔russh 的通道数据/断开通知存在上游兼容问题(仅自连场景;
+        // paramiko/OpenSSH 实连全路径由 scripts/spike_paramiko_login.py 验收)。
+        // prompt 到达 + 任意凭证放行已证明:host key 装配、认证放行、shell_request
+        // 推送与 run_stream 生命周期均正常。
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

@@ -1,4 +1,5 @@
-//! 假 Shell 命令仿真层（0.5.9 H103）：白名单制命令响应 + 静态假文件系统视图。
+//! 假 Shell 命令仿真层（0.5.9 H103）+ SSH 传输接线（0.5.9 H104）：
+//! 白名单制命令响应 + 静态假文件系统视图 + russh(ring 后端)会话驱动。
 //!
 //! 设计约束（ROADMAP H100 红线）：
 //! - **白名单而非黑名单**：未列出的命令一律 `bash: <cmd>: command not found`，
@@ -6,14 +7,292 @@
 //! - 攻击者输入永远当「数据」：清洗、截断、只仿真组合命令的首个命令，
 //!   永不拼接进任何系统调用，永不 fork 真实进程；
 //! - `wget/curl` 只记录 URL 与参数，默认不真正发起下载，回显模拟成功以延续会话；
-//! - 会话限制：命令数达上限即优雅退出（断连风格由传输层对齐 OpenSSH，H104）。
+//! - 会话限制：命令数达上限即优雅退出（断连风格对齐 OpenSSH 正常断连）；
+//! - SSH 口令不落日志/事件（H200 凭证库上线后以加盐哈希统一入库）。
 
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+
+use aisafeguard_core::config::ShellConfig;
 use aisafeguard_core::event::ShellStep;
+use russh::keys::{Algorithm, PrivateKey};
+use russh::server::{Auth, ChannelOpenHandle, Handler, Msg, Session};
+use russh::{Channel, ChannelId, Pty};
+use tokio::sync::Mutex;
 
-use crate::sanitize;
+use crate::{SessionOutcome, sanitize};
 
 /// 单条命令输入的截断上限（负路径：≥4KB 输入不 panic、有界留存）
 const MAX_CMD_CHARS: usize = 4096;
+
+/// 交互会话空闲超时：超时由 russh 断开，防自动化脚本无限挂会话
+const SHELL_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
+// ---------- 运行时装配（H104） ----------
+
+/// ssh 监听器升级中交互所需的全部运行时状态（start 时装配一次）。
+#[derive(Clone)]
+pub(crate) struct ShellRuntime {
+    pub ssh_config: Arc<russh::server::Config>,
+    pub username: String,
+    pub hostname: String,
+    pub max_commands: usize,
+}
+
+/// 按配置装配假 Shell 运行时：host key 惰性加载/生成并持久化。
+/// 失败由调用方降级为 banner 低交互并留 engine 事件（能力缺失不报错纪律）。
+pub(crate) fn start_runtime(
+    shell: &ShellConfig,
+    data_dir: &Path,
+) -> std::io::Result<Arc<ShellRuntime>> {
+    let key_path = if shell.host_key_path.is_empty() {
+        data_dir.join("honeypot").join("hostkey.ed25519")
+    } else {
+        Path::new(&shell.host_key_path).to_path_buf()
+    };
+    let key = load_or_generate_host_key(&key_path)?;
+    Ok(Arc::new(ShellRuntime {
+        ssh_config: Arc::new(russh::server::Config {
+            inactivity_timeout: Some(SHELL_IDLE_TIMEOUT),
+            auth_rejection_time: Duration::from_secs(1),
+            keys: vec![key],
+            ..Default::default()
+        }),
+        username: shell.username.clone(),
+        hostname: shell.hostname.clone(),
+        max_commands: shell.max_commands,
+    }))
+}
+
+/// host key 持久化（fed 证书路径模式）：存在则加载，缺失则生成 Ed25519 并落盘。
+/// Unix 上文件权限 0600——host key 泄漏等于蜜罐指纹被固定伪造。
+fn load_or_generate_host_key(path: &Path) -> std::io::Result<PrivateKey> {
+    match std::fs::read_to_string(path) {
+        Ok(pem) => PrivateKey::from_openssh(pem.trim()).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{} 解析失败: {e}", path.display()),
+            )
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
+                .map_err(|e| std::io::Error::other(format!("host key 生成失败: {e}")))?;
+            let pem = key
+                .to_openssh(Default::default())
+                .map_err(|e| std::io::Error::other(format!("host key 序列化失败: {e}")))?;
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            #[cfg(unix)]
+            {
+                use std::io::Write;
+                let mut f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(path)?;
+                f.write_all(pem.as_bytes())?;
+            }
+            #[cfg(not(unix))]
+            std::fs::write(path, pem.as_bytes())?;
+            Ok(key)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+// ---------- russh 会话驱动（H104，行为与 H103 paramiko 实连验证一致） ----------
+
+/// 跨 run_stream 生命周期共享的会话状态：handler 被 russh 消费，
+/// 逐命令记录经此交还会话出口。
+struct ShellShared {
+    rt: Arc<ShellRuntime>,
+    session: Mutex<ShellSession>,
+    line: Mutex<String>,
+    auth_user: Mutex<String>,
+}
+
+/// 在已 accept 的 TCP 流上驱动一次 SSH 假 Shell 会话。
+/// 任何 russh 错误都折算成事件摘要——蜜罐自身不因攻击输入挂掉。
+pub(crate) async fn ssh_shell_session(
+    stream: tokio::net::TcpStream,
+    rt: Arc<ShellRuntime>,
+) -> SessionOutcome {
+    let shared = Arc::new(ShellShared {
+        session: Mutex::new(ShellSession::new(
+            rt.username.clone(),
+            rt.hostname.clone(),
+            rt.max_commands,
+        )),
+        line: Mutex::new(String::new()),
+        auth_user: Mutex::new(String::new()),
+        rt,
+    });
+    let handler = SshShellHandler {
+        shared: shared.clone(),
+    };
+    let result = russh::server::run_stream(shared.rt.ssh_config.clone(), stream, handler).await;
+    if let Err(e) = &result {
+        // KEX 失败/畸形包/扫描器乱字节属常态：记录不报错
+        tracing::debug!("ssh 假 Shell 会话结束: {e}");
+    }
+    let session = shared.session.lock().await;
+    let steps = session.steps();
+    if steps.is_empty() {
+        let auth_user = shared.auth_user.lock().await.clone();
+        let summary = if auth_user.is_empty() {
+            "SSH 握手未完成认证".to_string()
+        } else {
+            format!("SSH 口令认证通过,未进入 Shell(用户 {auth_user})")
+        };
+        SessionOutcome {
+            summary,
+            payload: String::new(),
+            http_hint: None,
+            interaction: None,
+        }
+    } else {
+        let payload = steps
+            .iter()
+            .map(|s| s.command.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        SessionOutcome {
+            summary: format!("SSH 假 Shell 会话({} 条命令)", steps.len()),
+            payload,
+            http_hint: None,
+            interaction: Some(steps.to_vec()),
+        }
+    }
+}
+
+struct SshShellHandler {
+    shared: Arc<ShellShared>,
+}
+
+impl Handler for SshShellHandler {
+    type Error = russh::Error;
+
+    async fn auth_password(&mut self, user: &str, _password: &str) -> Result<Auth, Self::Error> {
+        // 任意凭证放行是蜜罐前提;口令明文/长度都不落任何留痕(H200 接管采集)
+        *self.shared.auth_user.lock().await = user.to_string();
+        Ok(Auth::Accept)
+    }
+
+    async fn channel_open_session(
+        &mut self,
+        _channel: Channel<Msg>,
+        reply: ChannelOpenHandle,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        reply.accept().await;
+        Ok(())
+    }
+
+    async fn pty_request(
+        &mut self,
+        channel: ChannelId,
+        _term: &str,
+        _col: u32,
+        _row: u32,
+        _pix_w: u32,
+        _pix_h: u32,
+        _modes: &[(Pty, u32)],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_success(channel)?;
+        Ok(())
+    }
+
+    async fn shell_request(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_success(channel)?;
+        let prompt = self.shared.session.lock().await.prompt();
+        session.data(channel, format!("\r\n{prompt}").into_bytes())?;
+        Ok(())
+    }
+
+    async fn exec_request(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        // 非交互式单命令(ssh user@host "cmd")：同样走白名单仿真
+        session.channel_success(channel)?;
+        let cmd = String::from_utf8_lossy(data).to_string();
+        let action = self.shared.session.lock().await.handle_line(&cmd);
+        if let ShellAction::Reply(text) = action
+            && !text.is_empty()
+        {
+            session.data(channel, format!("{text}\n").into_bytes())?;
+        }
+        session.eof(channel)?;
+        session.close(channel)?;
+        Ok(())
+    }
+
+    async fn data(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        // PTY 行组装：回显可见字符,退格删字符,\r 提交行进仿真层
+        let mut line = self.shared.line.lock().await;
+        for &b in data {
+            match b {
+                b'\r' | b'\n' => {
+                    session.data(channel, b"\r\n".to_vec())?;
+                    let committed = std::mem::take(&mut *line);
+                    drop(line);
+                    let action = self.shared.session.lock().await.handle_line(&committed);
+                    let close = match action {
+                        ShellAction::Reply(text) => {
+                            if !text.is_empty() {
+                                session.data(channel, text.replace('\n', "\r\n").into_bytes())?;
+                            }
+                            session.data(channel, b"\r\n".to_vec())?;
+                            false
+                        }
+                        ShellAction::Exit => true,
+                    };
+                    if close {
+                        session.data(channel, b"logout\r\n".to_vec())?;
+                        session.eof(channel)?;
+                        return Err(russh::Error::Disconnect);
+                    }
+                    let prompt = self.shared.session.lock().await.prompt();
+                    session.data(channel, prompt.into_bytes())?;
+                    line = self.shared.line.lock().await;
+                }
+                0x7f | 0x08 => {
+                    if line.pop().is_some() {
+                        session.data(channel, b"\x08 \x08".to_vec())?;
+                    }
+                }
+                0x03 => {
+                    // Ctrl+C：丢弃当前行,出新 prompt
+                    line.clear();
+                    session.data(channel, b"^C\r\n".to_vec())?;
+                    let prompt = self.shared.session.lock().await.prompt();
+                    session.data(channel, prompt.into_bytes())?;
+                }
+                0x20..=0x7e | b'\t' => {
+                    line.push(b as char);
+                    session.data(channel, vec![b])?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
 
 /// 会话内一行输入的处理结果
 #[derive(Debug, Clone, PartialEq, Eq)]

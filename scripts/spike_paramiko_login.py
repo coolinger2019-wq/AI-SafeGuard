@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""H101 spike 验收:paramiko 实连 russh 假 Shell。
+"""paramiko 实连假 Shell 验收(H104/H105):对启用 [honeypot.shell] 的真实监听器
+回放登录 → shell → 白名单命令 → 未知命令 → 退出。
 
-前置:cargo run -p aisafeguard-honeypot --example ssh_shell_spike
-退出标准:任意凭证登录成功 + shell channel 收到 prompt + 命令有响应 + 优雅退出。
+用法:python scripts/spike_paramiko_login.py [host] [port]
+默认 127.0.0.1:2222(默认蜜罐 ssh 监听端口)。
 """
 
 import socket
@@ -11,7 +12,6 @@ import time
 
 import paramiko
 
-HOST, PORT = "127.0.0.1", 2223
 PROMPT = "deploy@debian-11:~$ "
 
 
@@ -29,10 +29,12 @@ def read_until(chan: "paramiko.Channel", marker: bytes, deadline_s: float = 5.0)
 
 
 def main() -> int:
+    host = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
+    port = int(sys.argv[2]) if len(sys.argv) > 2 else 2222
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     client.connect(
-        HOST, port=PORT, username="root", password="hunter2",
+        host, port=port, username="root", password="hunter2",
         look_for_keys=False, allow_agent=False, timeout=10,
     )
     print("[1] login ok:任意凭证放行")

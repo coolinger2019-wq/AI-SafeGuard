@@ -581,7 +581,8 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
         });
     }
 
-    let honeypot = rt.block_on(async { aisafeguard_honeypot::start(&cfg.honeypot, bus.clone()) });
+    let honeypot =
+        rt.block_on(async { aisafeguard_honeypot::start(&cfg.honeypot, bus.clone(), &cfg.data_dir()) });
     if !cfg.honeypot.enabled {
         bus.publish(SecurityEvent::engine("info", "蜜罐功能已禁用"));
     }

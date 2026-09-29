@@ -81,12 +81,45 @@ impl Default for ApiConfig {
 pub struct HoneypotConfig {
     pub enabled: bool,
     pub listeners: Vec<ListenerConfig>,
+    /// 假 Shell（中交互 SSH，0.5.9 H104）：默认关，显式开启
+    pub shell: ShellConfig,
+}
+
+/// 假 Shell 会话参数（0.5.9 H104）：开启后 ssh 监听器认证后进入命令仿真会话
+/// （白名单制，实现在 aisafeguard-honeypot::shell）。行为固定于启动 → 需重启。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ShellConfig {
+    /// 默认 false：中交互能力显式开启（跨任务红线「新能力默认关」）
+    pub enabled: bool,
+    /// 假 prompt 用户名
+    pub username: String,
+    /// 假 prompt 主机名
+    pub hostname: String,
+    /// 单会话命令数上限：防自动化脚本无限挂会话刷事件
+    pub max_commands: usize,
+    /// SSH host key 路径；空 = <data_dir>/honeypot/hostkey.ed25519
+    /// （fed 证书同款约定：config 只存可选路径，空则落数据目录子目录）
+    pub host_key_path: String,
+}
+
+impl Default for ShellConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            username: "deploy".into(),
+            hostname: "debian-11".into(),
+            max_commands: 50,
+            host_key_path: String::new(),
+        }
+    }
 }
 
 impl Default for HoneypotConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            shell: ShellConfig::default(),
             listeners: vec![
                 ListenerConfig {
                     name: "ssh".into(),
@@ -585,13 +618,15 @@ impl AppConfig {
     ///   [xdp].enabled（未附加时下次装配生效；已附加状态读 composite）、
     ///   [syslog] / [notify] / [exposure] 全部、[ai] 全部、
     ///   [intel]、[fed] 运行期参数（interval_secs）
-    /// - **需重启**：蜜罐监听列表与开关（端口绑定）、API 端口/开关、
+    /// - **需重启**：蜜罐监听列表与开关、假 Shell 配置（端口绑定与会话语义
+    ///   固定于启动）、API 端口/开关、
     ///   捕获开关与模式（后端过滤语义固定于附加时）、XDP 网卡与模式、
     ///   fed 角色与证书材料、[general].data_dir
     pub fn restart_required(old: &AppConfig, new: &AppConfig) -> Vec<&'static str> {
         let mut out = Vec::new();
         if old.honeypot.enabled != new.honeypot.enabled
             || old.honeypot.listeners != new.honeypot.listeners
+            || old.honeypot.shell != new.honeypot.shell
         {
             out.push("蜜罐监听");
         }
@@ -669,6 +704,10 @@ mod tests {
         let mut listener = base.clone();
         listener.honeypot.listeners[0].port = 1234;
         assert_eq!(AppConfig::restart_required(&base, &listener), ["蜜罐监听"]);
+        // 假 Shell 配置变化（0.5.9 H104）：会话语义固定于启动
+        let mut shell = base.clone();
+        shell.honeypot.shell.enabled = true;
+        assert_eq!(AppConfig::restart_required(&base, &shell), ["蜜罐监听"]);
 
         // API 端口
         let mut api = base.clone();
@@ -746,6 +785,8 @@ mod tests {
         assert!(!cfg.notify.enabled);
         // 蜜罐是唯一默认开的数据面（诱捕面，对攻击者暴露是产品语义）
         assert!(cfg.honeypot.enabled);
+        // 假 Shell（中交互）默认关（0.5.9 红线：新能力默认关，显式开启）
+        assert!(!cfg.honeypot.shell.enabled);
         // AI 默认人工确认
         assert!(!cfg.ai.enabled);
         assert!(!cfg.ai.auto_apply);

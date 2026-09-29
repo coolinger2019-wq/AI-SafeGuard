@@ -348,13 +348,14 @@ mod tests {
         let rx = bus.subscribe();
         let cfg = HoneypotConfig {
             enabled: true,
+            shell: Default::default(),
             listeners: vec![ListenerConfig {
                 name: "http".into(),
                 port,
                 kind: "http".into(),
             }],
         };
-        let handle = start(&cfg, bus);
+        let handle = start(&cfg, bus, &std::env::temp_dir());
         let mut conn = None;
         for _ in 0..40 {
             match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
