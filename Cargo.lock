@@ -180,6 +180,7 @@ dependencies = [
  "aisafeguard-firewall",
  "aisafeguard-honeypot",
  "aisafeguard-l7",
+ "aisafeguard-rules",
  "aisafeguard-store",
  "aisafeguard-xdp",
  "anyhow",

@@ -30,7 +30,15 @@ pub struct HttpHint {
 /// 可疑 UA 关键字（明确扫描器/攻击工具，克制名单——普通浏览器与 wget/curl 不在列，
 /// 避免把运维脚本当攻击者）。小写包含匹配。
 pub const SUSPECT_UA: &[&str] = &[
-    "sqlmap", "nikto", "nmap", "masscan", "zgrab", "dirbuster", "gobuster", "acunetix", "wpscan",
+    "sqlmap",
+    "nikto",
+    "nmap",
+    "masscan",
+    "zgrab",
+    "dirbuster",
+    "gobuster",
+    "acunetix",
+    "wpscan",
     "havij",
 ];
 
@@ -59,7 +67,9 @@ pub fn parse_http_hint(text: &str) -> Option<HttpHint> {
         if line.len() > 1024 {
             continue;
         }
-        let Some((k, v)) = line.split_once(':') else { continue };
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
         let v = clean(v.trim(), MAX_HEADER_VALUE);
         if v.is_empty() {
             continue;
@@ -255,10 +265,26 @@ pub fn parse_ja3(data: &[u8]) -> Option<Ja3> {
     let raw = format!(
         "{},{},{},{},{}",
         client_version,
-        ciphers.iter().map(|c| c.to_string()).collect::<Vec<_>>().join("-"),
-        ext_types.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("-"),
-        groups.iter().map(|g| g.to_string()).collect::<Vec<_>>().join("-"),
-        formats.iter().map(|f| f.to_string()).collect::<Vec<_>>().join("-"),
+        ciphers
+            .iter()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join("-"),
+        ext_types
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("-"),
+        groups
+            .iter()
+            .map(|g| g.to_string())
+            .collect::<Vec<_>>()
+            .join("-"),
+        formats
+            .iter()
+            .map(|f| f.to_string())
+            .collect::<Vec<_>>()
+            .join("-"),
     );
     use md5::Digest as _;
     let md5hex = {
@@ -306,14 +332,20 @@ mod tests {
         assert!(parse_http_hint("SSH-2.0-x\r\n").is_none());
         assert!(parse_http_hint("\x01\x02\r\n\r\n").is_none());
         assert!(parse_http_hint("GET\r\n\r\n").is_none());
-        assert!(parse_http_hint("GÉT / HTTP/1.1\r\n\r\n").is_none(), "非 ASCII 方法拒绝");
+        assert!(
+            parse_http_hint("GÉT / HTTP/1.1\r\n\r\n").is_none(),
+            "非 ASCII 方法拒绝"
+        );
     }
 
     #[test]
     fn http_tags_matches_04_output_format() {
         // E3：0.4 core::l7 的标签格式原样保留（旧文案可解释）
         let tags = http_tags("GET /admin/config HTTP/1.1\r\nUser-Agent: sqlmap/1.7\r\n\r\n");
-        assert_eq!(tags, ["http:GET", "path:/admin/config", "ua-suspect:sqlmap"]);
+        assert_eq!(
+            tags,
+            ["http:GET", "path:/admin/config", "ua-suspect:sqlmap"]
+        );
         let tags = http_tags("GET /a/b/c?x=1 HTTP/1.1\r\n\r\n");
         assert_eq!(tags, ["http:GET", "path:/a/b"]);
         assert!(http_tags("SSH-2.0-x\r\n").is_empty());
@@ -333,7 +365,10 @@ mod tests {
     fn http_request_complete_semantics() {
         assert!(http_request_complete(b"GET / HTTP/1.1\r\nHost: a\r\n\r\n"));
         assert!(!http_request_complete(b"GET / HTTP/1.1\r\n"));
-        assert!(http_request_complete(&[0u8; 8192]), "超上限按完整处理（防堆积）");
+        assert!(
+            http_request_complete(&[0u8; 8192]),
+            "超上限按完整处理（防堆积）"
+        );
     }
 
     /// E4 已知向量：手工构造最小 ClientHello（version 771、单 cipher 47、
@@ -389,11 +424,13 @@ mod tests {
     fn parse_http_hint_fuzz_never_panics() {
         let mut state = 0x2545F4914F6CDD1Du64;
         for _ in 0..20_000u32 {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let len = (state >> 33) as usize % 96;
             let bytes: Vec<u8> = (0..len)
                 .map(|j| ((state.wrapping_add(j as u64) >> 33) % 256) as u8)
-                .chain([b'\r', b'\n', b'\r', b'\n'])
+                .chain(*b"\r\n\r\n")
                 .collect();
             let text = String::from_utf8_lossy(&bytes).to_string();
             if let Some(h) = parse_http_hint(&text) {

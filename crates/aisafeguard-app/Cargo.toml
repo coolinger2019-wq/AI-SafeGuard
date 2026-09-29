@@ -17,6 +17,7 @@ aisafeguard-ai.workspace = true
 aisafeguard-detect.workspace = true
 aisafeguard-xdp.workspace = true
 aisafeguard-l7.workspace = true
+aisafeguard-rules.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

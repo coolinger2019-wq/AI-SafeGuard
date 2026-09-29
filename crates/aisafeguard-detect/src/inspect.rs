@@ -11,10 +11,10 @@ use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 
 use aisafeguard_core::config::CaptureConfig;
-use etherparse::{NetSlice, SlicedPacket, TransportSlice, TcpSlice};
+use etherparse::{NetSlice, SlicedPacket, TcpSlice, TransportSlice};
 
 use crate::flow::{FlowKey, FlowTable};
-use crate::reasm::{StreamReassembler, STREAM_CAP};
+use crate::reasm::{STREAM_CAP, StreamReassembler};
 
 /// 证据里载荷摘要的最大字符数。
 const EVIDENCE_SNIPPET_CHARS: usize = 120;
@@ -48,6 +48,8 @@ pub struct CapturePipeline {
     fired_at: HashMap<String, i64>,
     /// full 模式下的流重组缓存（只服务取证，容量有界）
     reasm: HashMap<FlowKey, StreamReassembler>,
+    /// 本帧有新载荷产出的流（规则子集匹配的扫描清单，take_dirty 取走即清）
+    dirty: Vec<FlowKey>,
 }
 
 impl CapturePipeline {
@@ -114,22 +116,38 @@ impl CapturePipeline {
             }
             out
         } else {
-            // 非 SYN 段：流统计（full 模式下载荷进重组缓存供取证）
+            // 非 SYN 段：流统计（full 模式下载荷进重组缓存供取证/规则匹配）
             self.table.observe_segment(ts, &key, tcp.payload().len());
             if cfg.mode == "full" && !tcp.payload().is_empty() && self.reasm.len() < REASM_MAP_CAP {
-                self.reasm
+                let pushed = self
+                    .reasm
                     .entry(key.clone())
                     .or_insert_with(|| StreamReassembler::new(STREAM_CAP))
                     .push(tcp.sequence_number(), tcp.payload());
+                if pushed {
+                    self.dirty.push(key.clone());
+                }
             }
             Vec::new()
         }
+    }
+
+    /// 取走本批「有新载荷产出」的流（0.5.0 F4：规则子集匹配的扫描清单）。
+    pub fn take_dirty(&mut self) -> Vec<FlowKey> {
+        std::mem::take(&mut self.dirty)
+    }
+
+    /// 流方向判定：该方向上是否观测到纯 SYN（client→server 即 SYN 方向）。
+    /// 未知（捕获晚于握手）时由调用方决定缺省方向。
+    pub fn observed_syn(&self, key: &FlowKey) -> bool {
+        self.table.observed_syn(key)
     }
 
     /// 周期回收：空闲流、重组缓存、空的检测器序列。
     pub fn sweep(&mut self, now: i64, cfg: &CaptureConfig) {
         self.table.sweep(now, cfg.flow_idle_secs);
         self.reasm.clear();
+        self.dirty.clear();
         self.scan.retain(|_, q| !q.is_empty());
         self.flood.retain(|_, q| !q.is_empty());
     }
@@ -159,7 +177,13 @@ impl CapturePipeline {
         if (ports.len() as u32) < cfg.scan_distinct_ports {
             return None;
         }
-        if !should_fire(&mut self.fired_at, "scan", &src.to_string(), ts, cfg.window_secs) {
+        if !should_fire(
+            &mut self.fired_at,
+            "scan",
+            &src.to_string(),
+            ts,
+            cfg.window_secs,
+        ) {
             return None;
         }
         Some(FlowDetection {
@@ -186,7 +210,11 @@ impl CapturePipeline {
         let hits = match self.flood.get_mut(&k) {
             Some(q) => {
                 q.push_back(ts);
-                while q.front().map(|t| ts - *t > cfg.window_secs).unwrap_or(false) {
+                while q
+                    .front()
+                    .map(|t| ts - *t > cfg.window_secs)
+                    .unwrap_or(false)
+                {
                     q.pop_front();
                 }
                 q.len()
@@ -365,7 +393,10 @@ mod tests {
         let t0 = 1_000_000;
         let src = "203.0.113.7";
         assert!(p.on_frame(t0, &syn_frame(src, 22, 40000), &c).is_empty());
-        assert!(p.on_frame(t0 + 1, &syn_frame(src, 80, 40001), &c).is_empty());
+        assert!(
+            p.on_frame(t0 + 1, &syn_frame(src, 80, 40001), &c)
+                .is_empty()
+        );
         let dets = p.on_frame(t0 + 2, &syn_frame(src, 443, 40002), &c);
         assert_eq!(dets.len(), 1);
         assert_eq!(dets[0].kind, "scan");
@@ -418,11 +449,24 @@ mod tests {
         let mut p = CapturePipeline::new(&cfg());
         let c = cfg();
         let t0 = 4_000_000;
-        assert!(p.on_frame(t0, &syn_frame("203.0.113.8", 22, 41000), &c).is_empty());
-        assert!(p.on_frame(t0 + 1, &syn_frame("203.0.113.8", 80, 41001), &c).is_empty());
-        assert_eq!(p.on_frame(t0 + 2, &syn_frame("203.0.113.8", 443, 41002), &c).len(), 1);
+        assert!(
+            p.on_frame(t0, &syn_frame("203.0.113.8", 22, 41000), &c)
+                .is_empty()
+        );
+        assert!(
+            p.on_frame(t0 + 1, &syn_frame("203.0.113.8", 80, 41001), &c)
+                .is_empty()
+        );
+        assert_eq!(
+            p.on_frame(t0 + 2, &syn_frame("203.0.113.8", 443, 41002), &c)
+                .len(),
+            1
+        );
         // 窗口内继续扫不重复触发
-        assert!(p.on_frame(t0 + 3, &syn_frame("203.0.113.8", 3389, 41003), &c).is_empty());
+        assert!(
+            p.on_frame(t0 + 3, &syn_frame("203.0.113.8", 3389, 41003), &c)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -431,9 +475,14 @@ mod tests {
         let mut c = cfg();
         c.enabled = false;
         for i in 0..10 {
-            assert!(p
-                .on_frame(1_000_000 + i, &syn_frame("203.0.113.7", 22 + i as u16, 40000), &c)
-                .is_empty());
+            assert!(
+                p.on_frame(
+                    1_000_000 + i,
+                    &syn_frame("203.0.113.7", 22 + i as u16, 40000),
+                    &c
+                )
+                .is_empty()
+            );
         }
     }
 

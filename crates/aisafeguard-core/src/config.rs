@@ -196,6 +196,8 @@ pub struct DetectConfig {
     pub ttl_secs: i64,
     /// 采样捕获（检测平台 MVP，0.3 第二批）：真实流量观测。
     pub capture: CaptureConfig,
+    /// 开放规则子集引擎（0.5.0 Batch F，规范见 docs/RULESET_SUBSET.md）。
+    pub rules: RulesConfig,
 }
 
 impl Default for DetectConfig {
@@ -208,6 +210,33 @@ impl Default for DetectConfig {
             window_secs: 60,
             ttl_secs: 1800,
             capture: CaptureConfig::default(),
+            rules: RulesConfig::default(),
+        }
+    }
+}
+
+/// Suricata/ET 风格规则子集（0.5.0 Batch F）。命中只产事件；是否自动封禁
+/// 由本段 auto_block 独立决定（默认 false 只告警——F6 与快路径 auto_block 解耦）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RulesConfig {
+    /// 默认关闭：规则匹配逐窗执行，用户显式开启
+    pub enabled: bool,
+    /// 本地规则包路径（单文件）；空 = 不加载。默认不内置任何规则包
+    pub path: String,
+    /// 规则命中自动封禁（仍受内网保护 + 误报抑制约束）
+    pub auto_block: bool,
+    /// 规则条数上限（整包校验）
+    pub max_rules: u32,
+}
+
+impl Default for RulesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: String::new(),
+            auto_block: false,
+            max_rules: 5000,
         }
     }
 }
@@ -456,8 +485,8 @@ impl AppConfig {
     /// 0.2 迁移：0.1 配置里明文的 ai.api_key 一次性搬进凭据管理器并从文件删除。
     /// 这是数据搬迁，不是兼容层——迁移完成后配置里不再允许出现 api_key 字段。
     fn parse_with_migration(path: &Path, raw: &str) -> Result<Self> {
-        let mut value: toml::Value = toml::from_str(raw)
-            .map_err(|e| Error::Config(format!("解析 {path:?} 失败: {e}")))?;
+        let mut value: toml::Value =
+            toml::from_str(raw).map_err(|e| Error::Config(format!("解析 {path:?} 失败: {e}")))?;
         let legacy_key = value
             .get("ai")
             .and_then(|ai| ai.get("api_key"))
@@ -468,12 +497,7 @@ impl AppConfig {
             secrets::set_ai_key(&legacy_key)?;
             tracing::info!("已将配置文件中的明文 API Key 迁移到凭据管理器");
         }
-        if legacy_key.is_empty()
-            && value
-                .get("ai")
-                .and_then(|ai| ai.get("api_key"))
-                .is_some()
-        {
+        if legacy_key.is_empty() && value.get("ai").and_then(|ai| ai.get("api_key")).is_some() {
             // 空 key 也清掉，让新结构能解析
             if let Some(t) = value.get_mut("ai").and_then(|v| v.as_table_mut()) {
                 t.remove("api_key");
@@ -538,7 +562,8 @@ impl AppConfig {
     ///   fed 角色与证书材料、[general].data_dir
     pub fn restart_required(old: &AppConfig, new: &AppConfig) -> Vec<&'static str> {
         let mut out = Vec::new();
-        if old.honeypot.enabled != new.honeypot.enabled || old.honeypot.listeners != new.honeypot.listeners
+        if old.honeypot.enabled != new.honeypot.enabled
+            || old.honeypot.listeners != new.honeypot.listeners
         {
             out.push("蜜罐监听");
         }
@@ -625,7 +650,10 @@ mod tests {
         // 捕获开关/模式
         let mut capture = base.clone();
         capture.detect.capture.mode = "full".into();
-        assert_eq!(AppConfig::restart_required(&base, &capture), ["流量采样捕获"]);
+        assert_eq!(
+            AppConfig::restart_required(&base, &capture),
+            ["流量采样捕获"]
+        );
 
         // XDP
         let mut xdp = base.clone();

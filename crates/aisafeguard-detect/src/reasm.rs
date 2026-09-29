@@ -103,11 +103,7 @@ impl StreamReassembler {
         self.next = Some(cursor);
         // cursor 已越过的缓存段永远不会再被消费（重复段先于本段到达的残留），
         // 按数值序清掉——环回绕时数值序与逻辑序的偏差仍在 TCP 窗口量级内，安全。
-        let stale: Vec<u32> = self
-            .pending
-            .range(..cursor)
-            .map(|(k, _)| *k)
-            .collect();
+        let stale: Vec<u32> = self.pending.range(..cursor).map(|(k, _)| *k).collect();
         for k in stale {
             self.pending.remove(&k);
         }

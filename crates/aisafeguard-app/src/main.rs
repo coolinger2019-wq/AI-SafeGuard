@@ -1,7 +1,7 @@
 mod api;
 mod console;
-mod fed;
 mod engine;
+mod fed;
 mod forward;
 mod gui;
 #[cfg(windows)]
@@ -56,7 +56,9 @@ WantedBy=multi-user.target
         .unwrap_or(false);
     if !running {
         println!("unit 文件已写入 /etc/systemd/system/aisafeguard.service");
-        println!("⚠ systemd 未运行：启用后执行 sudo systemctl daemon-reload && sudo systemctl enable --now aisafeguard");
+        println!(
+            "⚠ systemd 未运行：启用后执行 sudo systemctl daemon-reload && sudo systemctl enable --now aisafeguard"
+        );
         return Ok(());
     }
     let ok = std::process::Command::new("systemctl")
@@ -139,9 +141,13 @@ fn main() -> anyhow::Result<()> {
                     Some("issue-cert") => {
                         i += 1;
                         match args.get(i) {
-                            Some(node) => command = Some(("fed-issue-cert".into(), Some(node.clone()))),
+                            Some(node) => {
+                                command = Some(("fed-issue-cert".into(), Some(node.clone())))
+                            }
                             None => {
-                                eprintln!("用法: aisafeguard fed issue-cert <node> [--san <dns|ip> ...]");
+                                eprintln!(
+                                    "用法: aisafeguard fed issue-cert <node> [--san <dns|ip> ...]"
+                                );
                                 std::process::exit(2);
                             }
                         }
@@ -149,7 +155,9 @@ fn main() -> anyhow::Result<()> {
                     Some("revoke") => {
                         i += 1;
                         match args.get(i) {
-                            Some(target) => command = Some(("fed-revoke".into(), Some(target.clone()))),
+                            Some(target) => {
+                                command = Some(("fed-revoke".into(), Some(target.clone())))
+                            }
                             None => {
                                 eprintln!("用法: aisafeguard fed revoke <节点名|指纹> [原因]");
                                 std::process::exit(2);
@@ -171,7 +179,8 @@ fn main() -> anyhow::Result<()> {
                         match (args.get(i), args.get(i + 1)) {
                             (Some(node), Some(fp)) => {
                                 i += 1;
-                                command = Some(("fed-expect".into(), Some(format!("{node}\u{1}{fp}"))));
+                                command =
+                                    Some(("fed-expect".into(), Some(format!("{node}\u{1}{fp}"))));
                             }
                             _ => {
                                 eprintln!("用法: aisafeguard fed expect <node> <指纹>");
@@ -180,7 +189,9 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                     _ => {
-                        eprintln!("用法: aisafeguard fed init-ca | issue-cert <node> [--san ...] | revoke <node|fp> [原因] | expect <node> <fp> | audit <out.json>");
+                        eprintln!(
+                            "用法: aisafeguard fed init-ca | issue-cert <node> [--san ...] | revoke <node|fp> [原因] | expect <node> <fp> | audit <out.json>"
+                        );
                         std::process::exit(2);
                     }
                 }
@@ -202,8 +213,12 @@ fn main() -> anyhow::Result<()> {
                         command = Some((format!("service-{w}"), None))
                     }
                     _ => {
-                        eprintln!("用法: aisafeguard service install|uninstall|start|stop (Windows)");
-                        eprintln!("      aisafeguard service install-systemd        (Linux，需 root)");
+                        eprintln!(
+                            "用法: aisafeguard service install|uninstall|start|stop (Windows)"
+                        );
+                        eprintln!(
+                            "      aisafeguard service install-systemd        (Linux，需 root)"
+                        );
                         std::process::exit(2);
                     }
                 }
@@ -211,9 +226,13 @@ fn main() -> anyhow::Result<()> {
             other => {
                 eprintln!("未知参数: {other}");
                 eprintln!("用法: aisafeguard [--headless] [--config <path>] [--data-dir <path>]");
-                eprintln!("      aisafeguard verify-log | export-events <out.jsonl> | --print-token | --version");
+                eprintln!(
+                    "      aisafeguard verify-log | export-events <out.jsonl> | --print-token | --version"
+                );
                 eprintln!("      aisafeguard service install|uninstall|start|stop   (需管理员)");
-                eprintln!("      aisafeguard --service                              (由服务管理器调用)");
+                eprintln!(
+                    "      aisafeguard --service                              (由服务管理器调用)"
+                );
                 std::process::exit(2);
             }
         }
@@ -225,7 +244,10 @@ fn main() -> anyhow::Result<()> {
         match cmd.as_str() {
             "verify-log" => return cmd_verify_log(resolve_cfg(cfg_path, data_dir)?.1),
             "export-events" => return cmd_export_events(resolve_cfg(cfg_path, data_dir)?, arg),
-            "service-install" | "service-uninstall" | "service-start" | "service-stop"
+            "service-install"
+            | "service-uninstall"
+            | "service-start"
+            | "service-stop"
             | "service-install-systemd" => {
                 #[cfg(windows)]
                 {
@@ -264,13 +286,19 @@ fn main() -> anyhow::Result<()> {
                 #[cfg(windows)]
                 return Ok(());
             }
-            "fed-init-ca" => return fed::cmd_init_ca(&resolve_cfg(cfg_path, data_dir)?.0.data_dir()),
+            "fed-init-ca" => {
+                return fed::cmd_init_ca(&resolve_cfg(cfg_path, data_dir)?.0.data_dir());
+            }
             "fed-issue-cert" => {
                 let Some(node) = arg else {
                     eprintln!("用法: aisafeguard fed issue-cert <node> [--san <dns|ip> ...]");
                     std::process::exit(2);
                 };
-                return fed::cmd_issue_cert(&resolve_cfg(cfg_path, data_dir)?.0.data_dir(), &node, &fed_sans);
+                return fed::cmd_issue_cert(
+                    &resolve_cfg(cfg_path, data_dir)?.0.data_dir(),
+                    &node,
+                    &fed_sans,
+                );
             }
             "fed-revoke" => {
                 let Some(target) = arg else {
@@ -278,7 +306,11 @@ fn main() -> anyhow::Result<()> {
                     std::process::exit(2);
                 };
                 let reason = fed_sans.into_iter().next().unwrap_or_default();
-                return match fed::cmd_revoke(&resolve_cfg(cfg_path, data_dir)?.0.data_dir(), &target, &reason) {
+                return match fed::cmd_revoke(
+                    &resolve_cfg(cfg_path, data_dir)?.0.data_dir(),
+                    &target,
+                    &reason,
+                ) {
                     Ok(fp) => {
                         println!("✓ 已吊销 {fp}（协调者立即拒绝其连接）");
                         Ok(())
@@ -287,7 +319,7 @@ fn main() -> anyhow::Result<()> {
                         eprintln!("✗ {e}");
                         std::process::exit(1);
                     }
-                }
+                };
             }
             "fed-audit" => {
                 let Some(out) = arg else {
@@ -330,7 +362,10 @@ fn main() -> anyhow::Result<()> {
         let (cfg, cfg_path) = resolve_cfg(cfg_path, data_dir)?;
         let bundle = assemble_engine(cfg, cfg_path)?;
         println!("AI-SafeGuard {VERSION} headless 运行中");
-        println!("  API:      http://127.0.0.1:{}  (Bearer token: 凭据管理器 AISafeGuard/api-token，或 --print-token)", bundle.cfg.api.port);
+        println!(
+            "  API:      http://127.0.0.1:{}  (Bearer token: 凭据管理器 AISafeGuard/api-token，或 --print-token)",
+            bundle.cfg.api.port
+        );
         println!("  数据目录: {:?}", bundle.cfg.data_dir());
         println!("  Ctrl+C 退出");
         rt_wait_ctrl_c(&bundle)?;
@@ -358,7 +393,10 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-fn resolve_cfg(cfg_path: Option<PathBuf>, data_dir: Option<PathBuf>) -> anyhow::Result<(AppConfig, PathBuf)> {
+fn resolve_cfg(
+    cfg_path: Option<PathBuf>,
+    data_dir: Option<PathBuf>,
+) -> anyhow::Result<(AppConfig, PathBuf)> {
     let cfg_path = cfg_path.unwrap_or_else(AppConfig::default_path);
     let (mut cfg, created) = AppConfig::load(&cfg_path)?;
     if let Some(d) = data_dir {
@@ -376,7 +414,10 @@ fn cmd_verify_log(cfg_path: PathBuf) -> anyhow::Result<()> {
     let store = Store::open(&cfg.db_path())?;
     let report = store.verify_chain()?;
     if report.ok {
-        println!("✓ 哈希链完整：{}/{} 条事件校验通过", report.rows, report.rows);
+        println!(
+            "✓ 哈希链完整：{}/{} 条事件校验通过",
+            report.rows, report.rows
+        );
     } else {
         eprintln!(
             "✗ 哈希链损坏：第 {} 条事件校验失败（共检查 {} 条）——事件可能被篡改或删除",
@@ -404,7 +445,8 @@ pub fn run_engine_until_stop(
     stop: &std::sync::mpsc::Receiver<()>,
     set_running: &dyn Fn(),
 ) -> anyhow::Result<()> {
-    let data_dir = service::service_data_dir().ok_or_else(|| anyhow::anyhow!("PROGRAMDATA 环境变量不可用"))?;
+    let data_dir =
+        service::service_data_dir().ok_or_else(|| anyhow::anyhow!("PROGRAMDATA 环境变量不可用"))?;
     std::fs::create_dir_all(&data_dir)?;
     let cfg_path = data_dir.join("config.toml");
     let (mut cfg, _) = AppConfig::load(&cfg_path)?;
@@ -456,7 +498,10 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
                 if !cfg.xdp.valid_mode() {
                     bus.publish(SecurityEvent::engine(
                         "error",
-                        format!("XDP 模式非法：{}（可用 skb | native），快速层未启用", cfg.xdp.mode),
+                        format!(
+                            "XDP 模式非法：{}（可用 skb | native），快速层未启用",
+                            cfg.xdp.mode
+                        ),
                     ));
                     base
                 } else {
@@ -534,6 +579,7 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
         firewall: firewall.clone(),
         detect: Arc::new(aisafeguard_detect::FreqEngine::new()),
         capture: Arc::new(engine::CaptureState::default()),
+        rules: Arc::new(engine::RulesState::default()),
         rt: rt.handle().clone(),
         started: Instant::now(),
         ai_running: Arc::new(AtomicBool::new(false)),
@@ -545,6 +591,9 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
     // 快路径频次检测 + TTL 自动解封
     engine::spawn_detect_task(&engine);
     engine::spawn_expiry_janitor(&engine);
+
+    // 规则子集引擎（0.5.0 Batch F，默认关闭）：启动加载 + 文件签名变化整包热重载
+    engine::spawn_rules_task(&engine);
 
     // 采样捕获（检测平台 MVP，默认关闭；不可用时只降级并留痕）
     engine::spawn_capture_task(&engine);
@@ -561,7 +610,10 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
     if cfg.intel.enabled {
         engine::spawn_intel_task(&engine);
     } else {
-        bus.publish(SecurityEvent::engine("info", "威胁情报未启用（[intel].enabled）"));
+        bus.publish(SecurityEvent::engine(
+            "info",
+            "威胁情报未启用（[intel].enabled）",
+        ));
     }
 
     // 启动时把 DB 中已启用的来源 IP 封禁同步回防火墙
@@ -576,7 +628,10 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
                 } else {
                     aisafeguard_firewall::Direction::Out
                 },
-                protocol: r.protocol.parse().unwrap_or(aisafeguard_firewall::Protocol::Any),
+                protocol: r
+                    .protocol
+                    .parse()
+                    .unwrap_or(aisafeguard_firewall::Protocol::Any),
                 remote_ip: r.remote_ip.parse::<std::net::IpAddr>().ok(),
                 local_port: r.local_port,
                 note: r.note.clone(),
@@ -598,7 +653,10 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
         if !cfg.fed.valid_role() || cfg.fed.node.is_empty() {
             bus.publish(SecurityEvent::engine(
                 "error",
-                format!("组织协同配置无效：role={} node={:?}", cfg.fed.role, cfg.fed.node),
+                format!(
+                    "组织协同配置无效：role={} node={:?}",
+                    cfg.fed.role, cfg.fed.node
+                ),
             ));
         } else {
             match cfg.fed.role.as_str() {
@@ -645,7 +703,10 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
                     } else {
                         bus.publish(SecurityEvent::engine(
                             "info",
-                            format!("组织协同：agent {} → {}（mTLS）", cfg.fed.node, cfg.fed.coordinator),
+                            format!(
+                                "组织协同：agent {} → {}（mTLS）",
+                                cfg.fed.node, cfg.fed.coordinator
+                            ),
                         ));
                         fed::spawn_fed_agent_task(&engine);
                     }
@@ -662,7 +723,11 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
             firewall.backend(),
             firewall.is_elevated(),
             engine.honeypot.listeners.len(),
-            if cfg.detect.enabled { "开启" } else { "关闭" },
+            if cfg.detect.enabled {
+                "开启"
+            } else {
+                "关闭"
+            },
         ),
     ));
 
@@ -727,7 +792,9 @@ fn load_or_create_token(data_dir: &Path) -> anyhow::Result<String> {
             uuid::Uuid::new_v4().simple()
         );
         std::fs::write(&p, &token)?;
-        tracing::info!("API token 写入 {p:?}（Linux 0.2 无凭据管理器后端，请确保目录仅本用户/管理员可读）");
+        tracing::info!(
+            "API token 写入 {p:?}（Linux 0.2 无凭据管理器后端，请确保目录仅本用户/管理员可读）"
+        );
         Ok(token)
     }
 }
@@ -750,6 +817,9 @@ fn init_tracing(data_dir: &Path) -> anyhow::Result<()> {
         .with_writer(writer)
         .with_ansi(false);
 
-    tracing_subscriber::registry().with(filter()).with(file_layer).init();
+    tracing_subscriber::registry()
+        .with(filter())
+        .with(file_layer)
+        .init();
     Ok(())
 }

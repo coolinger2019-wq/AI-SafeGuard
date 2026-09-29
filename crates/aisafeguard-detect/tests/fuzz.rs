@@ -4,8 +4,8 @@
 //! 输出判定数有界（每次 observe 最多 2 条：scan + bruteforce）。
 
 use aisafeguard_core::config::DetectConfig;
-use aisafeguard_detect::capture::{l3_payload, passes_mode_filter};
 use aisafeguard_detect::FreqEngine;
+use aisafeguard_detect::capture::{l3_payload, passes_mode_filter};
 use aisafeguard_detect::reasm::StreamReassembler;
 use std::net::IpAddr;
 
@@ -32,11 +32,17 @@ fn fuzz_freq_engine_never_panics_and_bounds_output() {
             window_secs: 1 + (xorshift(&mut state) % 600) as i64,
             ttl_secs: 60,
             capture: Default::default(),
+            rules: Default::default(),
         };
         // 混合合法/畸形来源 IP
         let raw = xorshift(&mut state);
         let ip = match raw % 4 {
-            0 => IpAddr::from([1 + (raw >> 8) as u8 % 254, (raw >> 16) as u8, (raw >> 24) as u8, (raw >> 32) as u8]),
+            0 => IpAddr::from([
+                1 + (raw >> 8) as u8 % 254,
+                (raw >> 16) as u8,
+                (raw >> 24) as u8,
+                (raw >> 32) as u8,
+            ]),
             1 => IpAddr::from([127, 0, 0, 1]),
             2 => IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
             _ => IpAddr::from([192, 168, (raw >> 16) as u8, (raw >> 24) as u8]),
@@ -64,7 +70,9 @@ fn fuzz_reasm_stream_is_ordered_prefix() {
     let mut state = 0xDEAD_BEEF_CAFE_0001u64;
     for round in 0..20_000u64 {
         let len = 1 + (xorshift(&mut state) % 512) as usize;
-        let src: Vec<u8> = (0..len).map(|_| (xorshift(&mut state) % 256) as u8).collect();
+        let src: Vec<u8> = (0..len)
+            .map(|_| (xorshift(&mut state) % 256) as u8)
+            .collect();
         let mut r = StreamReassembler::new(4096);
 
         // 切成随机大小的段（offset o → seq 1000+o；ISN=999，SYN 占 1 序号）
@@ -115,7 +123,9 @@ fn fuzz_l3_payload_returns_suffix_of_input() {
     for round in 0..50_000u64 {
         // 随机长度（含超短帧）+ 偏向合法帧头的字节分布
         let len = (xorshift(&mut state) % 80) as usize;
-        let mut frame: Vec<u8> = (0..len).map(|_| (xorshift(&mut state) % 256) as u8).collect();
+        let mut frame: Vec<u8> = (0..len)
+            .map(|_| (xorshift(&mut state) % 256) as u8)
+            .collect();
         if len >= 14 && xorshift(&mut state).is_multiple_of(2) {
             // 一半概率放进合法 ethertype，覆盖直通/丢弃两条路径
             let et = match xorshift(&mut state) % 3 {

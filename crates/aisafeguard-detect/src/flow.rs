@@ -103,6 +103,14 @@ impl FlowTable {
         n
     }
 
+    /// 该流方向上是否观测到过纯 SYN（0.5.0 F4：判定 client→server 方向）。
+    pub fn observed_syn(&self, key: &FlowKey) -> bool {
+        self.flows
+            .get(key)
+            .map(|s| s.syn_count > 0)
+            .unwrap_or(false)
+    }
+
     fn push_order(&mut self, key: FlowKey) {
         self.order.push_back(key);
         while self.order.len() > self.cap {
@@ -159,12 +167,15 @@ mod tests {
     fn cap_evicts_oldest() {
         let mut t = FlowTable::new(64); // 下限 64
         for i in 0..80u16 {
-            t.observe_syn(100 + i as i64, FlowKey {
-                src: "203.0.113.7".parse().unwrap(),
-                dst: "10.0.0.1".parse().unwrap(),
-                src_port: 40000,
-                dst_port: i,
-            });
+            t.observe_syn(
+                100 + i as i64,
+                FlowKey {
+                    src: "203.0.113.7".parse().unwrap(),
+                    dst: "10.0.0.1".parse().unwrap(),
+                    src_port: 40000,
+                    dst_port: i,
+                },
+            );
         }
         assert_eq!(t.len(), 64);
         // 最旧的（端口 0-15）已被驱逐

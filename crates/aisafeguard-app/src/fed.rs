@@ -21,10 +21,10 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use base64::Engine as _;
 
 use crate::engine::EngineHandle;
 use aisafeguard_core::event::SecurityEvent;
@@ -70,7 +70,11 @@ pub fn fed_router(engine: Arc<EngineHandle>) -> Router {
 }
 
 fn err(e: impl std::fmt::Display) -> Response {
-    (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response()
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "error": e.to_string() })),
+    )
+        .into_response()
 }
 
 fn forbidden(node: &str) -> Response {
@@ -236,7 +240,10 @@ async fn fed_intel_post(
     let n = state.engine.store.upsert_intel(&upserts).unwrap_or(0);
     state.engine.bus.publish(SecurityEvent::engine(
         "info",
-        format!("组织情报同步：来自 {} 的 {} 条（仅标注，不自动封禁）", body.node, n),
+        format!(
+            "组织情报同步：来自 {} 的 {} 条（仅标注，不自动封禁）",
+            body.node, n
+        ),
     ));
     Json(json!({ "ok": true, "accepted": n })).into_response()
 }
@@ -333,13 +340,15 @@ pub fn cmd_init_ca(data_dir: &Path) -> anyhow::Result<()> {
     let ca_pem = dir.join("ca.pem");
     let ca_key = dir.join("ca-key.pem");
     if ca_pem.exists() || ca_key.exists() {
-        anyhow::bail!("组织 CA 已存在（{}），避免覆盖；确需重建请先手动删除", ca_pem.display());
+        anyhow::bail!(
+            "组织 CA 已存在（{}），避免覆盖；确需重建请先手动删除",
+            ca_pem.display()
+        );
     }
     let mut params = rcgen::CertificateParams::new(vec![])?;
-    params.distinguished_name.push(
-        rcgen::DnType::CommonName,
-        "AI-SafeGuard Organization CA",
-    );
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "AI-SafeGuard Organization CA");
     params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
     params.key_usages = vec![
         rcgen::KeyUsagePurpose::DigitalSignature,
@@ -374,9 +383,7 @@ pub fn cmd_issue_cert(data_dir: &Path, node: &str, sans: &[String]) -> anyhow::R
     // 加载 CA：from_ca_cert_pem 提取签发所需元数据（DN/密钥标识法）；
     // signed_by 的 issuer 形参是 Certificate——用同一参数+同一密钥重建 issuer
     // 元数据（SKI/AKI 由公钥确定性派生，DN 从文件读取；重建的 DER 不落盘）
-    let ca_params = rcgen::CertificateParams::from_ca_cert_pem(
-        &std::fs::read_to_string(&ca_pem)?,
-    )?;
+    let ca_params = rcgen::CertificateParams::from_ca_cert_pem(&std::fs::read_to_string(&ca_pem)?)?;
     let ca_key = rcgen::KeyPair::from_pem(&std::fs::read_to_string(&ca_key_pem)?)?;
     let issuer_cert = ca_params.clone().self_signed(&ca_key)?;
 
@@ -387,11 +394,15 @@ pub fn cmd_issue_cert(data_dir: &Path, node: &str, sans: &[String]) -> anyhow::R
         if let Ok(ip) = s.parse::<std::net::IpAddr>() {
             san_values.push(rcgen::SanType::IpAddress(ip));
         } else {
-            san_values.push(rcgen::SanType::DnsName(rcgen::Ia5String::try_from(s.clone())?));
+            san_values.push(rcgen::SanType::DnsName(rcgen::Ia5String::try_from(
+                s.clone(),
+            )?));
         }
     }
     let mut params = rcgen::CertificateParams::new(vec![])?;
-    params.distinguished_name.push(rcgen::DnType::CommonName, node);
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, node);
     params.subject_alt_names = san_values;
     params.is_ca = rcgen::IsCa::NoCa;
     params.extended_key_usages = vec![
@@ -547,8 +558,13 @@ pub fn cmd_audit(data_dir: &Path, out: &Path, window_secs: i64) -> anyhow::Resul
         "recent_fed_events": fed_events,
     });
     std::fs::write(out, serde_json::to_string_pretty(&doc)?)?;
-    println!("✓ 协同审计已导出 {}（成员 {} · 吊销 {} · 近期协同事件 {}）",
-        out.display(), members.len(), revocations.len(), fed_events.len());
+    println!(
+        "✓ 协同审计已导出 {}（成员 {} · 吊销 {} · 近期协同事件 {}）",
+        out.display(),
+        members.len(),
+        revocations.len(),
+        fed_events.len()
+    );
     Ok(())
 }
 
@@ -581,7 +597,12 @@ pub fn resolve_fed_path(data_dir: &Path, configured: &str, default_name: &str) -
 
 /// 节点证书对（cert+key）解析：显式路径优先；否则 cert.pem/key.pem，
 /// 其次 issue-cert 的产出位置 certs/<node>.pem（协调者本机自签自用的自然布局）。
-fn resolve_node_pair(data_dir: &Path, cert_cfg: &str, key_cfg: &str, node: &str) -> (PathBuf, PathBuf) {
+fn resolve_node_pair(
+    data_dir: &Path,
+    cert_cfg: &str,
+    key_cfg: &str,
+    node: &str,
+) -> (PathBuf, PathBuf) {
     let cert = match resolve_fed_path(data_dir, cert_cfg, "cert.pem") {
         p if p.exists() || !cert_cfg.is_empty() => p,
         _ => certs_dir(data_dir).join(format!("{node}.pem")),
@@ -647,11 +668,14 @@ pub async fn serve_coordinator(engine: Arc<EngineHandle>) -> Result<(), String> 
     let cfg = engine.config().fed;
     let data_dir = engine.config().general.data_dir.clone();
     let ca_path = resolve_fed_path(&data_dir, &cfg.ca_path, "ca.pem");
-    let (cert_path, key_path) = resolve_node_pair(&data_dir, &cfg.cert_path, &cfg.key_path, &cfg.node);
+    let (cert_path, key_path) =
+        resolve_node_pair(&data_dir, &cfg.cert_path, &cfg.key_path, &cfg.node);
 
     let mut roots = rustls::RootCertStore::empty();
     for c in read_pem_certs(&ca_path)? {
-        roots.add(c).map_err(|e| format!("组织 CA 加入信任库失败: {e}"))?;
+        roots
+            .add(c)
+            .map_err(|e| format!("组织 CA 加入信任库失败: {e}"))?;
     }
     let verifier = rustls::server::WebPkiClientVerifier::builder(roots.into())
         .build()
@@ -675,10 +699,7 @@ pub async fn serve_coordinator(engine: Arc<EngineHandle>) -> Result<(), String> 
     let app = fed_router(engine.clone());
     let (audit_bus, audit_dir) = {
         let eng = engine.clone();
-        (
-            eng.bus.clone(),
-            eng.config().general.data_dir.clone(),
-        )
+        (eng.bus.clone(), eng.config().general.data_dir.clone())
     };
 
     loop {
@@ -703,17 +724,20 @@ pub async fn serve_coordinator(engine: Arc<EngineHandle>) -> Result<(), String> 
                 .unwrap_or_default();
             // 吊销检查（0.4.0 C1）：立即生效（每次连接读文件），命中拒连并留审计事件
             if let Some(reason) = check_not_revoked(&data_dir, &cert_fp) {
-                bus.publish(SecurityEvent::engine("warn", format!("协同连接被拒：{reason}")));
+                bus.publish(SecurityEvent::engine(
+                    "warn",
+                    format!("协同连接被拒：{reason}"),
+                ));
                 return;
             }
             // Router 直接实现 tower Service<Request<Incoming>>，TowerToHyperService 适配
-            let svc =
-                hyper_util::service::TowerToHyperService::new(app.layer(axum::Extension(FedPeer {
-                    cert_fp,
-                })));
-            let _ = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
-                .serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(stream), svc)
-                .await;
+            let svc = hyper_util::service::TowerToHyperService::new(
+                app.layer(axum::Extension(FedPeer { cert_fp })),
+            );
+            let _ =
+                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
+                    .serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(stream), svc)
+                    .await;
         });
     }
 }
@@ -735,7 +759,8 @@ fn build_agent_client(eng: &EngineHandle) -> Result<reqwest::Client, String> {
     let cfg = eng.config().fed;
     let data_dir = eng.config().general.data_dir.clone();
     let ca_path = resolve_fed_path(&data_dir, &cfg.ca_path, "ca.pem");
-    let (cert_path, key_path) = resolve_node_pair(&data_dir, &cfg.cert_path, &cfg.key_path, &cfg.node);
+    let (cert_path, key_path) =
+        resolve_node_pair(&data_dir, &cfg.cert_path, &cfg.key_path, &cfg.node);
     let ca_pem = std::fs::read(&ca_path).map_err(|e| {
         format!(
             "组织 CA 不可读（{}）: {e} —— 先向协调者管理员获取 ca.pem",
@@ -749,12 +774,8 @@ fn build_agent_client(eng: &EngineHandle) -> Result<reqwest::Client, String> {
             cfg.node
         )
     })?;
-    let key_pem = std::fs::read(&key_path).map_err(|e| {
-        format!(
-            "本节点私钥不可读（{}）: {e}",
-            key_path.display()
-        )
-    })?;
+    let key_pem = std::fs::read(&key_path)
+        .map_err(|e| format!("本节点私钥不可读（{}）: {e}", key_path.display()))?;
     cert_pem.extend_from_slice(&key_pem);
     let identity = reqwest::Identity::from_pem(&cert_pem)
         .map_err(|e| format!("节点证书/私钥装配失败: {e}"))?;
@@ -804,7 +825,10 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
                     }
                     Err(e) => {
                         if !warned_material {
-                            eng.bus.publish(SecurityEvent::engine("error", format!("组织协同未启用：{e}")));
+                            eng.bus.publish(SecurityEvent::engine(
+                                "error",
+                                format!("组织协同未启用：{e}"),
+                            ));
                             warned_material = true;
                         }
                         continue;
@@ -922,7 +946,7 @@ mod tests {
         assert!(check_not_revoked(&dir, "aabb").is_none());
 
         // 吊销：按指纹写入后立即可查；重复吊销拒绝
-        let fp = cmd_revoke(&dir, "aabbccdd" .repeat(8).as_str(), "测试吊销").unwrap();
+        let fp = cmd_revoke(&dir, "aabbccdd".repeat(8).as_str(), "测试吊销").unwrap();
         assert_eq!(fp.len(), 64);
         assert!(load_revocations(&dir).contains(&fp));
         assert!(check_not_revoked(&dir, &fp).is_some());
@@ -939,13 +963,17 @@ mod tests {
         cmd_expect(&dir, "agent1", &"e".repeat(64)).unwrap();
         let expected = load_expected(&dir);
         assert!(expected_ok(&expected, "agent1", &"e".repeat(64)));
-        assert!(!expected_ok(&expected, "agent1", &"f".repeat(64)), "指纹不符必须拒");
-        assert!(expected_ok(&expected, "未登记节点", "任意指纹"), "未预登记走 TOFU");
+        assert!(
+            !expected_ok(&expected, "agent1", &"f".repeat(64)),
+            "指纹不符必须拒"
+        );
+        assert!(
+            expected_ok(&expected, "未登记节点", "任意指纹"),
+            "未预登记走 TOFU"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-
-    use super::*;
 
     #[test]
     fn cert_fp_matches_sha256() {

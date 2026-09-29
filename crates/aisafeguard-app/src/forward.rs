@@ -60,7 +60,10 @@ pub fn syslog_line(facility: u8, hostname: &str, pid: u32, ev: &SecurityEvent) -
 
 /// HOSTNAME 等字段只允许可见 ASCII 图形字符（RFC 5424 值域），防御性收敛。
 fn sanitize_token(s: &str) -> String {
-    s.chars().filter(|c| c.is_ascii_graphic()).take(255).collect()
+    s.chars()
+        .filter(|c| c.is_ascii_graphic())
+        .take(255)
+        .collect()
 }
 
 /// 解析 syslog 收集器地址：`ip:port` 字面量 / `host:port` 域名 / 无端口（补 514）。
@@ -224,14 +227,20 @@ pub fn spawn_notify_task(eng: &Arc<EngineHandle>) {
             });
             match http.post(&cfg.url).json(&body).send().await {
                 Ok(resp) if !resp.status().is_success() => {
-                    if last_fail.map(|t| t.elapsed() >= Duration::from_secs(60)).unwrap_or(true) {
+                    if last_fail
+                        .map(|t| t.elapsed() >= Duration::from_secs(60))
+                        .unwrap_or(true)
+                    {
                         tracing::warn!("webhook 返回 {}", resp.status());
                         last_fail = Some(std::time::Instant::now());
                     }
                 }
                 Ok(_) => last_fail = None,
                 Err(e) => {
-                    if last_fail.map(|t| t.elapsed() >= Duration::from_secs(60)).unwrap_or(true) {
+                    if last_fail
+                        .map(|t| t.elapsed() >= Duration::from_secs(60))
+                        .unwrap_or(true)
+                    {
                         tracing::warn!("webhook 发送失败（丢弃本条，60s 内不重复记录）: {e}");
                         last_fail = Some(std::time::Instant::now());
                     }
@@ -300,6 +309,7 @@ mod tests {
             kind: "scan".into(),
             src_ip: "203.0.113.7".into(),
             confidence: "high".into(),
+            severity: "medium".into(),
             evidence: "60 秒内对 4 个不同目标端口发送 SYN（采样捕获）".into(),
             rule_id: Some("builtin.tcp_scan".into()),
             http_hint: None,
@@ -362,9 +372,6 @@ mod tests {
         assert_eq!(SecurityEvent::severity_threshold("error"), 3);
         // 非法配置值回退 warning
         assert_eq!(SecurityEvent::severity_threshold("随便"), 4);
-        // warning(4) 阈值：notice(5)/info(6) 被过滤，warning 及更严重者通过
-        assert!(4 <= 4);
-        assert!(5 > 4);
     }
 
     #[test]

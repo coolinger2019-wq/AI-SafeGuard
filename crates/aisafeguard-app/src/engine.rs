@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -73,6 +74,72 @@ impl CaptureState {
     }
 }
 
+/// 规则子集引擎运行态（0.5.0 Batch F）：当前生效规则集（原子替换）+ threshold
+/// 与流级去重状态 + 加载留痕（status/GUI 只读展示）。加载失败保持旧包生效并留痕。
+#[derive(Default)]
+pub struct RulesState {
+    current: Mutex<Option<Arc<aisafeguard_rules::loader::LoadedRuleset>>>,
+    /// 已加载规则包路径与 SHA-256（留痕，空 = 未加载）
+    loaded_path: Mutex<String>,
+    loaded_sha256: Mutex<String>,
+    /// 最近一次加载结果说明（成功条数或失败原因）
+    note: Mutex<String>,
+    /// threshold 判定器（整包热更时重建——规则语义随包整体切换）
+    threshold: Mutex<aisafeguard_rules::matcher::ThresholdTracker>,
+    /// 采样路径流级去重：同 (sid, 流) 10 分钟内只报一次（流前缀持续可匹配防刷屏）
+    fired_flows: Mutex<HashMap<String, i64>>,
+    /// 命中计数（自启动累计，H6 可观测）
+    hits: Mutex<u64>,
+}
+
+impl RulesState {
+    pub fn current(&self) -> Option<Arc<aisafeguard_rules::loader::LoadedRuleset>> {
+        self.current.lock().expect("规则集锁中毒").clone()
+    }
+
+    pub fn set_current(
+        &self,
+        rs: Option<Arc<aisafeguard_rules::loader::LoadedRuleset>>,
+        path: &str,
+        note: &str,
+    ) {
+        let sha256 = rs.as_ref().map(|r| r.sha256.clone()).unwrap_or_default();
+        *self.current.lock().expect("规则集锁中毒") = rs;
+        *self.loaded_path.lock().expect("规则路径锁中毒") = if sha256.is_empty() {
+            String::new()
+        } else {
+            path.to_string()
+        };
+        *self.loaded_sha256.lock().expect("规则哈希锁中毒") = sha256;
+        *self.note.lock().expect("规则备注锁中毒") = note.to_string();
+    }
+
+    /// （H6 可观测接线后移除本 allow）
+    #[allow(dead_code)]
+    pub fn loaded_path(&self) -> String {
+        self.loaded_path.lock().expect("规则路径锁中毒").clone()
+    }
+
+    #[allow(dead_code)]
+    pub fn loaded_sha256(&self) -> String {
+        self.loaded_sha256.lock().expect("规则哈希锁中毒").clone()
+    }
+
+    #[allow(dead_code)]
+    pub fn note(&self) -> String {
+        self.note.lock().expect("规则备注锁中毒").clone()
+    }
+
+    pub fn add_hit(&self) {
+        *self.hits.lock().expect("规则命中锁中毒") += 1;
+    }
+
+    #[allow(dead_code)]
+    pub fn hits(&self) -> u64 {
+        *self.hits.lock().expect("规则命中锁中毒")
+    }
+}
+
 /// 引擎对外契约：GUI 与 REST API 都只调用这里的方法，
 /// 保证两条控制通道行为一致（0.2 远程控制台直接复用）。
 pub struct EngineHandle {
@@ -83,6 +150,7 @@ pub struct EngineHandle {
     pub firewall: Arc<dyn Firewall>,
     pub detect: Arc<aisafeguard_detect::FreqEngine>,
     pub capture: Arc<CaptureState>,
+    pub rules: Arc<RulesState>,
     pub rt: tokio::runtime::Handle,
     pub started: Instant,
     pub ai_running: Arc<AtomicBool>,
@@ -273,8 +341,20 @@ impl EngineHandle {
     }
 
     /// 带 TTL 的自动封禁：到期由解封任务移除。
-    pub fn add_block_ex(&self, spec: &BlockSpec, origin: &str, expires_ts: Option<i64>) -> Result<RuleRow> {
-        apply_block(&*self.firewall, &self.store, &self.bus, spec, origin, expires_ts)
+    pub fn add_block_ex(
+        &self,
+        spec: &BlockSpec,
+        origin: &str,
+        expires_ts: Option<i64>,
+    ) -> Result<RuleRow> {
+        apply_block(
+            &*self.firewall,
+            &self.store,
+            &self.bus,
+            spec,
+            origin,
+            expires_ts,
+        )
     }
 
     pub fn remove_rule(&self, id: i64) -> Result<()> {
@@ -283,9 +363,16 @@ impl EngineHandle {
             .get_rule(id)?
             .ok_or_else(|| Error::Store(format!("规则 #{id} 不存在")))?;
         if !row.name.starts_with(RULE_PREFIX) {
-            return Err(Error::Firewall(format!("拒绝删除非 AI-SafeGuard 规则: {}", row.name)));
+            return Err(Error::Firewall(format!(
+                "拒绝删除非 AI-SafeGuard 规则: {}",
+                row.name
+            )));
         }
-        let direction = if row.direction == "in" { Direction::In } else { Direction::Out };
+        let direction = if row.direction == "in" {
+            Direction::In
+        } else {
+            Direction::Out
+        };
         let spec = BlockSpec {
             direction,
             protocol: row.protocol.parse().unwrap_or(Protocol::Any),
@@ -309,7 +396,10 @@ impl EngineHandle {
             .get_proposal(id)?
             .ok_or_else(|| Error::Store(format!("建议 #{id} 不存在")))?;
         if p.status != "pending" {
-            return Err(Error::Store(format!("建议 #{id} 状态为 {}，无法应用", p.status)));
+            return Err(Error::Store(format!(
+                "建议 #{id} 状态为 {}，无法应用",
+                p.status
+            )));
         }
         let direction = match p.direction.as_str() {
             "in" => Direction::In,
@@ -339,11 +429,10 @@ impl EngineHandle {
         };
         // 灰度执行（AI 深度介入 v1）：AI 建议应用即短 TTL 试运行，到期自动解封；
         // AI 明确给了 ttl_secs 用它的，否则用配置的默认灰度时长。人工"转正"才延长。
-        let trial_ttl = p
-            .ttl_secs
-            .unwrap_or(self.config().ai.trial_ttl_secs as i64);
+        let trial_ttl = p.ttl_secs.unwrap_or(self.config().ai.trial_ttl_secs as i64);
         let row = self.add_block_ex(&spec, "ai", Some(now_ts() + trial_ttl))?;
-        self.store.set_proposal_status(id, "applied", Some(row.id))?;
+        self.store
+            .set_proposal_status(id, "applied", Some(row.id))?;
         self.bus.publish(SecurityEvent::ProposalApplied {
             ts: now_ts(),
             proposal_id: id,
@@ -371,19 +460,29 @@ impl EngineHandle {
             .get_rule(id)?
             .ok_or_else(|| Error::Store(format!("规则 #{id} 不存在")))?;
         if !row.name.starts_with(RULE_PREFIX) {
-            return Err(Error::Firewall(format!("拒绝转正非 AI-SafeGuard 规则: {}", row.name)));
+            return Err(Error::Firewall(format!(
+                "拒绝转正非 AI-SafeGuard 规则: {}",
+                row.name
+            )));
         }
         if !row.enabled {
             return Err(Error::Store(format!("规则 #{id} 已禁用，无法转正")));
         }
         // 永久规则没有可延长的灰度窗，转正反而会把它变成 30 天 TTL——明确拒绝
         if row.expires_ts.is_none() {
-            return Err(Error::Store(format!("规则 {} 已是永久封禁，无需转正", row.name)));
+            return Err(Error::Store(format!(
+                "规则 {} 已是永久封禁，无需转正",
+                row.name
+            )));
         }
         let expires = now_ts() + self.config().ai.promote_ttl_secs as i64;
         self.store.update_rule_expires(id, Some(expires))?;
         let until = chrono::DateTime::from_timestamp(expires, 0)
-            .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+            .map(|d| {
+                d.with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string()
+            })
             .unwrap_or_default();
         self.bus.publish(SecurityEvent::engine(
             "info",
@@ -396,21 +495,24 @@ impl EngineHandle {
 
     /// 误报反馈：记录（30 天抑制期）+ 解除该来源的全部自动封禁（engine/ai 来源，
     /// 人工手动添加的规则不动）+ 收弃该来源的 pending 建议。全程留痕。
-    pub fn mark_false_positive(&self, ip_str: &str, note: &str, local_port: Option<u16>) -> Result<(i64, usize)> {
+    pub fn mark_false_positive(
+        &self,
+        ip_str: &str,
+        note: &str,
+        local_port: Option<u16>,
+    ) -> Result<(i64, usize)> {
         let ip: IpAddr = ip_str
             .trim()
             .parse()
             .map_err(|e| Error::Store(format!("IP 非法: {e}")))?;
         if aisafeguard_core::is_protected_ip(ip) {
-            return Err(Error::Store("内网/回环地址本就受自动封禁保护，无需误报标记".into()));
+            return Err(Error::Store(
+                "内网/回环地址本就受自动封禁保护，无需误报标记".into(),
+            ));
         }
         let src = ip.to_string();
         // 进提示词与库的都按不可信输入清洗
-        let note: String = note
-            .chars()
-            .filter(|c| !c.is_control())
-            .take(200)
-            .collect();
+        let note: String = note.chars().filter(|c| !c.is_control()).take(200).collect();
         self.store
             .insert_fp_feedback(&src, now_ts(), &note, local_port)?;
         let dismissed = self.store.dismiss_pending_proposals_for_ip(&src)?;
@@ -575,8 +677,10 @@ fn self_surface_json(eng: &EngineHandle) -> String {
     .to_string()
 }
 
-/// 快路径判定统一出口：广播 Detection；auto_block 时自动封禁（TTL + 内网保护 + 审计）。
+/// 快路径判定统一出口：广播 Detection；auto 时自动封禁（TTL + 内网保护 + 审计）。
 /// 频次引擎（蜜罐源）与采样捕获（真实流量源）都走这里，行为一致。
+/// F6 解耦：是否自动封禁由调用方决定——内置检测器看 [detect].auto_block，
+/// 规则命中看 [detect.rules].auto_block（默认 false 只告警）。
 #[allow(clippy::too_many_arguments)] // 证据/规则/L7 字段并列，语义清晰
 fn handle_detection(
     sink: &DetectionSink<'_>,
@@ -585,6 +689,8 @@ fn handle_detection(
     evidence: &str,
     rule_id: Option<&str>,
     dcfg: &DetectConfig,
+    auto_block: bool,
+    severity: &str,
     hint: Option<aisafeguard_l7::HttpHint>,
     tls_fp: Option<String>,
 ) {
@@ -594,12 +700,13 @@ fn handle_detection(
         kind: kind.to_string(),
         src_ip: src.clone(),
         confidence: "high".into(),
+        severity: severity.to_string(),
         evidence: evidence.to_string(),
         rule_id: rule_id.map(str::to_string),
         http_hint: hint,
         tls_fingerprint: tls_fp,
     });
-    if !dcfg.auto_block {
+    if !auto_block {
         return;
     }
     // 内网保护对自动封禁全局生效
@@ -630,13 +737,23 @@ fn handle_detection(
         note: format!("检测器自动封禁（TTL {}s）: {evidence}", dcfg.ttl_secs),
         tag: "检测器".into(),
     };
-    match apply_block(sink.fw, sink.store, sink.bus, &spec, "engine", Some(now_ts() + dcfg.ttl_secs)) {
+    match apply_block(
+        sink.fw,
+        sink.store,
+        sink.bus,
+        &spec,
+        "engine",
+        Some(now_ts() + dcfg.ttl_secs),
+    ) {
         Ok(row) => {
             let until = row
                 .expires_ts
                 .and_then(|t| {
-                    chrono::DateTime::from_timestamp(t, 0)
-                        .map(|d| d.with_timezone(&chrono::Local).format("%H:%M:%S").to_string())
+                    chrono::DateTime::from_timestamp(t, 0).map(|d| {
+                        d.with_timezone(&chrono::Local)
+                            .format("%H:%M:%S")
+                            .to_string()
+                    })
                 })
                 .unwrap_or_default();
             sink.bus.publish(SecurityEvent::engine(
@@ -655,6 +772,7 @@ fn handle_detection(
 
 /// 快路径：消费蜜罐命中事件，产出 Detection 判定；
 /// auto_block 开启时自动封禁（TTL + 内网保护），全程留痕。
+/// 0.5.0 F4：规则子集引擎在蜜罐 payload 全窗上匹配（enabled 时）。
 pub fn spawn_detect_task(eng: &Arc<EngineHandle>) {
     let eng = Arc::clone(eng);
     let rt = eng.rt.clone();
@@ -666,6 +784,8 @@ pub fn spawn_detect_task(eng: &Arc<EngineHandle>) {
                     remote_ip,
                     listener,
                     port,
+                    remote_port,
+                    payload,
                     ..
                 }) => {
                     let Ok(ip) = remote_ip.parse::<IpAddr>() else {
@@ -673,7 +793,69 @@ pub fn spawn_detect_task(eng: &Arc<EngineHandle>) {
                     };
                     let cfg = eng.config().detect;
                     for d in eng.detect.observe(now_ts(), ip, &listener, port, &cfg) {
-                        handle_detection(&DetectionSink { fw: &*eng.firewall, store: &eng.store, bus: &eng.bus, fp_suppress_secs: eng.config().ai.fp_suppress_secs as i64 }, d.kind, ip, &d.evidence, None, &cfg, None, None);
+                        handle_detection(
+                            &DetectionSink {
+                                fw: &*eng.firewall,
+                                store: &eng.store,
+                                bus: &eng.bus,
+                                fp_suppress_secs: eng.config().ai.fp_suppress_secs as i64,
+                            },
+                            d.kind,
+                            ip,
+                            &d.evidence,
+                            None,
+                            &cfg,
+                            cfg.auto_block,
+                            "medium",
+                            None,
+                            None,
+                        );
+                    }
+                    // 规则子集匹配：payload 即窗口（蜜罐会话完整载荷），方向恒 client→server
+                    let rcfg = &cfg.rules;
+                    if rcfg.enabled && !payload.is_empty() {
+                        let is_home = |ip: IpAddr| aisafeguard_core::is_protected_ip(ip);
+                        let session = aisafeguard_rules::matcher::Session {
+                            client_ip: ip,
+                            client_port: remote_port,
+                            // 蜜罐事件未带本机 IP；any/$HOME_NET 头即命中（本机侧恒 home）
+                            server_ip: IpAddr::from([0, 0, 0, 0]),
+                            server_port: port,
+                            to_server: true,
+                            proto: aisafeguard_rules::ir::Proto::Tcp,
+                            is_home: &is_home,
+                        };
+                        for hit in
+                            scan_rules(&eng.rules, rcfg, payload.as_bytes(), &session, ip, None)
+                        {
+                            let evidence = format!(
+                                "{msg}（规则 {rid}；{c}:{cp} → 蜜罐[{l}]:{p}）",
+                                msg = hit.msg,
+                                rid = hit.rule_id,
+                                c = remote_ip,
+                                cp = remote_port,
+                                l = listener,
+                                p = port,
+                            );
+                            eng.rules.add_hit();
+                            handle_detection(
+                                &DetectionSink {
+                                    fw: &*eng.firewall,
+                                    store: &eng.store,
+                                    bus: &eng.bus,
+                                    fp_suppress_secs: eng.config().ai.fp_suppress_secs as i64,
+                                },
+                                "signature",
+                                ip,
+                                &evidence,
+                                Some(&hit.rule_id),
+                                &cfg,
+                                rcfg.auto_block,
+                                hit.severity,
+                                None,
+                                None,
+                            );
+                        }
                     }
                 }
                 Ok(_) => {}
@@ -682,6 +864,122 @@ pub fn spawn_detect_task(eng: &Arc<EngineHandle>) {
                 }
                 Err(_) => break,
             }
+        }
+    });
+}
+
+/// 规则子集扫描（0.5.0 F4）：在窗口上执行当前生效规则集，应用 threshold 与
+/// 采样路径的流级去重，返回放行的命中。只读规则集 + 判定——不碰防火墙（F6：
+/// 是否自动封禁由调用方按 [detect.rules].auto_block 决定）。
+fn scan_rules(
+    rules: &RulesState,
+    rcfg: &aisafeguard_core::config::RulesConfig,
+    window: &[u8],
+    session: &aisafeguard_rules::matcher::Session<'_>,
+    threshold_src: IpAddr,
+    flow_dedup_key: Option<&str>,
+) -> Vec<aisafeguard_rules::matcher::RuleHit> {
+    if !rcfg.enabled {
+        return Vec::new();
+    }
+    let Some(ruleset) = rules.current() else {
+        return Vec::new();
+    };
+    let now = now_ts();
+    let mut out = Vec::new();
+    for rule in &ruleset.rules {
+        if !aisafeguard_rules::matcher::rule_matches(rule, window, session) {
+            continue;
+        }
+        if let Some(t) = &rule.threshold {
+            let key = if t.by_src {
+                format!("{}:{threshold_src}", rule.sid)
+            } else {
+                rule.sid.to_string()
+            };
+            let mut tt = rules.threshold.lock().expect("threshold 锁中毒");
+            if !tt.allow(t, &key, now) {
+                continue;
+            }
+        }
+        if let Some(dk) = flow_dedup_key {
+            // 同 (sid, 流) 10 分钟内只报一次：流前缀持续在窗口里，不有意重复刷事件
+            let key = format!("{}:{dk}", rule.sid);
+            let fired = now
+                - rules
+                    .fired_flows
+                    .lock()
+                    .expect("流去重锁中毒")
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(0);
+            if fired < 600 {
+                continue;
+            }
+            let mut map = rules.fired_flows.lock().expect("流去重锁中毒");
+            if map.len() > 65536 {
+                map.clear();
+            }
+            map.insert(key, now);
+        }
+        out.push(aisafeguard_rules::matcher::to_hit(rule));
+    }
+    out
+}
+
+/// 规则包装载任务（0.5.0 F5）：启动即加载；之后每 5 秒检查规则包文件签名
+/// （mtime + 长度），变化即整包重载、原子替换；加载失败保持旧包生效并留事件。
+/// 关闭（enabled=false 或 path 清空）即卸载当前规则集——无残留强制路径。
+pub fn spawn_rules_task(eng: &Arc<EngineHandle>) {
+    let eng = Arc::clone(eng);
+    let rt = eng.rt.clone();
+    rt.spawn(async move {
+        let mut last_sig: Option<(std::time::SystemTime, u64)> = None;
+        loop {
+            let cfg = eng.config().detect.rules;
+            if cfg.enabled && !cfg.path.is_empty() {
+                let sig = std::fs::metadata(&cfg.path)
+                    .ok()
+                    .and_then(|m| m.modified().ok().zip(Some(m.len())));
+                if sig != last_sig {
+                    match aisafeguard_rules::loader::load_package_file(
+                        std::path::Path::new(&cfg.path),
+                        cfg.max_rules,
+                    ) {
+                        Ok(rs) => {
+                            let note = format!(
+                                "已加载 {} 条规则（sha256 前 8 位 {}）",
+                                rs.rule_count,
+                                &rs.sha256[..8.min(rs.sha256.len())]
+                            );
+                            eng.rules.set_current(Some(Arc::new(rs)), &cfg.path, &note);
+                            eng.bus.publish(SecurityEvent::engine(
+                                "info",
+                                format!("规则包加载成功：{note}"),
+                            ));
+                        }
+                        Err(e) => {
+                            // 整包拒绝：新包不生效；旧包（若有）保持，避免规则引擎空窗
+                            let note = format!("加载失败（整包拒绝）：{e}");
+                            eng.rules.set_current(None, &cfg.path, &note);
+                            eng.bus.publish(SecurityEvent::engine(
+                                "error",
+                                format!("规则包加载失败（整包拒绝，不半生效）: {e}"),
+                            ));
+                        }
+                    }
+                    last_sig = sig;
+                }
+            } else if last_sig.is_some() || eng.rules.current().is_some() {
+                eng.rules
+                    .set_current(None, "", "规则引擎未启用或未配置规则包路径");
+                eng.bus.publish(SecurityEvent::engine(
+                    "info",
+                    "规则引擎已停用，卸载当前规则集",
+                ));
+                last_sig = None;
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
     });
 }
@@ -718,7 +1016,10 @@ pub fn spawn_capture_task(eng: &Arc<EngineHandle>) {
         use sha2::Digest as _;
         let checked = std::fs::read(&sys_path).map(|bytes| {
             let digest = sha2::Sha256::digest(&bytes);
-            digest.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            digest
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
         });
         match checked {
             Ok(hex) if hex.eq_ignore_ascii_case(cfg.driver_sha256.trim()) => {}
@@ -726,12 +1027,15 @@ pub fn spawn_capture_task(eng: &Arc<EngineHandle>) {
                 let msg = "WinDivert64.sys SHA-256 与配置不符（driver_sha256），捕获已降级；请从官方渠道重新获取驱动";
                 tracing::error!("驱动校验失败: 期望 {} 实际 {hex}", cfg.driver_sha256.trim());
                 eng.capture.set_error(msg);
-                eng.bus
-                    .publish(SecurityEvent::engine("error", format!("流量采样不可用：{msg}")));
+                eng.bus.publish(SecurityEvent::engine(
+                    "error",
+                    format!("流量采样不可用：{msg}"),
+                ));
                 return;
             }
             Err(e) => {
-                eng.capture.set_error("WinDivert64.sys 读取失败，捕获已降级");
+                eng.capture
+                    .set_error("WinDivert64.sys 读取失败，捕获已降级");
                 eng.bus.publish(SecurityEvent::engine(
                     "error",
                     format!("流量采样不可用：驱动读取失败: {e}"),
@@ -779,7 +1083,9 @@ pub fn spawn_capture_task(eng: &Arc<EngineHandle>) {
                             if cap_cfg.mode == "full" {
                                 let snippet = pipeline.payload_snippet(&d.key);
                                 // 轻量 L7 标签（0.4.0 B2）：full 模式流前缀可识别时进证据
-                                let l7 = aisafeguard_l7::tags_suffix(&aisafeguard_l7::http_tags(&snippet));
+                                let l7 = aisafeguard_l7::tags_suffix(&aisafeguard_l7::http_tags(
+                                    &snippet,
+                                ));
                                 evidence.push_str(&l7);
                                 if !snippet.is_empty() {
                                     evidence.push_str(&format!("；载荷摘要: {snippet}"));
@@ -793,7 +1099,8 @@ pub fn spawn_capture_task(eng: &Arc<EngineHandle>) {
                                         let hint = std::str::from_utf8(&stream)
                                             .ok()
                                             .and_then(aisafeguard_l7::parse_http_hint);
-                                        let tls_fp = aisafeguard_l7::parse_ja3(&stream).map(|j| j.md5);
+                                        let tls_fp =
+                                            aisafeguard_l7::parse_ja3(&stream).map(|j| j.md5);
                                         (hint, tls_fp)
                                     }
                                     None => (None, None),
@@ -801,7 +1108,94 @@ pub fn spawn_capture_task(eng: &Arc<EngineHandle>) {
                             } else {
                                 (None, None)
                             };
-                            handle_detection(&DetectionSink { fw: &*eng.firewall, store: &eng.store, bus: &eng.bus, fp_suppress_secs: eng.config().ai.fp_suppress_secs as i64 }, d.kind, d.src, &evidence, Some(d.rule_id), &dcfg, hint, tls_fp);
+                            handle_detection(
+                                &DetectionSink {
+                                    fw: &*eng.firewall,
+                                    store: &eng.store,
+                                    bus: &eng.bus,
+                                    fp_suppress_secs: eng.config().ai.fp_suppress_secs as i64,
+                                },
+                                d.kind,
+                                d.src,
+                                &evidence,
+                                Some(d.rule_id),
+                                &dcfg,
+                                dcfg.auto_block,
+                                "medium",
+                                hint,
+                                tls_fp,
+                            );
+                        }
+                        // 规则子集匹配（0.5.0 F4）：full 模式下有新载荷产出的流 →
+                        // 重组流前缀整窗扫描；方向按纯 SYN 观测判定，未知时按
+                        // client→server（攻击载荷的常态方向）
+                        let rcfg = eng.config().detect.rules;
+                        if rcfg.enabled && cap_cfg.mode == "full" {
+                            for fkey in pipeline.take_dirty() {
+                                let Some(stream) = pipeline.stream_bytes(&fkey) else {
+                                    continue;
+                                };
+                                if stream.is_empty() {
+                                    continue;
+                                }
+                                let to_server = pipeline.observed_syn(&fkey);
+                                let (c_ip, c_port, s_ip, s_port) = if to_server {
+                                    (fkey.src, fkey.src_port, fkey.dst, fkey.dst_port)
+                                } else {
+                                    (fkey.dst, fkey.dst_port, fkey.src, fkey.src_port)
+                                };
+                                let is_home = |ip: IpAddr| aisafeguard_core::is_protected_ip(ip);
+                                let session = aisafeguard_rules::matcher::Session {
+                                    client_ip: c_ip,
+                                    client_port: c_port,
+                                    server_ip: s_ip,
+                                    server_port: s_port,
+                                    to_server,
+                                    proto: aisafeguard_rules::ir::Proto::Tcp,
+                                    is_home: &is_home,
+                                };
+                                let dk = format!(
+                                    "{}:{}->{}:{}",
+                                    fkey.src, fkey.src_port, fkey.dst, fkey.dst_port
+                                );
+                                for hit in scan_rules(
+                                    &eng.rules,
+                                    &rcfg,
+                                    &stream,
+                                    &session,
+                                    c_ip,
+                                    Some(&dk),
+                                ) {
+                                    let evidence = format!(
+                                        "{msg}（规则 {rid}；{c}:{cp} → {s}:{sp}）",
+                                        msg = hit.msg,
+                                        rid = hit.rule_id,
+                                        c = c_ip,
+                                        cp = c_port,
+                                        s = s_ip,
+                                        sp = s_port,
+                                    );
+                                    eng.rules.add_hit();
+                                    handle_detection(
+                                        &DetectionSink {
+                                            fw: &*eng.firewall,
+                                            store: &eng.store,
+                                            bus: &eng.bus,
+                                            fp_suppress_secs: eng.config().ai.fp_suppress_secs
+                                                as i64,
+                                        },
+                                        "signature",
+                                        c_ip,
+                                        &evidence,
+                                        Some(&hit.rule_id),
+                                        &eng.config().detect,
+                                        rcfg.auto_block,
+                                        hit.severity,
+                                        None,
+                                        None,
+                                    );
+                                }
+                            }
                         }
                     }
                     Err(RecvTimeoutError::Timeout) => {
@@ -824,7 +1218,8 @@ pub fn spawn_capture_task(eng: &Arc<EngineHandle>) {
                         }
                     }
                     Err(RecvTimeoutError::Disconnected) => {
-                        eng.capture.set_error("捕获线程已退出（驱动停止或句柄关闭）");
+                        eng.capture
+                            .set_error("捕获线程已退出（驱动停止或句柄关闭）");
                         eng.bus.publish(SecurityEvent::engine(
                             "error",
                             "流量采样已停止：捕获线程退出",
@@ -858,7 +1253,11 @@ pub fn spawn_expiry_janitor(eng: &Arc<EngineHandle>) {
             for row in expired {
                 let name = row.name.clone();
                 let spec = BlockSpec {
-                    direction: if row.direction == "in" { Direction::In } else { Direction::Out },
+                    direction: if row.direction == "in" {
+                        Direction::In
+                    } else {
+                        Direction::Out
+                    },
                     protocol: row.protocol.parse().unwrap_or(Protocol::Any),
                     remote_ip: row.remote_ip.parse::<IpAddr>().ok(),
                     local_port: row.local_port,
@@ -929,16 +1328,17 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
         }
     };
     let max_chars = cfg.ai.max_snippet_chars;
-    let events_json = serde_json::json!(hits
-        .iter()
-        .map(|h| serde_json::json!({
-            "ts": h.ts,
-            "listener": h.listener,
-            "remote_ip": h.remote_ip,
-            "summary": h.summary,
-            "payload": truncate(&h.payload, max_chars),
-        }))
-        .collect::<Vec<_>>())
+    let events_json = serde_json::json!(
+        hits.iter()
+            .map(|h| serde_json::json!({
+                "ts": h.ts,
+                "listener": h.listener,
+                "remote_ip": h.remote_ip,
+                "summary": h.summary,
+                "payload": truncate(&h.payload, max_chars),
+            }))
+            .collect::<Vec<_>>()
+    )
     .to_string();
     let stats_json = serde_json::to_string(&stats).unwrap_or_default();
     // 30 分钟内扫过暴露面 → 一并送评
@@ -1047,7 +1447,12 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                         .parse::<IpAddr>()
                         .map(|ip| {
                             eng.store
-                                .active_fp(&ip.to_string(), now_ts(), cfg.ai.fp_suppress_secs as i64, p.local_port)
+                                .active_fp(
+                                    &ip.to_string(),
+                                    now_ts(),
+                                    cfg.ai.fp_suppress_secs as i64,
+                                    p.local_port,
+                                )
                                 .unwrap_or(false)
                         })
                         .unwrap_or(false);
@@ -1067,7 +1472,12 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                             Err(_) => true,
                         }
                     };
-                    if cfg.ai.auto_apply && severity_ok && quorum_ok && (ignore_fp || !fp_suppressed) && eng.apply_proposal(pid).is_ok() {
+                    if cfg.ai.auto_apply
+                        && severity_ok
+                        && quorum_ok
+                        && (ignore_fp || !fp_suppressed)
+                        && eng.apply_proposal(pid).is_ok()
+                    {
                         auto_applied += 1;
                     }
                 }
@@ -1075,7 +1485,9 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                 if auto_applied > 0 {
                     summary.push_str(&format!("，自动应用 {auto_applied} 条"));
                 }
-                let _ = eng.store.insert_ai_run(&cfg.ai.model, true, &truncate(&summary, 500));
+                let _ = eng
+                    .store
+                    .insert_ai_run(&cfg.ai.model, true, &truncate(&summary, 500));
                 eng.bus.publish(SecurityEvent::AiRun {
                     ts: now_ts(),
                     ok: true,
@@ -1122,7 +1534,9 @@ impl Console for EmbeddedConsole {
     }
 
     fn list_events(&self, limit: u32, ip_filter: Option<&str>) -> anyhow::Result<Vec<EventRow>> {
-        self.0.list_events(limit, ip_filter).map_err(anyhow::Error::msg)
+        self.0
+            .list_events(limit, ip_filter)
+            .map_err(anyhow::Error::msg)
     }
 
     fn list_rules(&self) -> anyhow::Result<Vec<RuleRow>> {
@@ -1130,7 +1544,9 @@ impl Console for EmbeddedConsole {
     }
 
     fn list_proposals(&self, status: Option<&str>, limit: u32) -> anyhow::Result<Vec<ProposalRow>> {
-        self.0.list_proposals(status, limit).map_err(anyhow::Error::msg)
+        self.0
+            .list_proposals(status, limit)
+            .map_err(anyhow::Error::msg)
     }
 
     fn list_ai_runs(&self, limit: u32) -> anyhow::Result<Vec<AiRunRow>> {
@@ -1184,8 +1600,15 @@ impl Console for EmbeddedConsole {
             .map_err(anyhow::Error::msg)
     }
 
-    fn mark_false_positive(&self, ip: &str, note: &str, local_port: Option<u16>) -> anyhow::Result<(i64, usize)> {
-        self.0.mark_false_positive(ip, note, local_port).map_err(anyhow::Error::msg)
+    fn mark_false_positive(
+        &self,
+        ip: &str,
+        note: &str,
+        local_port: Option<u16>,
+    ) -> anyhow::Result<(i64, usize)> {
+        self.0
+            .mark_false_positive(ip, note, local_port)
+            .map_err(anyhow::Error::msg)
     }
 
     fn trigger_analysis(&self) -> bool {
@@ -1256,7 +1679,10 @@ pub fn spawn_intel_task(eng: &Arc<EngineHandle>) {
     });
 }
 
-pub async fn run_intel_refresh(eng: &Arc<EngineHandle>, cfg: &aisafeguard_core::config::IntelConfig) {
+pub async fn run_intel_refresh(
+    eng: &Arc<EngineHandle>,
+    cfg: &aisafeguard_core::config::IntelConfig,
+) {
     let now = now_ts();
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(90))
@@ -1289,7 +1715,10 @@ pub async fn run_intel_refresh(eng: &Arc<EngineHandle>, cfg: &aisafeguard_core::
     if let Ok(hits) = eng.store.recent_honeypot_hits(2000) {
         let mut seen = std::collections::HashSet::new();
         for h in hits {
-            if h.remote_ip.is_empty() || h.remote_ip == "unknown" || !seen.insert(h.remote_ip.clone()) {
+            if h.remote_ip.is_empty()
+                || h.remote_ip == "unknown"
+                || !seen.insert(h.remote_ip.clone())
+            {
                 continue;
             }
             entries.push(aisafeguard_detect::intel::IntelEntry {
@@ -1334,7 +1763,9 @@ pub async fn run_intel_refresh(eng: &Arc<EngineHandle>, cfg: &aisafeguard_core::
             if e.confidence != "high" || e.kind != "c2" {
                 continue;
             }
-            let Ok(ip) = e.value.parse::<IpAddr>() else { continue };
+            let Ok(ip) = e.value.parse::<IpAddr>() else {
+                continue;
+            };
             if aisafeguard_core::is_protected_ip(ip) || existing.contains(&e.value) {
                 continue;
             }
@@ -1344,7 +1775,7 @@ pub async fn run_intel_refresh(eng: &Arc<EngineHandle>, cfg: &aisafeguard_core::
                 remote_ip: Some(ip),
                 local_port: None,
                 note: format!("威胁情报自动封禁（{} / TTL 3 天）", e.source),
-            tag: "情报".into(),
+                tag: "情报".into(),
             };
             if eng
                 .add_block_ex(&spec, "intel", Some(now + 3 * 86400))
@@ -1393,7 +1824,10 @@ mod tests {
             Ok(())
         }
         fn remove(&self, name: &str, spec: &BlockSpec) -> Result<()> {
-            self.removed.lock().expect("mock 锁中毒").push(name.to_string());
+            self.removed
+                .lock()
+                .expect("mock 锁中毒")
+                .push(name.to_string());
             let _ = spec;
             Ok(())
         }
@@ -1408,7 +1842,8 @@ mod tests {
 
     impl Fixture {
         fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!("aisafeguard-test-{tag}-{}", uuid::Uuid::new_v4()));
+            let dir = std::env::temp_dir()
+                .join(format!("aisafeguard-test-{tag}-{}", uuid::Uuid::new_v4()));
             let store = Store::open(&dir.join("test.db")).expect("临时库打开失败");
             Self {
                 fw: MockFirewall::default(),
@@ -1439,12 +1874,19 @@ mod tests {
         let mut rx = f.bus.subscribe();
         let before = now_ts();
         handle_detection(
-            &DetectionSink { fw: &f.fw, store: &f.store, bus: &f.bus, fp_suppress_secs: 0 },
+            &DetectionSink {
+                fw: &f.fw,
+                store: &f.store,
+                bus: &f.bus,
+                fp_suppress_secs: 0,
+            },
             "scan",
             "203.0.113.7".parse().unwrap(),
             "60 秒内对 3 个不同目标端口发送 SYN",
             Some("builtin.tcp_scan"),
             &f.dcfg(),
+            f.dcfg().auto_block,
+            "medium",
             None,
             None,
         );
@@ -1480,17 +1922,27 @@ mod tests {
         let mut rx = f.bus.subscribe();
         for ip in ["127.0.0.1", "192.168.1.10", "10.1.2.3", "fe80::1", "::1"] {
             handle_detection(
-                &DetectionSink { fw: &f.fw, store: &f.store, bus: &f.bus, fp_suppress_secs: 0 },
+                &DetectionSink {
+                    fw: &f.fw,
+                    store: &f.store,
+                    bus: &f.bus,
+                    fp_suppress_secs: 0,
+                },
                 "flood",
                 ip.parse().unwrap(),
                 "100 个纯 SYN",
                 Some("builtin.syn_flood"),
                 &f.dcfg(),
+                f.dcfg().auto_block,
+                "medium",
                 None,
                 None,
             );
         }
-        assert!(f.fw.added.lock().unwrap().is_empty(), "内网/回环地址必须零封禁");
+        assert!(
+            f.fw.added.lock().unwrap().is_empty(),
+            "内网/回环地址必须零封禁"
+        );
         assert!(f.store.list_rules().unwrap().is_empty());
         // 但判定事件与"内网保护"留痕照常
         let mut kinds = Vec::new();
@@ -1507,17 +1959,152 @@ mod tests {
         let mut dcfg = f.dcfg();
         dcfg.auto_block = false;
         handle_detection(
-            &DetectionSink { fw: &f.fw, store: &f.store, bus: &f.bus, fp_suppress_secs: 0 },
+            &DetectionSink {
+                fw: &f.fw,
+                store: &f.store,
+                bus: &f.bus,
+                fp_suppress_secs: 0,
+            },
             "scan",
             "203.0.113.9".parse().unwrap(),
             "证据",
             None,
             &dcfg,
+            dcfg.auto_block,
+            "medium",
             None,
             None,
         );
-        assert!(f.fw.added.lock().unwrap().is_empty(), "auto_block=false 不得封禁");
+        assert!(
+            f.fw.added.lock().unwrap().is_empty(),
+            "auto_block=false 不得封禁"
+        );
         assert_eq!(f.store.list_rules().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn rule_scan_hits_and_dedups_per_flow() {
+        // F4/F6：规则命中 → scan_rules 放行；采样路径流级去重 10 分钟内只报一次
+        let raw = b"alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:\"sqlmap probe\"; content:\"sqlmap\"; classtype:web-application-attack; sid:1000001; rev:1;)\n";
+        let rs = Arc::new(aisafeguard_rules::loader::load_package(raw, 100).expect("规则包应合法"));
+        let state = RulesState::default();
+        state.set_current(Some(rs), "test.rules", "已加载 1 条规则");
+        let rcfg = aisafeguard_core::config::RulesConfig {
+            enabled: true,
+            auto_block: false,
+            ..Default::default()
+        };
+        let is_home = |ip: IpAddr| aisafeguard_core::is_protected_ip(ip);
+        let session = aisafeguard_rules::matcher::Session {
+            client_ip: "203.0.113.7".parse().unwrap(),
+            client_port: 44444,
+            server_ip: IpAddr::from([0, 0, 0, 0]),
+            server_port: 8081,
+            to_server: true,
+            proto: aisafeguard_rules::ir::Proto::Tcp,
+            is_home: &is_home,
+        };
+        let hits = scan_rules(
+            &state,
+            &rcfg,
+            b"GET / HTTP/1.1 UA: sqlmap/1.7",
+            &session,
+            "203.0.113.7".parse().unwrap(),
+            Some("flow-1"),
+        );
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].rule_id, "sid:1000001");
+        assert_eq!(
+            hits[0].severity, "critical",
+            "classtype=web-application-attack → critical"
+        );
+        // 流级去重：同一流再扫不再放行
+        let again = scan_rules(
+            &state,
+            &rcfg,
+            b"GET / HTTP/1.1 UA: sqlmap/1.7",
+            &session,
+            "203.0.113.7".parse().unwrap(),
+            Some("flow-1"),
+        );
+        assert!(again.is_empty());
+        // 未启用 → 静默
+        let mut off = rcfg.clone();
+        off.enabled = false;
+        assert!(
+            scan_rules(
+                &state,
+                &off,
+                b"sqlmap",
+                &session,
+                "203.0.113.7".parse().unwrap(),
+                None
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn rule_hit_default_alert_only_never_blocks() {
+        // F6：[detect.rules].auto_block=false（默认）→ 规则命中只产事件，不写防火墙
+        let f = Fixture::new("rulesig-noblock");
+        let mut rx = f.bus.subscribe();
+        let dcfg = f.dcfg();
+        let rcfg = aisafeguard_core::config::RulesConfig::default(); // enabled=false, auto_block=false
+        handle_detection(
+            &DetectionSink {
+                fw: &f.fw,
+                store: &f.store,
+                bus: &f.bus,
+                fp_suppress_secs: 0,
+            },
+            "signature",
+            "203.0.113.7".parse().unwrap(),
+            "sqlmap probe（规则 sid:1000001 v1；203.0.113.7:44444 → 蜜罐[http]:8081）",
+            Some("sid:1000001"),
+            &dcfg,
+            rcfg.auto_block,
+            "critical",
+            None,
+            None,
+        );
+        // 事件照发（告警路径不受 auto_block 影响）
+        let mut kinds = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            kinds.push(ev.summary());
+        }
+        assert!(
+            kinds
+                .iter()
+                .any(|s| s.contains("[signature] 203.0.113.7: sqlmap probe"))
+        );
+        // 防火墙零写入
+        assert!(f.fw.added.lock().unwrap().is_empty(), "规则默认只告警");
+        assert!(f.store.list_rules().unwrap().is_empty());
+        // auto_block=true 时才封禁
+        let f2 = Fixture::new("rulesig-autoblock");
+        handle_detection(
+            &DetectionSink {
+                fw: &f2.fw,
+                store: &f2.store,
+                bus: &f2.bus,
+                fp_suppress_secs: 0,
+            },
+            "signature",
+            "203.0.113.8".parse().unwrap(),
+            "sqlmap probe（规则 sid:1000001）",
+            Some("sid:1000001"),
+            &dcfg,
+            true,
+            "critical",
+            None,
+            None,
+        );
+        assert_eq!(
+            f2.fw.added.lock().unwrap().len(),
+            1,
+            "显式 auto_block=true 才自动封禁"
+        );
     }
 
     #[test]

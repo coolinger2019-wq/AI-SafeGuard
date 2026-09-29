@@ -32,6 +32,7 @@ pub struct Session<'a> {
 /// 一条规则命中（窗口证据由调用方决定如何截断留存）。
 #[derive(Debug, Clone)]
 pub struct RuleHit {
+    pub rule_id: String,
     pub sid: u32,
     pub msg: String,
     /// classtype 映射的 severity（无 classtype 归 low）
@@ -201,6 +202,7 @@ pub fn rule_matches(rule: &Rule, window: &[u8], s: &Session<'_>) -> bool {
 /// 把规则映射为命中记录（severity 取 classtype 映射，缺省 low）。
 pub fn to_hit(rule: &Rule) -> RuleHit {
     RuleHit {
+        rule_id: rule.rule_id(),
         sid: rule.sid,
         msg: rule.msg.clone(),
         severity: rule

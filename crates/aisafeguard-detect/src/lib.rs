@@ -50,7 +50,14 @@ impl FreqEngine {
 
     /// 记录一次蜜罐命中并检查是否达到判定阈值。
     /// 同一来源同一判定在 window_secs 内只触发一次。
-    pub fn observe(&self, ts: i64, src: IpAddr, listener: &str, port: u16, cfg: &DetectConfig) -> Vec<Detection> {
+    pub fn observe(
+        &self,
+        ts: i64,
+        src: IpAddr,
+        listener: &str,
+        port: u16,
+        cfg: &DetectConfig,
+    ) -> Vec<Detection> {
         if !cfg.enabled {
             return Vec::new();
         }
@@ -61,7 +68,11 @@ impl FreqEngine {
         let scan_entry = inner.scan.entry(src).or_default();
         scan_entry.push_back((ts, port));
         let cutoff = ts - cfg.window_secs;
-        while scan_entry.front().map(|(t, _)| *t < cutoff).unwrap_or(false) {
+        while scan_entry
+            .front()
+            .map(|(t, _)| *t < cutoff)
+            .unwrap_or(false)
+        {
             scan_entry.pop_front();
         }
         let distinct: Vec<u16> = {
@@ -70,7 +81,15 @@ impl FreqEngine {
             ports.dedup();
             ports
         };
-        if distinct.len() as u32 >= cfg.scan_distinct_ports && should_fire(&mut inner.fired_at, "scan", &src.to_string(), ts, cfg.window_secs) {
+        if distinct.len() as u32 >= cfg.scan_distinct_ports
+            && should_fire(
+                &mut inner.fired_at,
+                "scan",
+                &src.to_string(),
+                ts,
+                cfg.window_secs,
+            )
+        {
             out.push(Detection {
                 kind: "scan",
                 evidence: format!(
@@ -93,7 +112,13 @@ impl FreqEngine {
             bf_entry.len() as u32
         };
         if bf_len >= cfg.bruteforce_hits
-            && should_fire(&mut inner.fired_at, "bruteforce", &format!("{src}/{listener}"), ts, cfg.window_secs)
+            && should_fire(
+                &mut inner.fired_at,
+                "bruteforce",
+                &format!("{src}/{listener}"),
+                ts,
+                cfg.window_secs,
+            )
         {
             out.push(Detection {
                 kind: "bruteforce",
@@ -110,7 +135,13 @@ impl FreqEngine {
     }
 }
 
-fn should_fire(fired_at: &mut HashMap<String, i64>, kind: &str, key: &str, ts: i64, window: i64) -> bool {
+fn should_fire(
+    fired_at: &mut HashMap<String, i64>,
+    kind: &str,
+    key: &str,
+    ts: i64,
+    window: i64,
+) -> bool {
     let k = format!("{kind}:{key}");
     match fired_at.get(&k) {
         Some(last) if ts - *last < window => false,
@@ -140,6 +171,7 @@ mod tests {
             window_secs: 60,
             ttl_secs: 1800,
             capture: Default::default(),
+            rules: Default::default(),
         }
     }
 
@@ -149,8 +181,14 @@ mod tests {
         let c = cfg();
         let t0 = 1_000_000;
         // 阈值 3：第 3 个不同端口被触达的那次调用即触发
-        assert!(eng.observe(t0, "203.0.113.7".parse().unwrap(), "ssh", 2222, &c).is_empty());
-        assert!(eng.observe(t0 + 1, "203.0.113.7".parse().unwrap(), "http", 8081, &c).is_empty());
+        assert!(
+            eng.observe(t0, "203.0.113.7".parse().unwrap(), "ssh", 2222, &c)
+                .is_empty()
+        );
+        assert!(
+            eng.observe(t0 + 1, "203.0.113.7".parse().unwrap(), "http", 8081, &c)
+                .is_empty()
+        );
         let dets = eng.observe(t0 + 2, "203.0.113.7".parse().unwrap(), "telnet", 2323, &c);
         assert_eq!(dets.len(), 1);
         assert_eq!(dets[0].kind, "scan");

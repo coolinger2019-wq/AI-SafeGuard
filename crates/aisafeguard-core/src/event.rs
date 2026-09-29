@@ -51,6 +51,9 @@ pub enum SecurityEvent {
         kind: String,
         src_ip: String,
         confidence: String,
+        /// 判定严重度（0.5.0 F4）：critical|high|medium|low——规则命中按 classtype
+        /// 映射（RULESET_SUBSET.md），内置检测器 scan/bruteforce/flood 归 medium
+        severity: String,
         evidence: String,
         rule_id: Option<String>,
         /// HTTP 提示（0.5.0 E6：full 捕获流重组可解析时出现）
@@ -104,7 +107,9 @@ impl SecurityEvent {
             SecurityEvent::FirewallRuleRemoved { name, .. } => {
                 format!("移除规则 {name}")
             }
-            SecurityEvent::ProposalCreated { severity, reason, .. } => {
+            SecurityEvent::ProposalCreated {
+                severity, reason, ..
+            } => {
                 format!("[{severity}] {reason}")
             }
             SecurityEvent::ProposalApplied { rule_name, .. } => {
@@ -113,7 +118,12 @@ impl SecurityEvent {
             SecurityEvent::AiRun { ok, summary, .. } => {
                 format!("{}{summary}", if *ok { "✓ " } else { "✗ " })
             }
-            SecurityEvent::Detection { kind, src_ip, evidence, .. } => {
+            SecurityEvent::Detection {
+                kind,
+                src_ip,
+                evidence,
+                ..
+            } => {
                 format!("[{kind}] {src_ip}: {evidence}")
             }
             SecurityEvent::Engine { level, message, .. } => {
