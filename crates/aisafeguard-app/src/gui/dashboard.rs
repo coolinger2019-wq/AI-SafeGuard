@@ -2,8 +2,8 @@ use super::*;
 
 impl AisafeApp {
     pub(crate) fn dashboard_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("仪表盘").size(22.0).strong());
-        ui.add_space(12.0);
+        ui.label(RichText::new("仪表盘").size(type_scale::TITLE).strong());
+        ui.add_space(space::M);
 
         let status = self.cache.status.clone();
         let hits = status.as_ref().map(|s| s.hits_24h).unwrap_or(0);
@@ -25,23 +25,23 @@ impl AisafeApp {
                 &hits.to_string(),
                 if hits > 0 { warn() } else { text_dim() },
             );
-            ui.add_space(10.0);
+            ui.add_space(space::M);
             card(
                 ui,
                 "攻击源 IP",
                 &attackers.to_string(),
                 if attackers > 0 { danger() } else { text_dim() },
             );
-            ui.add_space(10.0);
+            ui.add_space(space::M);
             card(ui, "防火墙规则", &rules.to_string(), accent());
-            ui.add_space(10.0);
+            ui.add_space(space::M);
             card(
                 ui,
                 "待处理 AI 建议",
                 &pending.to_string(),
                 if pending > 0 { purple() } else { text_dim() },
             );
-            ui.add_space(10.0);
+            ui.add_space(space::M);
             card(
                 ui,
                 "AI 引擎",
@@ -56,20 +56,24 @@ impl AisafeApp {
             );
         });
 
-        ui.add_space(16.0);
+        ui.add_space(space::L);
         let stats = self.cache.stats.clone();
         let max_hits = stats.top_ips.first().map(|t| t.hits).unwrap_or(1).max(1);
         let live: Vec<LiveEvent> = self.live.iter().take(14).cloned().collect();
 
         ui.columns(2, |cols| {
             // 左列：攻击源 TOP 10
-            cols[0].label(RichText::new("攻击源 TOP 10（24h）").size(15.0).strong());
-            cols[0].add_space(8.0);
+            cols[0].label(
+                RichText::new("攻击源 TOP 10（24h）")
+                    .size(type_scale::SECTION)
+                    .strong(),
+            );
+            cols[0].add_space(space::S);
             if stats.top_ips.is_empty() {
                 cols[0].label(
                     RichText::new("暂无攻击数据。蜜罐被触发后这里会显示来源排行。")
                         .color(text_dim())
-                        .size(13.0),
+                        .size(type_scale::BODY),
                 );
             } else {
                 for t in &stats.top_ips {
@@ -77,7 +81,7 @@ impl AisafeApp {
                         ui.label(
                             RichText::new(format!("{:>15}", t.ip))
                                 .monospace()
-                                .size(13.0),
+                                .size(type_scale::BODY),
                         );
                         let w = (t.hits as f32 / max_hits as f32 * 110.0).max(4.0);
                         let (rect, _) =
@@ -85,7 +89,7 @@ impl AisafeApp {
                         ui.painter().rect_filled(rect, 3.0, accent());
                         ui.label(
                             RichText::new(t.hits.to_string())
-                                .size(12.0)
+                                .size(type_scale::CAPTION)
                                 .color(text_dim()),
                         );
                     });
@@ -93,17 +97,25 @@ impl AisafeApp {
             }
 
             // 右列：实时事件
-            cols[1].label(RichText::new("实时事件").size(15.0).strong());
-            cols[1].add_space(8.0);
+            cols[1].label(RichText::new("实时事件").size(type_scale::SECTION).strong());
+            cols[1].add_space(space::S);
             if live.is_empty() {
-                cols[1].label(RichText::new("等待事件…").color(text_dim()).size(13.0));
+                cols[1].label(
+                    RichText::new("等待事件…")
+                        .color(text_dim())
+                        .size(type_scale::BODY),
+                );
             }
             for ev in live {
                 cols[1].horizontal(|ui| {
-                    ui.label(RichText::new(fmt_ts(ev.ts)).size(11.0).color(text_dim()));
+                    ui.label(
+                        RichText::new(fmt_ts(ev.ts))
+                            .size(type_scale::MICRO)
+                            .color(text_dim()),
+                    );
                     ui.label(
                         RichText::new(&ev.kind)
-                            .size(11.0)
+                            .size(type_scale::MICRO)
                             .color(event_color(&ev.kind)),
                     );
                 });
@@ -111,8 +123,8 @@ impl AisafeApp {
                 if sum.chars().count() > 120 {
                     sum = sum.chars().take(120).collect::<String>() + "…";
                 }
-                cols[1].label(RichText::new(sum).size(12.0));
-                cols[1].add_space(4.0);
+                cols[1].label(RichText::new(sum).size(type_scale::CAPTION));
+                cols[1].add_space(space::XS);
             }
         });
     }

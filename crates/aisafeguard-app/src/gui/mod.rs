@@ -21,10 +21,13 @@ use crate::explain::RuleExplain;
 
 // 语义取色（多套配色方案可切换，定义与调色板见 gui/theme.rs）。
 // 子页面的 `use super::*` 依赖这些再导出。
+// 排版纪律：文本只选层级助手（display/title/section_title/body_text/caption/
+// micro/mono_text），间距只取 theme::space 常量——禁止手写字号与裸间距数字。
+pub(crate) use theme::type_scale;
 pub(crate) use theme::{
-    ThemeId, accent, accent_soft, banner_bg, banner_text, bg_card, bg_panel, bg_sidebar, border,
-    danger, ok, on_accent, orange, purple, text as text_color, text_dim, toast_bg, toast_text,
-    warn,
+    HEADER_H, ROW_H, ThemeId, accent, accent_soft, banner_bg, banner_text, bg_card, bg_panel,
+    bg_sidebar, body_text, border, caption, danger, display, mono_text, ok, on_accent, orange,
+    purple, section_title, space, text as text_color, text_dim, title, toast_bg, toast_text, warn,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -35,6 +38,46 @@ enum Tab {
     Honeypot,
     Ai,
     Settings,
+}
+
+/// 设置页子页（0.5.8）：按功能域分页，替代单页长滚动。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SettingsPage {
+    /// 外观（主题 / 字号）
+    #[default]
+    Look,
+    /// AI 分析（含 API Key、误报抑制）
+    Ai,
+    /// 检测与感知（快路径 / 采样 / L7 / 规则引擎）
+    Detect,
+    /// 蜜罐与执行（蜜罐 / XDP）
+    Honeypot,
+    /// 通道与告警（API / syslog / webhook / 暴露面）
+    Channels,
+    /// 关于（版本 / 路径 / 许可）
+    About,
+}
+
+impl SettingsPage {
+    const ALL: [Self; 6] = [
+        Self::Look,
+        Self::Ai,
+        Self::Detect,
+        Self::Honeypot,
+        Self::Channels,
+        Self::About,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Look => "外观",
+            Self::Ai => "AI 分析",
+            Self::Detect => "检测与感知",
+            Self::Honeypot => "蜜罐与执行",
+            Self::Channels => "通道与告警",
+            Self::About => "关于",
+        }
+    }
 }
 
 struct Cache {
@@ -68,6 +111,8 @@ pub struct AisafeApp {
     event_detail_id: Option<i64>,
     // 设置草稿（None = 未编辑；进入设置页时从引擎取）
     settings_draft: Option<AppConfig>,
+    // 设置子页（0.5.8 分页）
+    settings_page: SettingsPage,
     settings_interval: String,
     settings_port: String,
     settings_snippet: String,
@@ -142,6 +187,7 @@ impl AisafeApp {
             event_filter: String::new(),
             event_detail_id: None,
             settings_draft: None,
+            settings_page: SettingsPage::default(),
             settings_interval: String::new(),
             settings_port: String::new(),
             settings_snippet: String::new(),
@@ -221,29 +267,22 @@ impl AisafeApp {
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::left("nav")
-            .exact_size(200.0)
+            .exact_size(212.0)
             .resizable(false)
             .frame(Frame::new().fill(bg_sidebar()))
             .show(ui, |ui| {
-                ui.add_space(22.0);
+                ui.add_space(space::L);
                 ui.horizontal(|ui| {
-                    ui.add_space(18.0);
-                    ui.label(
-                        RichText::new("AI-SafeGuard")
-                            .size(24.0)
-                            .strong()
-                            .color(accent()),
-                    );
+                    ui.add_space(space::M);
+                    ui.label(title("AI-SafeGuard").color(accent()));
                 });
+                // 版本徽章：随时可见、一眼区分版本
                 ui.horizontal(|ui| {
-                    ui.add_space(18.0);
-                    ui.label(
-                        RichText::new(format!("安全中心 v{}", self.eng.version()))
-                            .size(12.0)
-                            .color(text_dim()),
-                    );
+                    ui.add_space(space::M);
+                    version_badge(ui, &self.eng.version());
+                    ui.label(caption("安全中心").color(text_dim()));
                 });
-                ui.add_space(24.0);
+                ui.add_space(space::L);
 
                 let tabs = [
                     (Tab::Dashboard, "⌂  仪表盘"),
@@ -256,12 +295,10 @@ impl AisafeApp {
                 for (tab, label) in tabs {
                     let selected = self.tab == tab;
                     ui.horizontal(|ui| {
-                        ui.add_space(10.0);
-                        let text = RichText::new(label).size(15.0).color(if selected {
-                            text_color()
-                        } else {
-                            text_dim()
-                        });
+                        ui.add_space(space::S);
+                        let text = RichText::new(label)
+                            .size(type_scale::BODY)
+                            .color(if selected { text_color() } else { text_dim() });
                         let fill = if selected {
                             accent_soft()
                         } else {
@@ -272,7 +309,7 @@ impl AisafeApp {
                                 egui::Button::new(text)
                                     .fill(fill)
                                     .corner_radius(CornerRadius::same(8))
-                                    .min_size(egui::vec2(180.0, 34.0)),
+                                    .min_size(egui::vec2(190.0, 34.0)),
                             )
                             .clicked()
                         {
@@ -282,24 +319,24 @@ impl AisafeApp {
                 }
 
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    ui.add_space(16.0);
+                    ui.add_space(space::L);
                     if let Some(st) = &self.cache.status {
                         ui.horizontal(|ui| {
-                            ui.add_space(18.0);
+                            ui.add_space(space::M);
                             let (c, t) = if st.elevated {
                                 (ok(), "管理员权限")
                             } else {
                                 (warn(), "未提权 · 防火墙不可用")
                             };
-                            ui.label(RichText::new("●").color(c));
-                            ui.label(RichText::new(t).size(12.0).color(text_dim()));
+                            ui.label(RichText::new("●").size(type_scale::CAPTION).color(c));
+                            ui.label(caption(t).color(text_dim()));
                         });
-                        ui.add_space(6.0);
+                        ui.add_space(space::XS);
                         ui.horizontal(|ui| {
-                            ui.add_space(18.0);
+                            ui.add_space(space::M);
                             ui.label(
-                                RichText::new(format!("后端 {}", st.backend))
-                                    .size(11.0)
+                                caption(format!("后端 {}", st.backend))
+                                    .size(type_scale::MICRO)
                                     .color(text_dim()),
                             );
                         });
@@ -328,7 +365,7 @@ impl AisafeApp {
                         .inner_margin(Margin::same(12))
                         .stroke(Stroke::new(1.0, accent()))
                         .show(ui, |ui| {
-                            ui.label(RichText::new(msg).color(toast_text()).size(13.0));
+                            ui.label(body_text(msg).color(toast_text()));
                         });
                 });
         }
@@ -358,7 +395,7 @@ impl eframe::App for AisafeApp {
         self.sidebar(ui);
 
         egui::CentralPanel::default()
-            .frame(Frame::new().fill(bg_panel()).inner_margin(Margin::same(20)))
+            .frame(Frame::new().fill(bg_panel()).inner_margin(Margin::same(16)))
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("main-scroll")
@@ -378,6 +415,22 @@ impl eframe::App for AisafeApp {
 }
 
 // ---------- 共用小组件 ----------
+
+/// 版本徽章：主色底 + 反色字，侧栏常驻，一眼区分版本。
+fn version_badge(ui: &mut egui::Ui, version: &str) {
+    Frame::new()
+        .fill(accent())
+        .corner_radius(CornerRadius::same(6))
+        .inner_margin(Margin::symmetric(8, 3))
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(format!("v{version}"))
+                    .size(type_scale::MICRO)
+                    .strong()
+                    .color(on_accent()),
+            );
+        });
+}
 
 /// eframe 默认字体不含 CJK，按优先级加载系统字体，不往仓库塞字体文件。
 fn load_fonts(ctx: &egui::Context) {
@@ -438,9 +491,9 @@ fn card(ui: &mut egui::Ui, title: &str, value: &str, color: Color32) {
         .inner_margin(Margin::same(14))
         .stroke(Stroke::new(1.0, border()))
         .show(ui, |ui| {
-            ui.set_min_width(130.0);
-            ui.label(RichText::new(title).size(12.0).color(text_dim()));
-            ui.label(RichText::new(value).size(24.0).strong().color(color));
+            ui.set_min_width(132.0);
+            ui.label(caption(title).color(text_dim()));
+            ui.label(display(value).color(color));
         });
 }
 
@@ -452,7 +505,7 @@ fn chip(ui: &mut egui::Ui, text: &str, color: Color32) {
         .show(ui, |ui| {
             ui.label(
                 RichText::new(text.to_uppercase())
-                    .size(11.0)
+                    .size(type_scale::MICRO)
                     .strong()
                     .color(color),
             );
@@ -460,9 +513,9 @@ fn chip(ui: &mut egui::Ui, text: &str, color: Color32) {
 }
 
 fn section(ui: &mut egui::Ui, title: impl Into<String>) {
-    ui.add_space(8.0);
-    ui.label(RichText::new(title.into()).size(16.0).strong());
-    ui.add_space(4.0);
+    ui.add_space(space::S);
+    ui.label(section_title(title));
+    ui.add_space(space::XS);
 }
 
 fn warn_banner(ui: &mut egui::Ui, text: &str) {
@@ -472,9 +525,9 @@ fn warn_banner(ui: &mut egui::Ui, text: &str) {
         .inner_margin(Margin::same(12))
         .stroke(Stroke::new(1.0, warn()))
         .show(ui, |ui| {
-            ui.label(RichText::new(text).color(banner_text()).size(13.0));
+            ui.label(body_text(text).color(banner_text()));
         });
-    ui.add_space(8.0);
+    ui.add_space(space::S);
 }
 
 fn severity_color(severity: &str) -> Color32 {

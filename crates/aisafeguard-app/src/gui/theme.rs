@@ -14,7 +14,7 @@
 
 use std::sync::RwLock;
 
-use egui::{Color32, FontFamily, FontId, Stroke, TextStyle};
+use egui::{Color32, FontFamily, FontId, RichText, Stroke, TextStyle};
 
 /// 可用配色方案。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -321,6 +321,61 @@ pub const FONT_SCALE_MIN: f32 = 0.85;
 pub const FONT_SCALE_MAX: f32 = 1.6;
 pub const FONT_SCALE_DEFAULT: f32 = 1.15;
 
+/// 排版比例体系（ui.md §3.2 字号阶梯的桌面收敛版，全部为 zoom 前 pt）：
+/// 只允许从这里取字号——界面代码禁止手写 `.size(N)`，保证缩放与层级一致。
+pub mod type_scale {
+    /// 数据大字（仪表盘卡片数值 / 关于页版本号）
+    pub const DISPLAY: f32 = 26.0;
+    /// 页面主标题（每页一个）
+    pub const TITLE: f32 = 20.0;
+    /// 小节标题
+    pub const SECTION: f32 = 15.5;
+    /// 正文（= egui Body/Button 阶梯）
+    pub const BODY: f32 = 14.5;
+    /// 辅助说明（= egui Small 阶梯）
+    pub const CAPTION: f32 = 12.5;
+    /// 徽章/标签/表格内小字
+    pub const MICRO: f32 = 11.5;
+    /// 等宽（IP/规则名/哈希/载荷）
+    pub const MONO: f32 = 13.0;
+}
+
+/// 间距比例（ui.md §4：8pt 系统）。界面代码取这里的常量，不写裸数字。
+pub mod space {
+    pub const XS: f32 = 4.0;
+    pub const S: f32 = 8.0;
+    pub const M: f32 = 12.0;
+    pub const L: f32 = 16.0;
+    pub const XL: f32 = 24.0;
+}
+
+/// 表格行高（egui_extras 表格与操作按钮共用，随 zoom 等比缩放）。
+pub const ROW_H: f32 = 27.0;
+pub const HEADER_H: f32 = 25.0;
+
+/// 文本助手：调用点只选层级（+ 语义色/字重），字号统一由比例体系决定。
+pub fn display(t: impl Into<String>) -> RichText {
+    RichText::new(t).size(type_scale::DISPLAY).strong()
+}
+pub fn title(t: impl Into<String>) -> RichText {
+    RichText::new(t).size(type_scale::TITLE).strong()
+}
+pub fn section_title(t: impl Into<String>) -> RichText {
+    RichText::new(t).size(type_scale::SECTION).strong()
+}
+pub fn body_text(t: impl Into<String>) -> RichText {
+    RichText::new(t).size(type_scale::BODY)
+}
+pub fn caption(t: impl Into<String>) -> RichText {
+    RichText::new(t).size(type_scale::CAPTION)
+}
+pub fn micro(t: impl Into<String>) -> RichText {
+    RichText::new(t).size(type_scale::MICRO)
+}
+pub fn mono_text(t: impl Into<String>) -> RichText {
+    RichText::new(t).size(type_scale::MONO)
+}
+
 /// 归一化字号缩放（越界收敛、NaN 回退默认）。
 pub fn normalize_font_scale(v: f32) -> f32 {
     if !v.is_finite() {
@@ -329,14 +384,15 @@ pub fn normalize_font_scale(v: f32) -> f32 {
     v.clamp(FONT_SCALE_MIN, FONT_SCALE_MAX)
 }
 
-/// egui 文本样式阶梯（ui.md §3.2 桌面收敛版）。
+/// egui 文本样式阶梯（与 type_scale 保持同一套数值）。
 fn text_styles() -> std::collections::BTreeMap<TextStyle, FontId> {
+    use type_scale as ts;
     [
-        (TextStyle::Small, 12.0),
-        (TextStyle::Body, 14.5),
-        (TextStyle::Button, 14.5),
-        (TextStyle::Heading, 20.0),
-        (TextStyle::Monospace, 13.5),
+        (TextStyle::Small, ts::CAPTION),
+        (TextStyle::Body, ts::BODY),
+        (TextStyle::Button, ts::BODY),
+        (TextStyle::Heading, ts::TITLE),
+        (TextStyle::Monospace, ts::MONO),
     ]
     .into_iter()
     .map(|(k, s)| (k, FontId::new(s, FontFamily::Proportional)))

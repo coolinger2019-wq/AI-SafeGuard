@@ -2,13 +2,29 @@ use super::*;
 
 impl AisafeApp {
     pub(crate) fn settings_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("设置").size(22.0).strong());
-        ui.add_space(10.0);
+        ui.label(title("设置"));
+        ui.add_space(space::S);
 
-        // Key 管理不依赖配置草稿（直接读写凭据管理器）
-        self.key_management_ui(ui);
+        // 子页导航：分段按钮，按功能域切页
+        ui.horizontal_wrapped(|ui| {
+            for p in SettingsPage::ALL {
+                let selected = self.settings_page == p;
+                let text = RichText::new(p.label())
+                    .size(type_scale::BODY)
+                    .color(if selected { on_accent() } else { text_color() });
+                let btn = egui::Button::new(text)
+                    .fill(if selected { accent() } else { bg_card() })
+                    .stroke(Stroke::new(1.0, if selected { accent() } else { border() }))
+                    .corner_radius(CornerRadius::same(8))
+                    .min_size(egui::vec2(0.0, 28.0));
+                if ui.add(btn).clicked() {
+                    self.settings_page = p;
+                }
+            }
+        });
+        ui.add_space(space::M);
 
-        ui.add_space(10.0);
+        // 草稿初始化：进入设置页时取一次；子页切换不重置
         if self.settings_draft.is_none() {
             let cfg = self.eng.config().unwrap_or_default();
             self.settings_interval = cfg.ai.analyze_interval_secs.to_string();
@@ -21,22 +37,40 @@ impl AisafeApp {
             self.settings_fp_days = (cfg.ai.fp_suppress_secs / 86400).to_string();
             self.settings_draft = Some(cfg);
         }
-        let Some(draft) = self.settings_draft.as_mut() else {
+        let Some(mut draft) = self.settings_draft.clone() else {
             return;
         };
 
-        section(ui, "界面外观");
+        match self.settings_page {
+            SettingsPage::Look => self.settings_look_page(ui, &mut draft),
+            SettingsPage::Ai => self.settings_ai_page(ui, &mut draft),
+            SettingsPage::Detect => self.settings_detect_page(ui, &mut draft),
+            SettingsPage::Honeypot => self.settings_honeypot_page(ui, &mut draft),
+            SettingsPage::Channels => self.settings_channels_page(ui, &mut draft),
+            SettingsPage::About => self.settings_about_page(ui),
+        }
+        // 每帧回写草稿：主题/字号即时预览与输入框内容都保存在草稿里，
+        // 语义与旧版一致（改动存草稿，保存才落盘，放弃即丢弃）。
+        self.settings_draft = Some(draft);
+
+        self.settings_footer(ui);
+    }
+
+    // ---------- 外观 ----------
+
+    fn settings_look_page(&mut self, ui: &mut egui::Ui, draft: &mut AppConfig) {
+        section(ui, "配色方案");
         ui.label(
-            RichText::new("切换配色方案与字号即时预览；点底部“保存设置”后持久化。")
-                .size(11.0)
+            RichText::new("切换即时预览；点底部“保存设置”后持久化。")
+                .size(type_scale::CAPTION)
                 .color(text_dim()),
         );
-        ui.add_space(4.0);
+        ui.add_space(space::S);
         ui.horizontal_wrapped(|ui| {
             for id in ThemeId::all() {
                 let selected = ThemeId::from_str(&draft.ui.theme) == id;
                 let spec = id.spec();
-                let mut text = RichText::new(spec.name).size(13.0);
+                let mut text = RichText::new(spec.name).size(type_scale::BODY);
                 text = if selected {
                     text.color(on_accent()).strong()
                 } else {
@@ -55,6 +89,7 @@ impl AisafeApp {
         // 选中方案的色卡预览 + 说明
         {
             let spec = ThemeId::from_str(&draft.ui.theme).spec();
+            ui.add_space(space::XS);
             ui.horizontal(|ui| {
                 for (name, c) in [
                     ("背景", spec.p.bg_panel),
@@ -71,7 +106,7 @@ impl AisafeApp {
                         rect.center(),
                         egui::Align2::CENTER_CENTER,
                         name,
-                        egui::FontId::proportional(10.0),
+                        egui::FontId::proportional(type_scale::MICRO),
                         if spec.dark {
                             Color32::from_gray(210)
                         } else {
@@ -79,12 +114,12 @@ impl AisafeApp {
                         },
                     );
                 }
-                ui.label(RichText::new(spec.desc).size(11.0).color(text_dim()));
+                ui.label(caption(spec.desc).color(text_dim()));
             });
         }
-        ui.add_space(6.0);
+        ui.add_space(space::S);
+        section(ui, "字号缩放");
         ui.horizontal(|ui| {
-            ui.label("字号缩放");
             let mut scale = theme::normalize_font_scale(draft.ui.font_scale);
             let slider = ui.add(
                 egui::Slider::new(&mut scale, theme::FONT_SCALE_MIN..=theme::FONT_SCALE_MAX)
@@ -106,16 +141,19 @@ impl AisafeApp {
             }
         });
         ui.label(
-            RichText::new("默认“舒适”档（正文约 16.7px）；弱视或高分屏可切“特大”，配合高对比配色进一步提高可读性。")
-                .size(11.0)
+            RichText::new("默认“舒适”档（正文约 16.7px）；弱视或高分屏可切“特大”。全部界面文字与间距随缩放等比变化。")
+                .size(type_scale::CAPTION)
                 .color(text_dim()),
         );
+    }
 
-        ui.add_space(14.0);
+    // ---------- AI 分析 ----------
+
+    fn settings_ai_page(&mut self, ui: &mut egui::Ui, draft: &mut AppConfig) {
         section(ui, "AI 分析");
         egui::Grid::new("ai-settings")
             .num_columns(2)
-            .spacing([14.0, 8.0])
+            .spacing([14.0, space::S])
             .show(ui, |ui| {
                 ui.label("启用 AI 分析");
                 ui.checkbox(&mut draft.ai.enabled, "");
@@ -166,11 +204,17 @@ impl AisafeApp {
                 ui.end_row();
             });
 
-        ui.add_space(14.0);
+        ui.add_space(space::M);
+        self.key_management_ui(ui);
+    }
+
+    // ---------- 检测与感知 ----------
+
+    fn settings_detect_page(&mut self, ui: &mut egui::Ui, draft: &mut AppConfig) {
         section(ui, "本地检测（快路径）");
         egui::Grid::new("detect-settings")
             .num_columns(2)
-            .spacing([14.0, 8.0])
+            .spacing([14.0, space::S])
             .show(ui, |ui| {
                 ui.label("频次检测");
                 ui.checkbox(&mut draft.detect.enabled, "（端口扫描 / 暴力探测判定）");
@@ -186,20 +230,20 @@ impl AisafeApp {
             RichText::new(
                 "阈值（扫描端口数/窗口/次数/TTL）在 config.toml [detect] 中调整，保存后即时生效。",
             )
-            .size(11.0)
+            .size(type_scale::CAPTION)
             .color(text_dim()),
         );
 
-        ui.add_space(14.0);
+        ui.add_space(space::M);
         section(ui, "流量采样捕获（真实流量观测）");
         egui::Grid::new("capture-settings")
             .num_columns(2)
-            .spacing([14.0, 8.0])
+            .spacing([14.0, space::S])
             .show(ui, |ui| {
                 ui.label("启用采样捕获");
                 ui.checkbox(
                     &mut draft.detect.capture.enabled,
-                    "（需重启；被动观测，仅取副本；Windows 需管理员/服务模式，Linux 需 CAP_NET_RAW；默认关闭）",
+                    "（需重启；Windows 需管理员/服务，Linux 需 CAP_NET_RAW；默认关闭）",
                 );
                 ui.end_row();
                 ui.label("采集模式（需重启）");
@@ -234,25 +278,21 @@ impl AisafeApp {
                     chip(ui, "不可用", warn());
                 }
                 if !cap.note.is_empty() {
-                    ui.label(RichText::new(&cap.note).size(11.0).color(warn()));
+                    ui.label(caption(&cap.note).color(warn()));
                 }
             });
         }
         ui.label(
-            RichText::new(
-                "阈值（扫描端口数 / SYN flood 速率 / 窗口 / 流表）在 config.toml [detect.capture] 调整；\
-                 采样为被动观测（仅取副本，不注回、不拦截任何包），模式与开关重启后生效。\
-                 full 模式仅在判定可疑时截断留存载荷摘要。",
-            )
-            .size(11.0)
-            .color(text_dim()),
+            RichText::new("采样为被动观测（仅取副本，不注回、不拦截任何包）；full 模式仅在判定可疑时截断留存载荷摘要。")
+                .size(type_scale::CAPTION)
+                .color(text_dim()),
         );
 
-        ui.add_space(14.0);
+        ui.add_space(space::M);
         section(ui, "L7 解析与指纹（full 采样模式）");
         egui::Grid::new("l7-settings")
             .num_columns(2)
-            .spacing([14.0, 8.0])
+            .spacing([14.0, space::S])
             .show(ui, |ui| {
                 ui.label("HTTP 提示解析");
                 ui.checkbox(
@@ -269,17 +309,17 @@ impl AisafeApp {
             });
         ui.label(
             RichText::new(
-                "开关热更即时生效；产出字段随 Detection 事件入库（http_hint / tls_fingerprint / tls_ja4）。",
+                "开关热更即时生效；产出字段随 Detection 事件入库（http_hint / tls_fp / tls_ja4）。",
             )
-            .size(11.0)
+            .size(type_scale::CAPTION)
             .color(text_dim()),
         );
 
-        ui.add_space(14.0);
+        ui.add_space(space::M);
         section(ui, "规则子集引擎（Suricata/ET 风格）");
         egui::Grid::new("rules-settings")
             .num_columns(2)
-            .spacing([14.0, 8.0])
+            .spacing([14.0, space::S])
             .show(ui, |ui| {
                 ui.label("启用规则匹配");
                 ui.checkbox(&mut draft.detect.rules.enabled, "（默认关闭）");
@@ -309,156 +349,35 @@ impl AisafeApp {
                 } else {
                     chip(ui, "未加载", warn());
                 }
-                ui.label(
-                    RichText::new(format!("命中 {} 次", r.hits))
-                        .size(11.0)
-                        .color(text_dim()),
-                );
+                ui.label(caption(format!("命中 {} 次", r.hits)).color(text_dim()));
                 if !r.note.is_empty() {
-                    ui.label(RichText::new(&r.note).size(11.0).color(text_dim()));
+                    ui.label(caption(&r.note).color(text_dim()));
                 }
             });
         }
         ui.label(
-            RichText::new(
-                "规则包 = 本地文件（任何一条越界即整包拒绝）；文件变化自动整包热重载。\
-                 自写示范包见仓库 crates/aisafeguard-rules/demo.rules；范围见 docs/RULESET_SUBSET.md。",
-            )
-            .size(11.0)
-            .color(text_dim()),
-        );
-
-        ui.add_space(14.0);
-        section(ui, "API 服务");
-        egui::Grid::new("api-settings")
-            .num_columns(2)
-            .spacing([14.0, 8.0])
-            .show(ui, |ui| {
-                ui.label("启用本地 API");
-                ui.checkbox(&mut draft.api.enabled, "（仅监听 127.0.0.1）");
-                ui.end_row();
-                ui.label("端口（需重启）");
-                ui.add(egui::TextEdit::singleline(&mut self.settings_port).desired_width(120.0));
-                ui.end_row();
-            });
-
-        ui.add_space(14.0);
-        section(ui, "远程日志（syslog 转发）");
-        egui::Grid::new("syslog-settings")
-            .num_columns(2)
-            .spacing([14.0, 8.0])
-            .show(ui, |ui| {
-                ui.label("转发到收集器");
-                ui.checkbox(
-                    &mut draft.syslog.enabled,
-                    "（RFC 5424；事件总线的副本，best-effort 不阻塞引擎）",
-                );
-                ui.end_row();
-                ui.label("收集器地址");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.settings_syslog_target)
-                        .desired_width(180.0)
-                        .hint_text("127.0.0.1:514"),
-                );
-                ui.end_row();
-                ui.label("传输协议");
-                egui::ComboBox::from_id_salt("syslog-protocol")
-                    .selected_text(&draft.syslog.protocol)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut draft.syslog.protocol,
-                            "udp".to_string(),
-                            "udp（RFC 5426）",
-                        );
-                        ui.selectable_value(
-                            &mut draft.syslog.protocol,
-                            "tcp".to_string(),
-                            "tcp（换行分帧）",
-                        );
-                    });
-                ui.end_row();
-            });
-        ui.label(
-            RichText::new("改动下一条事件即生效；目标不可达只丢该条。完整性校验仍以本地哈希链（verify-log / 导出）为准。")
-                .size(11.0)
+            RichText::new("规则包 = 本地文件（任何一条越界即整包拒绝）；文件变化自动整包热重载。自写示范包见 crates/aisafeguard-rules/demo.rules。")
+                .size(type_scale::CAPTION)
                 .color(text_dim()),
         );
+    }
 
-        ui.add_space(14.0);
-        section(ui, "告警通知（Webhook）");
-        egui::Grid::new("notify-settings")
-            .num_columns(2)
-            .spacing([14.0, 8.0])
-            .show(ui, |ui| {
-                ui.label("推送告警");
-                ui.checkbox(&mut draft.notify.enabled, "（POST JSON 到接收端）");
-                ui.end_row();
-                ui.label("接收端 URL");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.settings_notify_url)
-                        .desired_width(240.0)
-                        .hint_text("http://127.0.0.1:9000/alert"),
-                );
-                ui.end_row();
-                ui.label("最低严重度");
-                egui::ComboBox::from_id_salt("notify-severity")
-                    .selected_text(&draft.notify.min_severity)
-                    .show_ui(ui, |ui| {
-                        for (v, label) in [
-                            ("error", "error（仅错误与更严重）"),
-                            ("warning", "warning（检测判定/封禁/错误）"),
-                            ("notice", "notice（含蜜罐命中/AI 建议）"),
-                            ("info", "info（全部事件）"),
-                        ] {
-                            ui.selectable_value(
-                                &mut draft.notify.min_severity,
-                                v.to_string(),
-                                label,
-                            );
-                        }
-                    });
-                ui.end_row();
-            });
-        ui.label(
-            RichText::new("严重度口径：detection/封禁=warning，蜜罐命中/AI 建议=notice，例行流水=info；低于所选严重度的事件不推送。")
-                .size(11.0)
-                .color(text_dim()),
-        );
+    // ---------- 蜜罐与执行 ----------
 
-        ui.add_space(14.0);
-        section(ui, "暴露面自动扫描");
-        egui::Grid::new("exposure-settings")
-            .num_columns(2)
-            .spacing([14.0, 8.0])
-            .show(ui, |ui| {
-                ui.label("定时扫描间隔（秒）");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.settings_exposure_secs)
-                        .desired_width(120.0)
-                        .hint_text("0 = 关闭"),
-                );
-                ui.end_row();
-            });
-        ui.label(
-            RichText::new("0 = 仅手动扫描；300-86400 秒 = 定时扫描并入库，供 AI 分析与 API 查询。")
-                .size(11.0)
-                .color(text_dim()),
-        );
-
-        ui.add_space(14.0);
+    fn settings_honeypot_page(&mut self, ui: &mut egui::Ui, draft: &mut AppConfig) {
         section(ui, "蜜罐");
         ui.checkbox(&mut draft.honeypot.enabled, "启用蜜罐（需重启）");
         ui.label(
             RichText::new("监听列表（名称/端口/类型）通过 config.toml 的 [honeypot.listeners] 编辑，重启生效。")
-                .size(11.0)
+                .size(type_scale::CAPTION)
                 .color(text_dim()),
         );
 
-        ui.add_space(14.0);
+        ui.add_space(space::M);
         section(ui, "XDP 快速执行层（仅 Linux，需重启）");
         egui::Grid::new("xdp-settings")
             .num_columns(2)
-            .spacing([14.0, 8.0])
+            .spacing([14.0, space::S])
             .show(ui, |ui| {
                 ui.label("启用 XDP");
                 ui.checkbox(
@@ -525,52 +444,217 @@ impl AisafeApp {
             });
         }
         ui.label(
+            RichText::new("仅 Linux 生效；需 root/CAP_BPF。内网/回环地址永不写入快速丢弃表；内核流表只存源三元组与包计数（无载荷，LRU 有界）。")
+                .size(type_scale::CAPTION)
+                .color(text_dim()),
+        );
+    }
+
+    // ---------- 通道与告警 ----------
+
+    fn settings_channels_page(&mut self, ui: &mut egui::Ui, draft: &mut AppConfig) {
+        section(ui, "API 服务");
+        egui::Grid::new("api-settings")
+            .num_columns(2)
+            .spacing([14.0, space::S])
+            .show(ui, |ui| {
+                ui.label("启用本地 API");
+                ui.checkbox(&mut draft.api.enabled, "（仅监听 127.0.0.1）");
+                ui.end_row();
+                ui.label("端口（需重启）");
+                ui.add(egui::TextEdit::singleline(&mut self.settings_port).desired_width(120.0));
+                ui.end_row();
+            });
+
+        ui.add_space(space::M);
+        section(ui, "远程日志（syslog 转发）");
+        egui::Grid::new("syslog-settings")
+            .num_columns(2)
+            .spacing([14.0, space::S])
+            .show(ui, |ui| {
+                ui.label("转发到收集器");
+                ui.checkbox(
+                    &mut draft.syslog.enabled,
+                    "（RFC 5424；事件总线的副本，best-effort 不阻塞引擎）",
+                );
+                ui.end_row();
+                ui.label("收集器地址");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.settings_syslog_target)
+                        .desired_width(180.0)
+                        .hint_text("127.0.0.1:514"),
+                );
+                ui.end_row();
+                ui.label("传输协议");
+                egui::ComboBox::from_id_salt("syslog-protocol")
+                    .selected_text(&draft.syslog.protocol)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut draft.syslog.protocol,
+                            "udp".to_string(),
+                            "udp（RFC 5426）",
+                        );
+                        ui.selectable_value(
+                            &mut draft.syslog.protocol,
+                            "tcp".to_string(),
+                            "tcp（换行分帧）",
+                        );
+                    });
+                ui.end_row();
+            });
+        ui.label(
+            RichText::new("改动下一条事件即生效；目标不可达只丢该条。完整性校验仍以本地哈希链（verify-log / 导出）为准。")
+                .size(type_scale::CAPTION)
+                .color(text_dim()),
+        );
+
+        ui.add_space(space::M);
+        section(ui, "告警通知（Webhook）");
+        egui::Grid::new("notify-settings")
+            .num_columns(2)
+            .spacing([14.0, space::S])
+            .show(ui, |ui| {
+                ui.label("推送告警");
+                ui.checkbox(&mut draft.notify.enabled, "（POST JSON 到接收端）");
+                ui.end_row();
+                ui.label("接收端 URL");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.settings_notify_url)
+                        .desired_width(240.0)
+                        .hint_text("http://127.0.0.1:9000/alert"),
+                );
+                ui.end_row();
+                ui.label("最低严重度");
+                egui::ComboBox::from_id_salt("notify-severity")
+                    .selected_text(&draft.notify.min_severity)
+                    .show_ui(ui, |ui| {
+                        for (v, label) in [
+                            ("error", "error（仅错误与更严重）"),
+                            ("warning", "warning（检测判定/封禁/错误）"),
+                            ("notice", "notice（含蜜罐命中/AI 建议）"),
+                            ("info", "info（全部事件）"),
+                        ] {
+                            ui.selectable_value(
+                                &mut draft.notify.min_severity,
+                                v.to_string(),
+                                label,
+                            );
+                        }
+                    });
+                ui.end_row();
+            });
+        ui.label(
             RichText::new(
-                "仅 Linux 生效；需 root/CAP_BPF。镜像范围 = 入站 + 任意协议 + 无端口 + IPv4 且非内网的封禁规则                 （内网/回环地址永不写入快速丢弃表，G2）。内核流表只存源三元组与包计数（无载荷，LRU 有界）。",
+                "严重度口径：detection/封禁=warning，蜜罐命中/AI 建议=notice，例行流水=info。",
             )
-            .size(11.0)
+            .size(type_scale::CAPTION)
             .color(text_dim()),
         );
 
-        ui.add_space(14.0);
-        section(ui, "关于");
-        if let Some(st) = &self.cache.status {
-            ui.label(
-                RichText::new(format!(
-                    "版本 {} · 防火墙后端 {} · 运行 {} 秒",
-                    st.version, st.backend, st.uptime_secs
-                ))
-                .size(12.0)
+        ui.add_space(space::M);
+        section(ui, "暴露面自动扫描");
+        egui::Grid::new("exposure-settings")
+            .num_columns(2)
+            .spacing([14.0, space::S])
+            .show(ui, |ui| {
+                ui.label("定时扫描间隔（秒）");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.settings_exposure_secs)
+                        .desired_width(120.0)
+                        .hint_text("0 = 关闭"),
+                );
+                ui.end_row();
+            });
+        ui.label(
+            RichText::new("0 = 仅手动扫描；300-86400 秒 = 定时扫描并入库，供 AI 分析与 API 查询。")
+                .size(type_scale::CAPTION)
                 .color(text_dim()),
-            );
+        );
+    }
+
+    // ---------- 关于 ----------
+
+    fn settings_about_page(&mut self, ui: &mut egui::Ui) {
+        section(ui, "版本");
+        Frame::new()
+            .fill(bg_card())
+            .corner_radius(CornerRadius::same(10))
+            .inner_margin(Margin::same(16))
+            .stroke(Stroke::new(1.0, border()))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(display(format!("v{}", self.eng.version())).color(accent()));
+                    ui.label(
+                        RichText::new("AI-SafeGuard 安全中心")
+                            .size(type_scale::BODY)
+                            .color(text_dim()),
+                    );
+                });
+            });
+        ui.add_space(space::S);
+        if let Some(st) = &self.cache.status {
+            egui::Grid::new("about-info")
+                .num_columns(2)
+                .spacing([14.0, space::XS])
+                .show(ui, |ui| {
+                    kv_label(ui, "程序版本");
+                    ui.label(mono_text(&st.version));
+                    ui.end_row();
+                    kv_label(ui, "防火墙后端");
+                    ui.label(mono_text(&st.backend));
+                    ui.end_row();
+                    kv_label(ui, "权限状态");
+                    ui.label(if st.elevated {
+                        "管理员（防火墙可写）".to_string()
+                    } else {
+                        "未提权（防火墙不可写）".to_string()
+                    });
+                    ui.end_row();
+                    kv_label(ui, "已运行");
+                    ui.label(humanize_uptime(st.uptime_secs));
+                    ui.end_row();
+                });
         }
+
+        ui.add_space(space::M);
+        section(ui, "数据与配置");
+        let (cfg_path, data_dir) = self.eng.config_paths();
+        egui::Grid::new("about-paths")
+            .num_columns(2)
+            .spacing([14.0, space::XS])
+            .show(ui, |ui| {
+                kv_label(ui, "配置文件");
+                ui.label(mono_text(&cfg_path));
+                ui.end_row();
+                kv_label(ui, "数据目录");
+                ui.label(mono_text(&data_dir));
+                ui.end_row();
+            });
+
+        ui.add_space(space::M);
+        section(ui, "开源许可");
         ui.label(
             RichText::new(concat!(
                 "AI-SafeGuard ",
                 env!("CARGO_PKG_VERSION"),
-                " · © 2026 coolinger · vibe coding"
+                " · MIT License · © 2026 coolinger · vibe coding"
             ))
-            .size(12.0)
-            .color(text_color()),
+            .size(type_scale::CAPTION)
+            .color(text_dim()),
         );
         ui.label(
-            RichText::new("MIT License · 安全软件 · 仅供授权环境防御性使用")
-                .size(11.0)
+            RichText::new("安全软件 · 仅供授权环境防御性使用 · 架构与安全文档见仓库 docs/ 目录")
+                .size(type_scale::CAPTION)
                 .color(text_dim()),
         );
-        let (cfg_path, data_dir) = self.eng.config_paths();
-        ui.label(
-            RichText::new(format!("配置文件: {cfg_path}"))
-                .size(12.0)
-                .color(text_dim()),
-        );
-        ui.label(
-            RichText::new(format!("数据目录: {data_dir}"))
-                .size(12.0)
-                .color(text_dim()),
-        );
+    }
 
-        ui.add_space(16.0);
+    // ---------- 公共页脚 ----------
+
+    fn settings_footer(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(space::L);
+        ui.separator();
+        ui.add_space(space::S);
         ui.horizontal(|ui| {
             if ui
                 .add(
@@ -585,6 +669,11 @@ impl AisafeApp {
             if ui.button("放弃修改").clicked() {
                 self.settings_draft = None;
             }
+            ui.label(
+                RichText::new("带“需重启”标注的项保存后会明确列出；其余保存即热更生效。")
+                    .size(type_scale::CAPTION)
+                    .color(text_dim()),
+            );
         });
     }
 
@@ -607,7 +696,7 @@ impl AisafeApp {
                 if stored { ok() } else { text_dim() },
             );
         });
-        egui::CollapsingHeader::new(egui::RichText::new("更改 Key").size(13.0))
+        egui::CollapsingHeader::new(egui::RichText::new("更改 Key").size(type_scale::BODY))
             .id_salt("change-key")
             .default_open(false)
             .show(ui, |ui| {
@@ -651,7 +740,7 @@ impl AisafeApp {
             });
         ui.label(
             RichText::new("环境变量 AISAFEGUARD_AI_KEY 优先于凭据管理器（适合 CI/无头部署）。配置文件不保存任何秘密。")
-                .size(11.0)
+                .size(type_scale::CAPTION)
                 .color(text_dim()),
         );
     }
@@ -725,7 +814,6 @@ impl AisafeApp {
         // 界面外观：主题名归一化（未知值回退默认），字号收敛到合法区间
         cfg.ui.theme = ThemeId::from_str(&cfg.ui.theme).as_str().to_string();
         cfg.ui.font_scale = theme::normalize_font_scale(cfg.ui.font_scale);
-        // 热更/重启分界（A4/A5 契约）：提示哪些项需重启
         // 热更/重启分界（A4/A5 契约）：对比最近一次保存的配置，提示哪些项需重启
         let old_cfg = self.eng.config().unwrap_or_default();
         let restart_items = AppConfig::restart_required(&old_cfg, &cfg);
@@ -742,5 +830,24 @@ impl AisafeApp {
             }
             Err(e) => self.set_toast(format!("保存失败: {e}")),
         }
+    }
+}
+
+/// 「标签：」列（关于页信息网格共用）。
+fn kv_label(ui: &mut egui::Ui, key: &str) {
+    ui.label(
+        RichText::new(key)
+            .size(type_scale::CAPTION)
+            .color(text_dim()),
+    );
+}
+
+/// 秒 → 人读运行时长。
+fn humanize_uptime(secs: u64) -> String {
+    match secs {
+        s if s < 90 => format!("{s} 秒"),
+        m if m < 5400 => format!("{} 分钟", (m + 30) / 60),
+        h if h < 129_600 => format!("{} 小时", (h + 1800) / 3600),
+        d => format!("{} 天", (d + 43_200) / 86_400),
     }
 }

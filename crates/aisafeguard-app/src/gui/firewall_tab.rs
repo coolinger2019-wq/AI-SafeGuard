@@ -3,8 +3,8 @@ use aisafeguard_firewall::{BlockSpec, Direction, Protocol};
 
 impl AisafeApp {
     pub(crate) fn firewall_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("防火墙").size(22.0).strong());
-        ui.add_space(10.0);
+        ui.label(RichText::new("防火墙").size(type_scale::TITLE).strong());
+        ui.add_space(space::M);
 
         let elevated = self
             .cache
@@ -69,7 +69,7 @@ impl AisafeApp {
                 );
                 ui.end_row();
             });
-        ui.add_space(6.0);
+        ui.add_space(space::S);
         if ui
             .add(
                 egui::Button::new(RichText::new("添加封禁规则").color(on_accent()))
@@ -81,7 +81,7 @@ impl AisafeApp {
             self.apply_manual_rule();
         }
 
-        ui.add_space(14.0);
+        ui.add_space(space::L);
         section(ui, format!("已管理规则（{}）", self.cache.rules.len()));
         let rules = self.cache.rules.clone();
         egui_extras::TableBuilder::new(ui)
@@ -95,7 +95,7 @@ impl AisafeApp {
             .column(egui_extras::Column::exact(150.0))
             .column(egui_extras::Column::exact(170.0))
             .column(egui_extras::Column::remainder())
-            .header(22.0, |mut header| {
+            .header(HEADER_H, |mut header| {
                 for name in [
                     "规则名",
                     "方向",
@@ -114,15 +114,17 @@ impl AisafeApp {
             })
             .body(|mut body| {
                 for r in &rules {
-                    body.row(24.0, |mut row| {
+                    body.row(ROW_H, |mut row| {
                         row.col(|ui| {
-                            ui.label(RichText::new(&r.name).monospace().size(11.0));
+                            ui.label(RichText::new(&r.name).monospace().size(type_scale::MICRO));
                         });
                         row.col(|ui| {
-                            ui.label(RichText::new(dir_cn(&r.direction)).size(12.0));
+                            ui.label(RichText::new(dir_cn(&r.direction)).size(type_scale::CAPTION));
                         });
                         row.col(|ui| {
-                            ui.label(RichText::new(proto_up(&r.protocol)).size(12.0));
+                            ui.label(
+                                RichText::new(proto_up(&r.protocol)).size(type_scale::CAPTION),
+                            );
                         });
                         row.col(|ui| {
                             let ip = if r.remote_ip.is_empty() {
@@ -130,11 +132,11 @@ impl AisafeApp {
                             } else {
                                 r.remote_ip.clone()
                             };
-                            ui.label(RichText::new(ip).monospace().size(12.0));
+                            ui.label(RichText::new(ip).monospace().size(type_scale::CAPTION));
                             if !r.tag.is_empty() {
                                 ui.label(
                                     RichText::new(format!("#{}", r.tag))
-                                        .size(10.0)
+                                        .size(type_scale::MICRO)
                                         .color(text_dim()),
                                 );
                             }
@@ -144,7 +146,7 @@ impl AisafeApp {
                                 .local_port
                                 .map(|p| p.to_string())
                                 .unwrap_or_else(|| "任意".into());
-                            ui.label(RichText::new(p).size(12.0));
+                            ui.label(RichText::new(p).size(type_scale::CAPTION));
                         });
                         row.col(|ui| {
                             let color = match r.origin.as_str() {
@@ -154,15 +156,19 @@ impl AisafeApp {
                                 "manual" => text_dim(),
                                 _ => danger(),
                             };
-                            ui.label(RichText::new(&r.source).size(12.0).color(color));
+                            ui.label(
+                                RichText::new(&r.source)
+                                    .size(type_scale::CAPTION)
+                                    .color(color),
+                            );
                         });
                         row.col(|ui| {
                             // F2：原因摘要一句话；清洗 + 截断在 explain 层完成
-                            ui.label(RichText::new(&r.reason_summary).size(12.0));
+                            ui.label(RichText::new(&r.reason_summary).size(type_scale::CAPTION));
                         });
                         row.col(|ui| {
                             // F3：试封中 / 已转正 / 自动封禁 / 手动 固定文案
-                            ui.label(RichText::new(&r.ttl_text).size(11.0));
+                            ui.label(RichText::new(&r.ttl_text).size(type_scale::MICRO));
                         });
                         row.col(|ui| {
                             let rid = r.id;
@@ -170,7 +176,9 @@ impl AisafeApp {
                             if !r.remote_ip.is_empty()
                                 && ui
                                     .add(egui::Button::new(
-                                        RichText::new("查看事件").size(12.0).color(accent()),
+                                        RichText::new("查看事件")
+                                            .size(type_scale::CAPTION)
+                                            .color(accent()),
                                     ))
                                     .clicked()
                             {
@@ -183,7 +191,9 @@ impl AisafeApp {
                             if !r.remote_ip.is_empty()
                                 && ui
                                     .add(egui::Button::new(
-                                        RichText::new("误报").size(12.0).color(warn()),
+                                        RichText::new("误报")
+                                            .size(type_scale::CAPTION)
+                                            .color(warn()),
                                     ))
                                     .clicked()
                             {
@@ -195,7 +205,9 @@ impl AisafeApp {
                                 && r.enabled
                                 && ui
                                     .add(egui::Button::new(
-                                        RichText::new("转正").size(12.0).color(purple()),
+                                        RichText::new("转正")
+                                            .size(type_scale::CAPTION)
+                                            .color(purple()),
                                     ))
                                     .clicked()
                             {
@@ -222,7 +234,9 @@ impl AisafeApp {
                             if ui
                                 .add(
                                     egui::Button::new(
-                                        RichText::new("删除").size(12.0).color(danger()),
+                                        RichText::new("删除")
+                                            .size(type_scale::CAPTION)
+                                            .color(danger()),
                                     )
                                     .fill(Color32::TRANSPARENT),
                                 )
@@ -238,10 +252,10 @@ impl AisafeApp {
                     });
                 }
             });
-        ui.add_space(4.0);
+        ui.add_space(space::XS);
         ui.label(
             RichText::new("来源说明：手动 = 界面/API 人工添加；检测引擎 / AI / 情报 = 自动封禁（AI 为灰度试封，可转正）。")
-                .size(11.0)
+                .size(type_scale::MICRO)
                 .color(text_dim()),
         );
     }

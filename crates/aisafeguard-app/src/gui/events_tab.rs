@@ -2,8 +2,8 @@ use super::*;
 
 impl AisafeApp {
     pub(crate) fn events_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("事件流水").size(22.0).strong());
-        ui.add_space(10.0);
+        ui.label(RichText::new("事件流水").size(type_scale::TITLE).strong());
+        ui.add_space(space::M);
 
         ui.horizontal(|ui| {
             ui.label("过滤：");
@@ -17,11 +17,11 @@ impl AisafeApp {
             }
             ui.label(
                 RichText::new(format!("{} 条", self.cache.events.len()))
-                    .size(12.0)
+                    .size(type_scale::CAPTION)
                     .color(text_dim()),
             );
         });
-        ui.add_space(10.0);
+        ui.add_space(space::M);
 
         let rows = self.cache.events.clone();
         egui_extras::TableBuilder::new(ui)
@@ -32,7 +32,7 @@ impl AisafeApp {
             .column(egui_extras::Column::exact(150.0))
             .column(egui_extras::Column::exact(110.0))
             .column(egui_extras::Column::remainder())
-            .header(22.0, |mut header| {
+            .header(HEADER_H, |mut header| {
                 for name in ["时间", "类型", "蜜罐", "来源", "操作", "摘要"] {
                     header.col(|ui| {
                         ui.strong(name);
@@ -41,19 +41,23 @@ impl AisafeApp {
             })
             .body(|mut body| {
                 for ev in &rows {
-                    body.row(22.0, |mut row| {
+                    body.row(ROW_H, |mut row| {
                         row.col(|ui| {
-                            ui.label(RichText::new(fmt_ts(ev.ts)).size(12.0).color(text_dim()));
+                            ui.label(
+                                RichText::new(fmt_ts(ev.ts))
+                                    .size(type_scale::CAPTION)
+                                    .color(text_dim()),
+                            );
                         });
                         row.col(|ui| {
                             ui.label(
                                 RichText::new(&ev.kind)
-                                    .size(12.0)
+                                    .size(type_scale::CAPTION)
                                     .color(event_color(&ev.kind)),
                             );
                         });
                         row.col(|ui| {
-                            ui.label(RichText::new(&ev.listener).size(12.0));
+                            ui.label(RichText::new(&ev.listener).size(type_scale::CAPTION));
                         });
                         row.col(|ui| {
                             let src = if ev.remote_ip.is_empty() {
@@ -61,7 +65,7 @@ impl AisafeApp {
                             } else {
                                 format!("{}:{}", ev.remote_ip, ev.remote_port)
                             };
-                            ui.label(RichText::new(src).monospace().size(12.0));
+                            ui.label(RichText::new(src).monospace().size(type_scale::CAPTION));
                         });
                         row.col(|ui| {
                             ui.horizontal(|ui| {
@@ -71,7 +75,9 @@ impl AisafeApp {
                                     && !ev.remote_ip.is_empty()
                                     && ui
                                         .add(egui::Button::new(
-                                            RichText::new("误报").size(11.0).color(warn()),
+                                            RichText::new("误报")
+                                                .size(type_scale::MICRO)
+                                                .color(warn()),
                                         ))
                                         .clicked()
                                 {
@@ -81,7 +87,9 @@ impl AisafeApp {
                                 // 事件详情（0.5.6 F14）：再点一次收起
                                 if ui
                                     .add(egui::Button::new(
-                                        RichText::new("详情").size(11.0).color(accent()),
+                                        RichText::new("详情")
+                                            .size(type_scale::MICRO)
+                                            .color(accent()),
                                     ))
                                     .clicked()
                                 {
@@ -94,17 +102,17 @@ impl AisafeApp {
                             });
                         });
                         row.col(|ui| {
-                            ui.label(RichText::new(&ev.summary).size(12.0));
+                            ui.label(RichText::new(&ev.summary).size(type_scale::CAPTION));
                         });
                     });
                 }
             });
 
-        ui.add_space(6.0);
+        ui.add_space(space::S);
         if rows.is_empty() && !self.event_filter.trim().is_empty() {
             ui.label(
                 RichText::new("暂无关联事件（过滤条件无匹配记录）")
-                    .size(13.0)
+                    .size(type_scale::BODY)
                     .color(text_dim()),
             );
         }
@@ -117,7 +125,7 @@ impl AisafeApp {
         }
         ui.label(
             RichText::new("完整 payload（截断存储）可通过本地 API 查看：GET /api/events")
-                .size(11.0)
+                .size(type_scale::MICRO)
                 .color(text_dim()),
         );
     }
@@ -125,7 +133,7 @@ impl AisafeApp {
 
 /// 事件详情卡片：摘要之外的结构化字段（http 提示 / 指纹 / 载荷）。
 fn event_detail_ui(ui: &mut egui::Ui, ev: &EventRow) {
-    ui.add_space(8.0);
+    ui.add_space(space::S);
     Frame::new()
         .fill(bg_card())
         .corner_radius(CornerRadius::same(8))
@@ -135,12 +143,12 @@ fn event_detail_ui(ui: &mut egui::Ui, ev: &EventRow) {
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(format!("事件详情 #{}", ev.id))
-                        .size(14.0)
+                        .size(type_scale::BODY)
                         .strong(),
                 );
                 chip(ui, &ev.kind, event_color(&ev.kind));
             });
-            ui.add_space(4.0);
+            ui.add_space(space::XS);
             kv_row(ui, "时间", &fmt_ts(ev.ts));
             if !ev.listener.is_empty() {
                 kv_row(ui, "蜜罐", &ev.listener);
@@ -183,45 +191,47 @@ fn event_detail_ui(ui: &mut egui::Ui, ev: &EventRow) {
                 kv_row(ui, "JA4", &ev.tls_ja4);
             }
             if !ev.payload.is_empty() {
-                ui.add_space(4.0);
-                egui::CollapsingHeader::new(egui::RichText::new("载荷（清洗截断）").size(12.0))
-                    .id_salt(egui::Id::new("event-payload").with(ev.id))
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        const MAX_DETAIL_PAYLOAD: usize = 2000;
-                        let text: String = ev.payload.chars().take(MAX_DETAIL_PAYLOAD).collect();
-                        let truncated = ev.payload.chars().count() > MAX_DETAIL_PAYLOAD;
-                        ui.add(
-                            egui::TextEdit::multiline(&mut text.as_str())
-                                .font(egui::TextStyle::Monospace)
-                                .desired_width(ui.available_width() - 8.0)
-                                .desired_rows(4)
-                                .interactive(false),
+                ui.add_space(space::XS);
+                egui::CollapsingHeader::new(
+                    egui::RichText::new("载荷（清洗截断）").size(type_scale::CAPTION),
+                )
+                .id_salt(egui::Id::new("event-payload").with(ev.id))
+                .default_open(true)
+                .show(ui, |ui| {
+                    const MAX_DETAIL_PAYLOAD: usize = 2000;
+                    let text: String = ev.payload.chars().take(MAX_DETAIL_PAYLOAD).collect();
+                    let truncated = ev.payload.chars().count() > MAX_DETAIL_PAYLOAD;
+                    ui.add(
+                        egui::TextEdit::multiline(&mut text.as_str())
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(ui.available_width() - 8.0)
+                            .desired_rows(4)
+                            .interactive(false),
+                    );
+                    if truncated {
+                        ui.label(
+                            RichText::new(format!(
+                                "…已截断（完整 {} 字符，API 可查）",
+                                ev.payload.chars().count()
+                            ))
+                            .size(type_scale::MICRO)
+                            .color(text_dim()),
                         );
-                        if truncated {
-                            ui.label(
-                                RichText::new(format!(
-                                    "…已截断（完整 {} 字符，API 可查）",
-                                    ev.payload.chars().count()
-                                ))
-                                .size(11.0)
-                                .color(text_dim()),
-                            );
-                        }
-                    });
+                    }
+                });
             }
         });
-    ui.add_space(6.0);
+    ui.add_space(space::S);
 }
 
 fn kv_row(ui: &mut egui::Ui, key: &str, value: &str) {
     ui.horizontal_wrapped(|ui| {
         ui.label(
             RichText::new(format!("{key}:"))
-                .size(12.0)
+                .size(type_scale::CAPTION)
                 .color(text_dim())
                 .strong(),
         );
-        ui.label(RichText::new(value).monospace().size(12.0));
+        ui.label(RichText::new(value).monospace().size(type_scale::CAPTION));
     });
 }

@@ -2,8 +2,8 @@ use super::*;
 
 impl AisafeApp {
     pub(crate) fn ai_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("AI 助手").size(22.0).strong());
-        ui.add_space(10.0);
+        ui.label(RichText::new("AI 助手").size(type_scale::TITLE).strong());
+        ui.add_space(space::M);
 
         let status = self.cache.status.clone();
         let ai = status.as_ref().map(|s| s.ai.clone());
@@ -41,7 +41,7 @@ impl AisafeApp {
             });
         }
 
-        ui.add_space(10.0);
+        ui.add_space(space::M);
         ui.horizontal(|ui| {
             let running = ai.as_ref().map(|a| a.running).unwrap_or(false);
             let resp = ui.add_enabled(
@@ -64,18 +64,18 @@ impl AisafeApp {
             if let Some(ai) = &ai {
                 ui.label(
                     RichText::new(format!("自动分析间隔 {} 秒", ai.analyze_interval_secs))
-                        .size(12.0)
+                        .size(type_scale::CAPTION)
                         .color(text_dim()),
                 );
             }
         });
         ui.label(
             RichText::new("分析内容仅为 24h 聚合统计与最近 20 条截断记录；建议需人工确认，蜜罐数据按不可信输入隔离。")
-                .size(11.0)
+                .size(type_scale::MICRO)
                 .color(text_dim()),
         );
 
-        ui.add_space(14.0);
+        ui.add_space(space::L);
         // 主机暴露面（0.2 P1："自动分析功能接口"第一步）
         section(ui, "主机暴露面");
         let exposure = self.eng.latest_exposure().ok().flatten();
@@ -87,10 +87,10 @@ impl AisafeApp {
                         fmt_ts(snap.ts),
                         snap.entries.len()
                     ))
-                    .size(12.0)
+                    .size(type_scale::CAPTION)
                     .color(text_dim()),
                 );
-                egui::CollapsingHeader::new(egui::RichText::new("监听清单").size(13.0))
+                egui::CollapsingHeader::new(egui::RichText::new("监听清单").size(type_scale::BODY))
                     .id_salt("exposure-list")
                     .default_open(false)
                     .show(ui, |ui| {
@@ -98,13 +98,13 @@ impl AisafeApp {
                             ui.label(
                                 RichText::new(format!("{}  {}  [{}]", e.addr, e.process, e.proto))
                                     .monospace()
-                                    .size(12.0),
+                                    .size(type_scale::CAPTION),
                             );
                         }
                         if snap.entries.len() > 30 {
                             ui.label(
                                 RichText::new(format!("…其余 {} 项", snap.entries.len() - 30))
-                                    .size(11.0)
+                                    .size(type_scale::MICRO)
                                     .color(text_dim()),
                             );
                         }
@@ -115,7 +115,7 @@ impl AisafeApp {
                     RichText::new(
                         "尚未扫描。扫描会枚举本机监听端口与归属进程，并作为下次 AI 分析的输入。",
                     )
-                    .size(13.0)
+                    .size(type_scale::BODY)
                     .color(text_dim()),
                 );
             }
@@ -145,7 +145,7 @@ impl AisafeApp {
             }
         });
 
-        ui.add_space(14.0);
+        ui.add_space(space::L);
         let pending: Vec<_> = self
             .cache
             .proposals
@@ -160,7 +160,7 @@ impl AisafeApp {
                     "暂无待处理建议。蜜罐捕获到攻击行为后，点击「立即分析」生成封禁建议。",
                 )
                 .color(text_dim())
-                .size(13.0),
+                .size(type_scale::BODY),
             );
         }
         for p in &pending {
@@ -179,7 +179,7 @@ impl AisafeApp {
                                 proto_up(&p.protocol),
                                 target_desc(&p.remote_ip, p.local_port)
                             ))
-                            .size(14.0)
+                            .size(type_scale::BODY)
                             .strong(),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -227,17 +227,17 @@ impl AisafeApp {
                             }
                         });
                     });
-                    ui.label(RichText::new(&p.reason).size(13.0).color(text_dim()));
+                    ui.label(RichText::new(&p.reason).size(type_scale::BODY).color(text_dim()));
                     ui.label(
                         RichText::new(format!("#{} · {} · {}", p.id, p.model, fmt_ts(p.created_ts)))
-                            .size(11.0)
+                            .size(type_scale::MICRO)
                             .color(text_dim()),
                     );
                 });
-            ui.add_space(8.0);
+            ui.add_space(space::S);
         }
 
-        ui.add_space(10.0);
+        ui.add_space(space::M);
         section(
             ui,
             "价值指标（口径：采纳率 = 采纳/建议，误报率 = 误报/采纳）",
@@ -255,25 +255,25 @@ impl AisafeApp {
                     "—".into()
                 };
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(label).strong().size(13.0));
+                    ui.label(RichText::new(label).strong().size(type_scale::BODY));
                     ui.label(
                         RichText::new(format!(
                             "建议 {} · 采纳 {}（{}）· 误报 {}（{}）· 自动封禁 {}",
                             m.proposed, m.applied, adopt_rate, m.fp, fp_rate, m.auto_blocks
                         ))
-                        .size(12.0),
+                        .size(type_scale::CAPTION),
                     );
                 });
             }
         }
 
-        ui.add_space(10.0);
+        ui.add_space(space::M);
         section(ui, "误报 / 白名单抑制");
         if self.cache.feedback.is_empty() {
             ui.label(
                 RichText::new("无（标记误报的来源在此列出，抑制期内自动封禁跳过；可随时取消）。")
                     .color(text_dim())
-                    .size(13.0),
+                    .size(type_scale::BODY),
             );
         }
         let fp_secs = self
@@ -290,7 +290,7 @@ impl AisafeApp {
                 })
                 .unwrap_or_default();
             ui.horizontal(|ui| {
-                ui.label(RichText::new(&f.value).strong().size(13.0));
+                ui.label(RichText::new(&f.value).strong().size(type_scale::BODY));
                 ui.label(
                     RichText::new(format!(
                         "标记 {} 次 · 最近 {} · 抑制至 {}",
@@ -298,11 +298,15 @@ impl AisafeApp {
                         fmt_ts(f.last_ts),
                         until
                     ))
-                    .size(11.0)
+                    .size(type_scale::MICRO)
                     .color(text_dim()),
                 );
                 if !f.note.is_empty() {
-                    ui.label(RichText::new(&f.note).size(11.0).color(text_dim()));
+                    ui.label(
+                        RichText::new(&f.note)
+                            .size(type_scale::MICRO)
+                            .color(text_dim()),
+                    );
                 }
                 if ui.button("取消抑制").clicked() {
                     match self.eng.clear_false_positive(&f.value) {
@@ -320,13 +324,13 @@ impl AisafeApp {
             });
         }
 
-        ui.add_space(10.0);
+        ui.add_space(space::M);
         section(ui, "运行记录");
         if self.cache.runs.is_empty() {
             ui.label(
                 RichText::new("尚无 AI 分析记录。")
                     .color(text_dim())
-                    .size(13.0),
+                    .size(type_scale::BODY),
             );
         }
         for r in &self.cache.runs {
@@ -336,8 +340,12 @@ impl AisafeApp {
                 } else {
                     danger()
                 }));
-                ui.label(RichText::new(fmt_ts(r.ts)).size(12.0).color(text_dim()));
-                ui.label(RichText::new(&r.summary).size(12.0));
+                ui.label(
+                    RichText::new(fmt_ts(r.ts))
+                        .size(type_scale::CAPTION)
+                        .color(text_dim()),
+                );
+                ui.label(RichText::new(&r.summary).size(type_scale::CAPTION));
             });
         }
     }
