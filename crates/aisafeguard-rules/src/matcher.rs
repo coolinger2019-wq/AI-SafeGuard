@@ -191,7 +191,9 @@ pub fn rule_matches(rule: &Rule, window: &[u8], s: &Session<'_>) -> bool {
         return false;
     }
     match rule.direction {
-        Direction::Uni => header_matches(rule, s, false) && options_match(rule, window),
+        // `->` 头部随载荷方向对齐（Suricata 语义：包从 src 流向 dst）——
+        // to_server 的包源是 client，from_server 的包源是 server
+        Direction::Uni => header_matches(rule, s, !s.to_server) && options_match(rule, window),
         Direction::Bi => {
             (header_matches(rule, s, false) && options_match(rule, window))
                 || (header_matches(rule, s, true) && options_match(rule, window))

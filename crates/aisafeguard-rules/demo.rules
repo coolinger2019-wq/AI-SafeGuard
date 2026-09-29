@@ -1,0 +1,31 @@
+# AI-SafeGuard 示范规则包（0.5.0 F7）
+# 范围：docs/RULESET_SUBSET.md v1 冻结子集；全部自写，无第三方许可义务。
+# 用法：[detect.rules].path 指向本文件（默认不内置加载）。
+# 约定：sid 1000001-1999999 为本产品示范段；蜜罐端口取默认配置
+#       （ssh 2222 / http 8081 / telnet 2323 / generic 1337）。
+
+# ---- 扫描器 / 攻击工具 UA（蜜罐 http / generic）----
+alert tcp $EXTERNAL_NET any -> $HOME_NET [8081,1337] (msg:"SQL 注入工具 sqlmap 探测"; content:"sqlmap"; nocase; flow:established,to_server; classtype:web-application-attack; sid:1000001; rev:1;)
+alert tcp $EXTERNAL_NET any -> $HOME_NET [8081,1337] (msg:"漏洞扫描器 Nikto 探测"; content:"nikto"; nocase; flow:established,to_server; classtype:scan; sid:1000002; rev:1;)
+alert tcp $EXTERNAL_NET any -> $HOME_NET [8081,1337] (msg:"Nmap 脚本引擎探测"; content:"nmap scripting engine"; nocase; flow:established,to_server; classtype:scan; sid:1000003; rev:1;)
+alert tcp $EXTERNAL_NET any -> $HOME_NET [8081,1337] (msg:"目录暴破工具 Gobuster 探测"; content:"gobuster"; nocase; flow:established,to_server; classtype:scan; sid:1000004; rev:1;)
+
+# ---- 可疑请求行 / 路径（蜜罐 http）----
+alert tcp $EXTERNAL_NET any -> $HOME_NET 8081 (msg:"后台路径探测"; content:"GET /admin"; nocase; offset:0; depth:12; flow:established,to_server; classtype:web-application-attack; sid:1000005; rev:1;)
+alert tcp $EXTERNAL_NET any -> $HOME_NET 8081 (msg:".env 配置文件泄露探测"; content:"GET /.env"; nocase; offset:0; depth:10; flow:established,to_server; classtype:web-application-attack; sid:1000006; rev:1;)
+alert tcp $EXTERNAL_NET any -> $HOME_NET 8081 (msg:"WordPress 登录暴破探测"; content:"POST /wp-login.php"; nocase; offset:0; depth:20; flow:established,to_server; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:1000007; rev:1;)
+alert tcp $EXTERNAL_NET any -> $HOME_NET [8081,1337] (msg:"phpMyAdmin 登录页探测"; content:"phpmyadmin"; nocase; flow:established,to_server; classtype:web-application-attack; sid:1000008; rev:1;)
+alert tcp $EXTERNAL_NET any -> $HOME_NET [8081,1337] (msg:"路径穿越探测"; content:"../"; nocase; flow:established,to_server; threshold:type limit, track by_src, count 1, seconds 60; classtype:web-application-attack; sid:1000009; rev:1;)
+alert tcp $EXTERNAL_NET any -> $HOME_NET [8081,1337] (msg:"/etc/passwd 读取探测"; content:"/etc/passwd"; nocase; flow:established,to_server; classtype:web-application-attack; sid:1000010; rev:1;)
+
+# ---- 攻击载荷模式（蜜罐任意监听器 / 采样 full 模式）----
+alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"Shellshock 命令注入尝试"; content:"() {"; nocase; flow:established,to_server; classtype:attempted-admin; sid:1000011; rev:1;)
+alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"Log4Shell JNDI 注入尝试"; content:"${jndi:"; nocase; flow:established,to_server; classtype:attempted-admin; sid:1000012; rev:1;)
+alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"SQL 注入 UNION SELECT 模式"; content:"union"; nocase; pcre:"/union[\x20+%]+select/i"; flow:established,to_server; classtype:web-application-attack; sid:1000013; rev:1;)
+
+# ---- 蜜罐协议交互（ssh / telnet）----
+alert tcp $EXTERNAL_NET any -> $HOME_NET 2222 (msg:"SSH 客户端异常 banner"; content:"SSH-2.0-"; offset:0; depth:7; flow:established,to_server; threshold:type both, track by_src, count 3, seconds 60; classtype:scan; sid:1000014; rev:1;)
+alert tcp $EXTERNAL_NET any -> $HOME_NET 2323 (msg:"Telnet root 登录尝试"; content:"root"; nocase; flow:established,to_server; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:1000015; rev:1;)
+
+# ---- 服务器响应方向（采样 full 模式：server→client 泄露特征）----
+alert tcp $HOME_NET any -> $EXTERNAL_NET any (msg:"passwd 文件内容外传"; content:"root:x:0:0:"; flow:from_server; classtype:bad-unknown; sid:1000016; rev:1;)
