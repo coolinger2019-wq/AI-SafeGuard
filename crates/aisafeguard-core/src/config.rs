@@ -725,4 +725,29 @@ mod tests {
         let req = AppConfig::restart_required(&base, &multi);
         assert_eq!(req, ["API 服务", "XDP 快速执行层"]);
     }
+
+    /// 默认安全基线（0.5.0 H DoD）：深检/规则/XDP 全关、处置克制——
+    /// 新增采集类配置时必须在这里补默认关断言，防止"默认安全"漂移。
+    #[test]
+    fn default_config_security_baseline() {
+        let cfg = AppConfig::default();
+        // 采样捕获与 L7 深检默认关（full 模式才有的载荷解析更不可能默认开）
+        assert!(!cfg.detect.capture.enabled);
+        assert!(!cfg.detect.l7.enabled);
+        // 规则引擎默认关，且默认只告警（F6：与快路径 auto_block 解耦）
+        assert!(!cfg.detect.rules.enabled);
+        assert!(!cfg.detect.rules.auto_block);
+        assert!(cfg.detect.rules.path.is_empty(), "默认不内置任何规则包");
+        // XDP / 情报 / 协同 / 外发通道默认关
+        assert!(!cfg.xdp.enabled);
+        assert!(!cfg.intel.enabled);
+        assert!(!cfg.fed.enabled);
+        assert!(!cfg.syslog.enabled);
+        assert!(!cfg.notify.enabled);
+        // 蜜罐是唯一默认开的数据面（诱捕面，对攻击者暴露是产品语义）
+        assert!(cfg.honeypot.enabled);
+        // AI 默认人工确认
+        assert!(!cfg.ai.enabled);
+        assert!(!cfg.ai.auto_apply);
+    }
 }

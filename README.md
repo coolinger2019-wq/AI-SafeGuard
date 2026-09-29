@@ -24,6 +24,8 @@
 - **蜜罐**：SSH/HTTP/Telnet/通用 四种低交互监听，假响应逼真，HTTP 带 L7 标签（method/path 前缀/可疑 UA）
 - **快路径检测**：频次引擎（扫描/暴破）+ 采样捕获检测器（端口扫描/SYN flood），触发即自动封禁——TTL 到期自动解封，内网/回环永不自动封
 - **流量采样捕获**（默认关闭）：WinDivert（Windows）/ AF_PACKET（Linux）被动采样只取副本，control 只看 SYN 元数据、full 带流重组取证（载荷仅可疑时截断留存）；可选驱动哈希校验；[Windows 实机验证](docs/WINDOWS-CAPTURE-TESTING.md) / [Linux](docs/LINUX-TESTING.md)
+- **L7 解析与指纹**（0.5，默认关闭）：HttpHint（method/path/UA，蜜罐与采样共用同一解析）+ JA3/JA4 客户端指纹（JA4 对齐 FoxIO 官方算法），full 模式重组流前缀解析，字段随 Detection 事件入库
+- **规则子集引擎**（0.5，默认关闭）：Suricata/ET 书写风格**受限子集**（content/pcre/flow/threshold，规范冻结见 [RULESET_SUBSET.md](docs/RULESET_SUBSET.md)），整包加载治理（越界即整包拒绝），命中只产事件；默认只告警，自动封禁需显式开启；双平台同一用户态引擎（含 16 条自写示范包）
 - **XDP 快速执行层**（Linux，默认关闭）：IP 级入站封禁镜像进 eBPF map，内核直丢微秒级生效；nftables 永远兜底，附加失败自动降级；eBPF 程序内嵌主程序
 - **防火墙**：Windows COM/WFP 规则；Linux nftables 集合（IP 级 + 端口级拼接集合）；只管理自己创建的 `aisafeguard-blk-*` 规则
 - **AI 助手**（慢路径）：OpenAI 兼容端点（默认 GLM，内网可指向本地推理），严格 schema 校验的封禁建议；灰度 TTL → 人工转正；误报反馈闭环（抑制时长可配 + 端口粒度 + 一键清除）
@@ -95,7 +97,9 @@ aisafeguard fed audit <out.json>                   # 审计导出
 
 ## 已知限制（重要的放这里，不藏文末）
 
-- 封禁规则为 IP 粒度（可选端口已支持）；L7 仅有轻量标签，无签名库（0.5）
+- 封禁规则为 IP 粒度（可选端口已支持）；Suricata/ET 风格规则为**受限子集**（非完整
+  Suricata 兼容，范围冻结见 [RULESET_SUBSET.md](docs/RULESET_SUBSET.md)）；L7 指纹与
+  规则引擎默认关闭，需显式开启
 - AI 是概率性的：默认人工确认；自动应用 = 可选开关 + 严重度阈值 + 灰度 TTL（到期自动解封）
 - 内网/回环地址永不自动封（手动封不禁）；误报抑制期内自动封禁跳过
 - nftables 集合/规则易失，依赖启动 resync 重灌；Windows COM 规则跨重启持久
@@ -106,7 +110,7 @@ aisafeguard fed audit <out.json>                   # 审计导出
 
 ## 路线图
 
-0.3 全部完成（检测平台 + AI 深度介入 + 事件外发 + 组织协同 mTLS + XDP）；**0.4 = 工程与安全收口（进行中）**，见 [ROADMAP-0.4.md](docs/ROADMAP-0.4.md)；0.5 NGFW 数据面与规则；0.6 协同完全体。总览：[docs/ROADMAP.md](docs/ROADMAP.md)。
+0.3 / 0.4 全部完成（检测平台 + AI 深度介入 + 事件外发 + 组织协同 mTLS + XDP；工程与安全收口）。**0.5.0 = NGFW 感知层（已完成）**：L7 复用（HttpHint/JA3/JA4）+ Suricata/ET 风格规则子集引擎 + Windows 能力对等（纯用户态，零 eBPF 依赖），默认全关、可开关的感知见 [ROADMAP-0.5.md](docs/ROADMAP-0.5.md)；0.5.1 = Linux eBPF 流表 + XDP map 联动（Batch G）；0.6 协同完全体。总览：[docs/ROADMAP.md](docs/ROADMAP.md)。
 
 ## 安全披露
 

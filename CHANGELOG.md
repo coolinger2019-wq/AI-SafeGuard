@@ -2,9 +2,11 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## [0.5.0] - 2026-09-29（开发中）
+## [0.5.0] - 2026-09-29
 
-按 ROADMAP-0.5 Batch E（解析与 L7 复用）启动。
+按 ROADMAP-0.5 完成 Batch E（解析与 L7 复用）+ Batch F（规则子集引擎）+
+Batch H（Windows 对等与产品化收口）P0 全部与 P1（E5 JA4 / F7 示范包 / H7 GUI）。
+Batch G（Linux eBPF 流表 + XDP map 联动）按发版建议归 0.5.1。
 
 ### 修复
 
@@ -41,6 +43,42 @@
   禁止规则/解析侧触达执行器）；蜜罐与 capture evidence 的 [L7] 标签改走新
   crate（E3：0.4 标签格式原样保留）；确定性模糊测试（2 万轮不 panic +
   path 上限断言）+ 原有测试迁移
+- **新 crate `aisafeguard-rules`（F2/F5/F3）**：Suricata/ET 风格规则子集
+  解析 → IR → 匹配，规范依据 F1 冻结版——头部（tcp/udp、`$HOME_NET`/
+  `$EXTERNAL_NET`/CIDR/端口列表/`<>`）、content（`|hex|`、nocase、
+  offset/depth/distance/within，顺序 AND 允许间隔）、pcre（标志白名单 i/R，
+  rust regex 线性时间编译免疫灾难回溯 + 4KB 大小上限）、flow/threshold
+  （limit|both, by_src）；头部随载荷方向对齐（`->` 规则 from_server 包源
+  是 server）。加载治理：**任何一条越界/语法错/重复 sid → 整包拒绝不半生效**，
+  文件 ≤5MB、max_rules、单 content ≤512B、SHA-256 留痕；crate 禁止依赖
+  firewall（只产判定）
+- **规则引擎接线与处置解耦（F4/F6）**：`[detect.rules]`（enabled/path/
+  auto_block/max_rules，默认全关，热更）；`spawn_rules_task` 启动加载 +
+  文件签名变化整包热重载、原子替换，失败保持旧包生效并留事件；蜜罐路径
+  payload 全窗 + 采样 full 模式重组流前缀两条命中路径，命中 →
+  `Detection(kind=signature, rule_id=sid:n, severity=classtype 映射)`
+  （Detection 事件新增 `severity` 字段，内置检测器归 medium）；是否自动封禁
+  由调用方决定——规则默认只告警，显式 `auto_block` 才走封禁出口（内网保护/
+  误报抑制照常）；threshold 判定器 + 采样流级去重（同流 10 分钟只报一次）
+- **示范规则包（F7）**：`crates/aisafeguard-rules/demo.rules` 16 条自写
+  （扫描器 UA/路径探测/Shellshock/Log4Shell/SQLi/SSH-Telnet 交互/from_server
+  泄露外传，sid 示范段 1000001-1999999），全部落在 v1 白名单内；集成测试
+  覆盖整包加载、典型命中、锚定、限频、方向门控与误报负路径
+- **JA4 客户端指纹（E5）**：`aisafeguard_l7::parse_ja4` 对齐 FoxIO 官方
+  python 实现——版本映射（TLS1.2→12/1.3→13）、GREASE 剔除、SNI/ALPN 不进
+  扩展哈希、签名算法原序缀尾、sha256 截断 12 字符、ALPN 首尾字符
+  （http/1.1→h1）；已知向量 ×2 + 模糊测试；`[detect.l7].ja4` 开启时事件携带
+  `tls_ja4`（events 表加列，幂等 ALTER）
+- **配置与可观测（H5/H6）**：`[detect.l7]`（enabled/ja3/ja4，E6 结构化字段
+  按开关门控，深检默认 off）；`/api/status` 与 GUI 暴露 rules（enabled/
+  loaded/条数/SHA-256 前 16 位/加载说明/命中数）与 fingerprint_24h
+  （Detection 携带 JA3 占比统计）
+- **GUI 设置页最小暴露（H7）**：L7 与规则引擎开关 + 规则包路径 + 命中计数
+  只读——0.5 不做规则编辑器，规则文件外置维护
+- **文档收口（H1/H2）**：NGFW_EVOLUTION §7「0.5.0 感知层落地对账」——
+  Windows 与 Linux 跑同一规则 IR/L7 解析（纯用户态 crate，行为一致是构造性
+  的），Windows 演示零 eBPF 步骤；采样策略维持 0.4 决策（WinDivert 默认 +
+  降级留痕），WFP callout 维持 0.5.2 stretch
 
 ## [0.4.0] - 2026-09-29
 
