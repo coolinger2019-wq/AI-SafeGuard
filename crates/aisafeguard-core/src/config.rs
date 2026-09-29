@@ -101,6 +101,8 @@ pub struct ShellConfig {
     /// SSH host key 路径；空 = <data_dir>/honeypot/hostkey.ed25519
     /// （fed 证书同款约定：config 只存可选路径，空则落数据目录子目录）
     pub host_key_path: String,
+    /// Telnet 假 Shell 独立开关（0.5.9 H120）：默认关，banner 级行为不变
+    pub telnet_enabled: bool,
 }
 
 impl Default for ShellConfig {
@@ -111,6 +113,7 @@ impl Default for ShellConfig {
             hostname: "debian-11".into(),
             max_commands: 50,
             host_key_path: String::new(),
+            telnet_enabled: false,
         }
     }
 }
@@ -787,6 +790,8 @@ mod tests {
         assert!(cfg.honeypot.enabled);
         // 假 Shell（中交互）默认关（0.5.9 红线：新能力默认关，显式开启）
         assert!(!cfg.honeypot.shell.enabled);
+        // Telnet 假 Shell 独立开关同样默认关（0.5.9 H120）
+        assert!(!cfg.honeypot.shell.telnet_enabled);
         // 新协议蜜罐不进默认监听表（0.5.9 H110）：用户显式配置 kind=mysql/redis
         // 才等于开启；默认四协议与端口逐字节不变
         let kinds: Vec<&str> = cfg

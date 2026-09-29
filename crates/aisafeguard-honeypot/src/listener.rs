@@ -160,10 +160,14 @@ async fn run_listener(
     ));
 }
 
-/// 该 kind 是否交互会话（有状态多轮）：[honeypot.shell].enabled 时 ssh 升级
-/// 交互会话（H104），其余恒低交互。
+/// 该 kind 是否交互会话（有状态多轮）：ssh 由 [honeypot.shell].enabled +
+/// host key 可用性决定（H104），telnet 由 shell.telnet_enabled 决定（H120）。
 fn is_interactive_session(kind: &str, shell: Option<&ShellRuntime>) -> bool {
-    kind == "ssh" && shell.is_some()
+    match (kind, shell) {
+        ("ssh", Some(rt)) => rt.ssh_config.is_some(),
+        ("telnet", Some(rt)) => rt.telnet_enabled,
+        _ => false,
+    }
 }
 
 async fn handle_conn(
@@ -179,15 +183,22 @@ async fn handle_conn(
     };
     let local_port = stream.local_addr().map(|a| a.port()).unwrap_or(0);
 
-    // ssh + 假 Shell 启用时流被 russh 消费（提前取端口）;其余会话按 &mut 读一包
-    let result: std::io::Result<SessionOutcome> = match (kind.as_str(), shell.as_ref()) {
-        ("ssh", Some(rt)) => Ok(crate::shell::ssh_shell_session(stream, rt.clone()).await),
-        ("ssh", None) => protocol::ssh_session(&mut stream).await,
-        ("http", _) => http::http_session(&mut stream).await,
-        ("telnet", _) => protocol::telnet_session(&mut stream).await,
-        ("mysql", _) => mysql::mysql_session(&mut stream).await,
-        ("redis", _) => redis::redis_session(&mut stream).await,
-        (_, _) => protocol::generic_session(&mut stream).await,
+    // ssh/telnet 假 Shell 启用时流被仿真层消费（提前取端口）;其余按 &mut 读一包
+    let result: std::io::Result<SessionOutcome> = match kind.as_str() {
+        "ssh" if shell.as_ref().is_some_and(|rt| rt.ssh_config.is_some()) => {
+            let rt = shell.clone().expect("守卫已判 Some");
+            Ok(crate::shell::ssh_shell_session(stream, rt).await)
+        }
+        "telnet" if shell.as_ref().is_some_and(|rt| rt.telnet_enabled) => {
+            let rt = shell.clone().expect("守卫已判 Some");
+            Ok(crate::shell::telnet_shell_session(stream, rt).await)
+        }
+        "ssh" => protocol::ssh_session(&mut stream).await,
+        "http" => http::http_session(&mut stream).await,
+        "telnet" => protocol::telnet_session(&mut stream).await,
+        "mysql" => mysql::mysql_session(&mut stream).await,
+        "redis" => redis::redis_session(&mut stream).await,
+        _ => protocol::generic_session(&mut stream).await,
     };
 
     let outcome = match result {
@@ -229,6 +240,7 @@ async fn handle_conn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shell::strip_iac;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -268,6 +280,200 @@ mod tests {
             drop(permits);
             assert!(sem.clone().try_acquire_owned().is_ok());
         });
+    }
+
+    #[test]
+    fn strip_iac_handles_negotiation_and_literals() {
+        // WILL ECHO(255 251 1) + 数据 + IAC IAC(字面 0xFF 在 b、c 之间)
+        let raw = [0xff, 251, 1, b'a', b'b', 0xff, 0xff, b'c'];
+        assert_eq!(strip_iac(&raw), b"ab\xffc".to_vec());
+        // SB..SE 子协商整段丢弃
+        let raw = [0xff, 250, 24, 0, b'x', b'y', 0xff, 240, b'z'];
+        assert_eq!(strip_iac(&raw), b"z".to_vec());
+        // DO(253)+option、两字节命令、截断尾巴
+        assert_eq!(strip_iac(&[0xff, 253, 0, b'q']), b"q".to_vec());
+        assert_eq!(strip_iac(&[0xff, 246, b'q']), b"q".to_vec()); // AYT
+        assert_eq!(strip_iac(&[b'k', 0xff]), b"k".to_vec());
+    }
+
+    #[test]
+    fn fuzz_strip_iac_never_panic() {
+        let mut state = 0x2545F4914F6CDD1Du64;
+        for _ in 0..5000 {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let n = (state >> 33) as usize % 100;
+            let bytes: Vec<u8> = (0..n)
+                .map(|_| {
+                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    (state >> 33) as u8
+                })
+                .collect();
+            let _ = strip_iac(&bytes);
+        }
+    }
+
+    #[tokio::test]
+    async fn telnet_shell_full_flow_records_commands() {
+        use aisafeguard_core::event::SecurityEvent as E2;
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let bus = EventBus::new(64);
+        let mut rx = bus.subscribe();
+        let cfg = HoneypotConfig {
+            enabled: true,
+            shell: aisafeguard_core::config::ShellConfig {
+                enabled: true,
+                telnet_enabled: true,
+                ..Default::default()
+            },
+            listeners: vec![ListenerConfig {
+                name: "telnet".into(),
+                port,
+                kind: "telnet".into(),
+            }],
+        };
+        let _handle = start(&cfg, bus, &std::env::temp_dir());
+        let mut c = None;
+        for _ in 0..40 {
+            match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                Ok(v) => {
+                    c = Some(v);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
+        let mut c = c.expect("telnet 蜜罐未就绪");
+        let mut buf = vec![0u8; 256];
+        let n = c.read(&mut buf).await.unwrap();
+        let banner = String::from_utf8_lossy(&buf[..n]).to_string();
+        assert!(banner.contains("Welcome to Ubuntu 22.04 LTS"));
+        assert!(banner.contains("debian-11 login: "));
+
+        // 登录:IAC 协商混在凭证里也要能过
+        c.write_all(&[0xff, 251, 3]).await.unwrap(); // WILL SGA
+        c.write_all(b"root\r\n").await.unwrap();
+        let n = c.read(&mut buf).await.unwrap();
+        assert!(
+            String::from_utf8_lossy(&buf[..n]).contains("Password: "),
+            "应提示密码"
+        );
+        c.write_all(b"hunter2\r\n").await.unwrap();
+
+        // 等 motd + prompt
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut seen = String::new();
+        loop {
+            match tokio::time::timeout_at(deadline, c.read(&mut buf)).await {
+                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                Ok(Ok(n)) => seen.push_str(&String::from_utf8_lossy(&buf[..n])),
+            }
+            if seen.contains("deploy@debian-11:~$") {
+                break;
+            }
+        }
+        assert!(seen.contains("deploy@debian-11:~$"), "应收到假 prompt: {seen}");
+
+        // 白名单命令
+        c.write_all(b"whoami\r\n").await.unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut seen = String::new();
+        loop {
+            match tokio::time::timeout_at(deadline, c.read(&mut buf)).await {
+                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                Ok(Ok(n)) => seen.push_str(&String::from_utf8_lossy(&buf[..n])),
+            }
+            if seen.contains("deploy") {
+                break;
+            }
+        }
+        assert!(seen.contains("deploy"), "whoami 仿真响应: {seen}");
+        c.write_all(b"exit\r\n").await.unwrap();
+        drop(c);
+
+        // 事件:interaction 含 whoami;口令明文不得出现在 payload
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let ev = tokio::time::timeout_at(deadline, rx.recv())
+                .await
+                .expect("超时未收到蜜罐事件")
+                .expect("事件通道关闭");
+            if let E2::HoneypotHit {
+                summary,
+                payload,
+                interaction: Some(steps),
+                ..
+            } = ev
+            {
+                assert!(
+                    summary.contains("Telnet 假 Shell 会话(2 条,用户 root)"),
+                    "实际: {summary}"
+                );
+                assert_eq!(steps[0].command, "whoami");
+                assert_eq!(steps[1].command, "exit");
+                assert!(!payload.contains("hunter2"), "telnet 口令明文不得落 payload");
+                break;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn telnet_banner_mode_regression_0_5_8() {
+        // shell 关闭(默认):banner 级行为与 0.5.8 一致
+        use aisafeguard_core::event::SecurityEvent as E3;
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let bus = EventBus::new(64);
+        let mut rx = bus.subscribe();
+        let cfg = HoneypotConfig {
+            enabled: true,
+            listeners: vec![ListenerConfig {
+                name: "telnet".into(),
+                port,
+                kind: "telnet".into(),
+            }],
+            ..Default::default()
+        };
+        let _handle = start(&cfg, bus, &std::env::temp_dir());
+        let mut c = None;
+        for _ in 0..40 {
+            match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                Ok(v) => {
+                    c = Some(v);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
+        let mut c = c.expect("telnet 蜜罐未就绪");
+        let mut buf = vec![0u8; 128];
+        let n = c.read(&mut buf).await.unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&buf[..n]),
+            "Welcome to Ubuntu 22.04 LTS\r\nlogin: ",
+            "banner 模式问候语逐字节不变"
+        );
+        c.write_all(b"admin\r\n").await.unwrap();
+        drop(c);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let ev = tokio::time::timeout_at(deadline, rx.recv())
+                .await
+                .expect("超时未收到蜜罐事件")
+                .expect("事件通道关闭");
+            if let E3::HoneypotHit {
+                summary,
+                payload, ..
+            } = ev
+                && !payload.is_empty()
+            {
+                assert!(summary.contains("尝试登录"), "实际: {summary}");
+                assert!(payload.contains("admin"));
+                break;
+            }
+        }
     }
 
     #[tokio::test]

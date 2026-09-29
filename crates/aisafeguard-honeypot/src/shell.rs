@@ -31,17 +31,21 @@ const SHELL_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 // ---------- 运行时装配（H104） ----------
 
-/// ssh 监听器升级中交互所需的全部运行时状态（start 时装配一次）。
+/// 假 Shell 运行时状态（start 时装配一次）。
 #[derive(Clone)]
 pub(crate) struct ShellRuntime {
-    pub ssh_config: Arc<russh::server::Config>,
+    /// ssh 假 Shell 传输层;None = host key 不可用,ssh 保持 banner 模式
+    pub ssh_config: Option<Arc<russh::server::Config>>,
     pub username: String,
     pub hostname: String,
     pub max_commands: usize,
+    /// Telnet 假 Shell 独立开关（0.5.9 H120）
+    pub telnet_enabled: bool,
 }
 
 /// 按配置装配假 Shell 运行时：host key 惰性加载/生成并持久化。
-/// 失败由调用方降级为 banner 低交互并留 engine 事件（能力缺失不报错纪律）。
+/// host key 失败时：仅 ssh 降级为 banner 模式（ssh_config=None），
+/// telnet_enabled 时整体仍可用；两者都不可用才返回 Err。
 pub(crate) fn start_runtime(
     shell: &ShellConfig,
     data_dir: &Path,
@@ -51,17 +55,29 @@ pub(crate) fn start_runtime(
     } else {
         Path::new(&shell.host_key_path).to_path_buf()
     };
-    let key = load_or_generate_host_key(&key_path)?;
-    Ok(Arc::new(ShellRuntime {
-        ssh_config: Arc::new(russh::server::Config {
+    let ssh_config = match load_or_generate_host_key(&key_path) {
+        Ok(key) => Some(Arc::new(russh::server::Config {
             inactivity_timeout: Some(SHELL_IDLE_TIMEOUT),
             auth_rejection_time: Duration::from_secs(1),
             keys: vec![key],
             ..Default::default()
-        }),
+        })),
+        Err(e) => {
+            if shell.telnet_enabled {
+                // telnet 不依赖 host key,仅 ssh 降级,留警告不断服务
+                tracing::warn!("假 Shell host key 初始化失败(仅降级 ssh): {e}");
+                None
+            } else {
+                return Err(e);
+            }
+        }
+    };
+    Ok(Arc::new(ShellRuntime {
+        ssh_config,
         username: shell.username.clone(),
         hostname: shell.hostname.clone(),
         max_commands: shell.max_commands,
+        telnet_enabled: shell.telnet_enabled,
     }))
 }
 
@@ -132,7 +148,10 @@ pub(crate) async fn ssh_shell_session(
     let handler = SshShellHandler {
         shared: shared.clone(),
     };
-    let result = russh::server::run_stream(shared.rt.ssh_config.clone(), stream, handler).await;
+    let Some(ssh_config) = shared.rt.ssh_config.clone() else {
+        return empty_session_outcome("ssh 假 Shell 传输层不可用");
+    };
+    let result = russh::server::run_stream(ssh_config, stream, handler).await;
     if let Err(e) = &result {
         // KEX 失败/畸形包/扫描器乱字节属常态：记录不报错
         tracing::debug!("ssh 假 Shell 会话结束: {e}");
@@ -169,6 +188,160 @@ pub(crate) async fn ssh_shell_session(
 
 struct SshShellHandler {
     shared: Arc<ShellShared>,
+}
+
+// ---------- Telnet 假 Shell（0.5.9 H120,复用命令仿真层） ----------
+
+/// 剥离 Telnet IAC 转义序列(纯函数,fuzz 护栏对象):
+/// IAC IAC=字面 0xFF;WILL/WONT/DO/DONT 带一个选项字节;SB..SE 子协商整段丢弃;
+/// 其余 IAC+命令为两字节。截断的 IAC 尾巴直接丢弃。
+pub(crate) fn strip_iac(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b != 0xff {
+            out.push(b);
+            i += 1;
+            continue;
+        }
+        match bytes.get(i + 1) {
+            None => break,
+            Some(0xff) => {
+                out.push(0xff);
+                i += 2;
+            }
+            Some(250) => {
+                // SB:丢弃到 IAC SE
+                let end = bytes[i + 2..]
+                    .windows(2)
+                    .position(|w| w == [0xff, 0xf0])
+                    .map(|p| i + 2 + p + 2);
+                match end {
+                    Some(next) => i = next,
+                    None => break,
+                }
+            }
+            Some(cmd) if (251..=254).contains(cmd) => i += 3,
+            Some(_) => i += 2,
+        }
+    }
+    out
+}
+
+/// Telnet 假 Shell 会话:login/password(口令不落留痕)→ 复用 [`ShellSession`]
+/// 逐命令仿真。行模式;IAC 序列已剥离。
+pub(crate) async fn telnet_shell_session(
+    mut stream: tokio::net::TcpStream,
+    rt: Arc<ShellRuntime>,
+) -> SessionOutcome {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut shell = ShellSession::new(rt.username.clone(), rt.hostname.clone(), rt.max_commands);
+    let mut line_buf: Vec<u8> = Vec::new();
+    let mut raw = vec![0u8; 2048];
+
+    // 读一行(IAC 已剥离;\r / \n / \r\n 均为行结束)
+    async fn read_line(
+        stream: &mut tokio::net::TcpStream,
+        line_buf: &mut Vec<u8>,
+        raw: &mut [u8],
+    ) -> std::io::Result<Option<String>> {
+        loop {
+            if let Some(pos) = line_buf.iter().position(|&b| b == b'\r' || b == b'\n') {
+                let line: Vec<u8> = line_buf.drain(..pos).collect();
+                line_buf.remove(0);
+                // \r\n 双字节结束:吃掉紧跟的另一半
+                if line_buf.first() == Some(&b'\n') || line_buf.first() == Some(&b'\r') {
+                    line_buf.remove(0);
+                }
+                return Ok(Some(sanitize(&line, MAX_CMD_CHARS)));
+            }
+            if line_buf.len() > MAX_CMD_CHARS {
+                let line: Vec<u8> = line_buf.drain(..MAX_CMD_CHARS).collect();
+                return Ok(Some(sanitize(&line, MAX_CMD_CHARS)));
+            }
+            let n = tokio::time::timeout(crate::READ_TIMEOUT, stream.read(raw)).await??;
+            if n == 0 {
+                return Ok(None);
+            }
+            line_buf.extend_from_slice(&strip_iac(&raw[..n]));
+        }
+    }
+
+    macro_rules! reply {
+        ($text:expr) => {
+            // 写失败 = 对端已断:留给读循环收尾
+            let _ = stream.write_all($text.replace('\n', "\r\n").as_bytes()).await;
+        };
+    }
+
+    // 登录流程(banner 文案对齐 banner 模式)
+    reply!(format!(
+        "Welcome to Ubuntu 22.04 LTS\r\n{} login: ",
+        rt.hostname
+    ));
+    let username = match read_line(&mut stream, &mut line_buf, &mut raw).await {
+        Ok(Some(u)) if !u.is_empty() => u,
+        _ => return empty_session_outcome("Telnet 连接未完成登录"),
+    };
+    reply!("Password: ");
+    let _password = read_line(&mut stream, &mut line_buf, &mut raw).await;
+    // 口令不落任何留痕(H200 接管采集);任意凭证放行
+    reply!(format!(
+        "\r\nWelcome to Ubuntu 22.04 LTS (GNU/Linux 6.1.0-18-amd64 x86_64)\r\n\r\n{}",
+        shell.prompt()
+    ));
+
+    loop {
+        let line = match read_line(&mut stream, &mut line_buf, &mut raw).await {
+            Ok(Some(l)) => l,
+            _ => break,
+        };
+        match shell.handle_line(&line) {
+            ShellAction::Reply(text) => {
+                if !text.is_empty() {
+                    reply!(text);
+                }
+                reply!("\r\n");
+                reply!(shell.prompt());
+            }
+            ShellAction::Exit => {
+                reply!("logout\r\n");
+                break;
+            }
+        }
+    }
+
+    let steps = shell.steps();
+    let summary = if steps.is_empty() {
+        format!("Telnet 认证通过(用户 {username}),未发送命令")
+    } else {
+        format!("Telnet 假 Shell 会话({} 条,用户 {username})", steps.len())
+    };
+    let payload = steps
+        .iter()
+        .map(|s| s.command.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    SessionOutcome {
+        summary,
+        payload,
+        http_hint: None,
+        interaction: if steps.is_empty() {
+            None
+        } else {
+            Some(steps.to_vec())
+        },
+    }
+}
+
+fn empty_session_outcome(summary: &str) -> SessionOutcome {
+    SessionOutcome {
+        summary: summary.to_string(),
+        payload: String::new(),
+        http_hint: None,
+        interaction: None,
+    }
 }
 
 impl Handler for SshShellHandler {
