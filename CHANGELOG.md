@@ -2,6 +2,29 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.5.3] - 2026-09-29
+
+文档与发布收口版:无功能性代码变更(版本号除外)。先核对后写文档——0.4/0.5 全部对外声称能力与代码逐一对账。
+
+### 新增(文档)
+
+- **README 按 ROADMAP-0.4 D2 结构重写**:一句话定位(主机侧诱捕 + 检测 + 处置,不是 LLM 内容 Guardrail)→ 数据流图(补感知层支路)→ 适合谁 / 不适合谁 → 5 分钟上手 → **已知限制中置**。限制口径与代码对账后的新表述:深检默认全关、规则引擎默认只告警、蜜罐仅端口诱捕(文件诱捕未实现)、eBPF 流表/XDP 仅 Linux(Windows 纯用户态对等)、HTTPS 识别经 JA3/JA4 的 SNI 扩展体现(无独立 SNI 域名字段)
+- **配置示例与实际配置节对齐**:`[detect.capture]` / `[detect.l7]`(enabled/ja3/ja4)/ `[detect.rules]`(enabled/path/auto_block/max_rules)/ `[xdp]`(enabled/iface/mode)——仓库**没有** `[detect.ebpf]` 节,eBPF 能力统一挂在 `[xdp]` 下,文档按实际写
+- **docs/NEGATIVE-PATH-TESTING.md(可复现负路径记录)**:吊销(文件式 CRL 立即拒连)、指纹不一致(预登记不匹配 403)、内网永不自动封(五处生效点,硬编码无开关)、外发失败无自反馈风暴(转发器只读总线不产事件 + 失败丢弃 + 日志 60s 限频)、规则默认只告警——每条含机制位置 + 自动化测试证据 + 实机复现步骤
+- ROADMAP-0.4 验收清单三条收口勾选(fed 负路径 / README / 回归)
+- 发布完整性:tag `v0.5.3` + 发布页附 artifact SHA-256(「渠道声明 + 哈希」过渡方案,代码签名后移除)
+
+### 验证
+
+- `cargo test --workspace` 全绿 0 failed(Windows 11,150 个测试;Linux 侧含 XDP 实机冒烟 `xdp_attach_smoke` 的 `#[ignore]` 测试需 root 另行执行)
+- 能力核对结论(9 项):detect.l7 / detect.rules / XDP 流表 / 内网硬过滤 / 吊销与指纹 TOFU / 通知失败限频 / 端口蜜罐 / 首运行生成配置 均为真实实现且有测试;文件诱捕未实现(文档已如实标注)
+
+### Artifact SHA-256(与发布页同清单)
+
+- Windows x86_64(MSVC)`aisafeguard.exe`(`--version` = 0.5.3):
+  `99a2c619c0c61575d834eaba596d81507c5abf6186e801f4cfefb62425edf31a`
+- Linux x86_64:发布页构建后附上(WSL2 `cargo build --release` 即得,哈希以发布页为准;仓库不存二进制)
+
 ## [0.5.2] - 2026-09-29
 
 0.5 规划收官：stretch 四件套按 ROADMAP-0.5 原文的交付形态完成（设计/计划/差异表，无生产代码，不进默认安装/构建链/CI）。
