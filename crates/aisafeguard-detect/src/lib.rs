@@ -171,6 +171,7 @@ mod tests {
             window_secs: 60,
             ttl_secs: 1800,
             capture: Default::default(),
+            l7: Default::default(),
             rules: Default::default(),
         }
     }

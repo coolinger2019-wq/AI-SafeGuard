@@ -196,6 +196,8 @@ pub struct DetectConfig {
     pub ttl_secs: i64,
     /// 采样捕获（检测平台 MVP，0.3 第二批）：真实流量观测。
     pub capture: CaptureConfig,
+    /// L7 解析与指纹（0.5.0 Batch E/H5）：full 捕获流前缀的 HttpHint / JA3。
+    pub l7: L7Config,
     /// 开放规则子集引擎（0.5.0 Batch F，规范见 docs/RULESET_SUBSET.md）。
     pub rules: RulesConfig,
 }
@@ -210,7 +212,31 @@ impl Default for DetectConfig {
             window_secs: 60,
             ttl_secs: 1800,
             capture: CaptureConfig::default(),
+            l7: L7Config::default(),
             rules: RulesConfig::default(),
+        }
+    }
+}
+
+/// L7 解析门控（0.5.0 H5）。E6 的 http_hint/tls_fingerprint 只在
+/// `[detect.capture].mode=full` 且本段 enabled 时产出（默认关闭——深检默认 off）。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct L7Config {
+    /// L7 解析总开关（HttpHint）
+    pub enabled: bool,
+    /// JA3 客户端指纹（TLS ClientHello 可见时）
+    pub ja3: bool,
+    /// JA4 客户端指纹（0.5.0 E5，默认关）
+    pub ja4: bool,
+}
+
+impl Default for L7Config {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ja3: true,
+            ja4: false,
         }
     }
 }
@@ -554,8 +580,10 @@ impl AppConfig {
     ///
     /// 契约（与实现同源，改任何一边先改这里）：
     /// - **热更**（任务每轮/每事件读最新配置，无需重启）：[detect] 全部阈值与开关、
-    ///   [detect.capture].driver_sha256、[xdp].enabled（未附加时下次装配生效；已附加
-    ///   状态读 composite）、[syslog] / [notify] / [exposure] 全部、[ai] 全部、
+    ///   [detect.capture].driver_sha256、[detect.l7] 全部（解析按事件门控）、
+    ///   [detect.rules] 全部（enabled/路径/上限热更，规则包文件变化整包热重载）、
+    ///   [xdp].enabled（未附加时下次装配生效；已附加状态读 composite）、
+    ///   [syslog] / [notify] / [exposure] 全部、[ai] 全部、
     ///   [intel]、[fed] 运行期参数（interval_secs）
     /// - **需重启**：蜜罐监听列表与开关（端口绑定）、API 端口/开关、
     ///   捕获开关与模式（后端过滤语义固定于附加时）、XDP 网卡与模式、
@@ -673,6 +701,11 @@ mod tests {
         let mut hot = base.clone();
         hot.detect.scan_distinct_ports = 9;
         hot.detect.ttl_secs = 99;
+        hot.detect.l7.enabled = true;
+        hot.detect.l7.ja3 = false;
+        hot.detect.rules.enabled = true;
+        hot.detect.rules.path = "/tmp/rules.rules".into();
+        hot.detect.rules.max_rules = 100;
         hot.syslog.enabled = true;
         hot.notify.min_severity = "info".into();
         hot.exposure.auto_scan_secs = 300;

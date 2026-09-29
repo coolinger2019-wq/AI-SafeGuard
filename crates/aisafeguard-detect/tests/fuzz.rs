@@ -32,6 +32,7 @@ fn fuzz_freq_engine_never_panics_and_bounds_output() {
             window_secs: 1 + (xorshift(&mut state) % 600) as i64,
             ttl_secs: 60,
             capture: Default::default(),
+            l7: Default::default(),
             rules: Default::default(),
         };
         // 混合合法/畸形来源 IP

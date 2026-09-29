@@ -1092,15 +1092,19 @@ pub fn spawn_capture_task(eng: &Arc<EngineHandle>) {
                                 }
                             }
                             let dcfg = eng.config().detect;
-                            // E6：full 模式流前缀解析 HTTP 提示与 JA3（TLS 才有）
-                            let (hint, tls_fp) = if cap_cfg.mode == "full" {
+                            // E6 + H5：full 模式且 [detect.l7].enabled 时才解析
+                            // HTTP 提示与 JA3（默认关——深检默认 off，热更即时生效）
+                            let (hint, tls_fp) = if cap_cfg.mode == "full" && dcfg.l7.enabled {
                                 match pipeline.stream_bytes(&d.key) {
                                     Some(stream) => {
                                         let hint = std::str::from_utf8(&stream)
                                             .ok()
                                             .and_then(aisafeguard_l7::parse_http_hint);
-                                        let tls_fp =
-                                            aisafeguard_l7::parse_ja3(&stream).map(|j| j.md5);
+                                        let tls_fp = if dcfg.l7.ja3 {
+                                            aisafeguard_l7::parse_ja3(&stream).map(|j| j.md5)
+                                        } else {
+                                            None
+                                        };
                                         (hint, tls_fp)
                                     }
                                     None => (None, None),
