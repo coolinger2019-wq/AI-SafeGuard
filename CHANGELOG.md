@@ -28,6 +28,13 @@
   一键闭环可用
 - `cargo test --workspace` 全绿
 
+### Artifact SHA-256(与发布页同清单;构建源 = 提交 c45d87e,即 tag v0.5.7 所指树;仓库不存二进制,本地暂存 dist/ 已 gitignore)
+
+- Windows x86_64(MSVC)`aisafeguard.exe`(`--version` = 0.5.7,28,158,464 字节):
+  `1aae4019d0b2cc478e44e809afdcc3923b4a6f2a677955f80c891dd002bf735d`
+- Linux x86_64(WSL2 Ubuntu 24.04 `cargo build --release`)`aisafeguard.linux-x86_64`(`--version` = 0.5.7,33,717,864 字节):
+  `0b23da3202f20b7059c89ba718cb504ee2b5434147444c3f4de8c1970b1ea9ce`
+
 ## [0.5.6] - 2026-09-29
 
 地基版 Batch 3 + 文档收官（任务拆分见 docs/ROADMAP-0.5.3.md）：HTTP 蜜罐明显比「空端口监听」好用；仍不进行中交互。
