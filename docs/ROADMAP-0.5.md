@@ -10,7 +10,7 @@
 
 > 原则：可开关的 NGFW \*\*感知层\*\*；命中只进事件总线；封禁仍走 `Firewall` trait；默认关深检；Linux 可高速、Windows 能力对等但不强制 eBPF。
 
-> **状态（2026-09-29）：0.5.0 完成 Batch E + F + H（P0 全部 + P1 的 E5/F7/H7）；0.5.1 完成 Batch G（G1/G2/G3/G4/G6，G5 AF_XDP 维持 stretch）。** 落地对账见 docs/NGFW_EVOLUTION.md §7。
+> **状态（2026-09-29）：0.5 规划全部完成——0.5.0 完成 Batch E + F + H（P0 全部 + P1 的 E5/F7/H7）；0.5.1 完成 Batch G（G1/G2/G3/G4/G6）；0.5.2 stretch 四件套按交付形态完成（G5 设计+清单 / H3 POC 计划 / H4 文档包 / JA4 差异表，见 NGFW_EVOLUTION §9——均为设计文档，无生产代码）。** 落地对账见 docs/NGFW_EVOLUTION.md §7。
 
 
 

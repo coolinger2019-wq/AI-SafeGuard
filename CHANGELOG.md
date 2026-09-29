@@ -2,6 +2,25 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.5.2] - 2026-09-29
+
+0.5 规划收官：stretch 四件套按 ROADMAP-0.5 原文的交付形态完成（设计/计划/差异表，无生产代码，不进默认安装/构建链/CI）。
+
+### 新增（文档）
+
+- **G5 AF_XDP 深检设计 + 生产化清单**（NGFW_EVOLUTION §9.1）：采集源扩展为
+  windivert/af_packet/af_xdp 三后端（帧语义对齐、上层零改动）、与执行层 XDP 程序
+  共用 attach 位（redirect 样本即镜像）、旁路纪律与隐私红线不变；zero-copy 驱动
+  依赖/ring 丢帧计数/内核门槛等风险 + 五项生产化清单
+- **H3 WFP callout 感知 POC 计划**（§9.2）：ALE_FLOW_ESTABLISHED classify 上送
+  五元组（只元数据不带载荷），用户态喂流表照走事件总线；EWDK/测试签名/HVCI/WHQL
+  清单；验收标准 = 流表计数与 WinDivert control 一致 + 退出反注册零泄漏
+- **H4 eBPF-for-windows 实验轨文档包**（§9.3）：大字警告不进默认安装；维持实验轨
+  三理由（hook 窄/部署成本/等价能力已在手）+ 三条重评估触发条件
+- **JA4 差异表**（§9.4，E5 验收的"差异表"项）：实现 vs FoxIO 官方逐维度对照——
+  分片 ClientHello → None（漏报不误报）、恒 "t"（无 QUIC/DTLS）、
+  未做官方二进制对拍（列为后续动作）
+
 ## [0.5.1] - 2026-09-29
 
 按 ROADMAP-0.5 Batch G 完成 Linux 高速路径（G5 AF_XDP 维持 stretch）。

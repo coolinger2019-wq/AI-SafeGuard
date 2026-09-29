@@ -231,3 +231,98 @@ eBPF-for-windows 维持实验轨（见上节决策）。
 
 **配置说明**：规划草案中的 `[detect.ebpf]` 落地为既有 `[xdp]`（enabled/iface/mode，
 0.3.7 引入）——同一控制点，不设第二份配置。
+
+## 9. 0.5.2 stretch 四件套（设计 / 计划 / 差异表——不含生产代码）
+
+> P2 stretch 的交付形态按 ROADMAP-0.5 原文：G5 = 「POC 或设计 + 清单」、H3 = POC 计划、
+> H4 = 文档包、JA4 完善 = 差异表。四项均**未进默认安装 / 构建链 / CI**，生效以显式立项为前提。
+
+### 9.1 G5：AF_XDP 深检——设计 + 生产化清单
+
+**动机**：full 模式当前走 AF_PACKET/WinDivert 副本路径（帧经内核栈 → socket → 用户态，
+逐帧系统调用）。AF_XDP 在收包点直接把帧放入用户态 umem 环，目标是在**不动传感器/
+执行器边界**的前提下提升深检吞吐。
+
+**架构定位**：
+- 采集源扩展：`capture::spawn` Linux 分支新增 `af_xdp` 后端（三选一：windivert /
+  af_packet / af_xdp）。AF_XDP 交付的仍是「以太网帧 + ts」——帧语义全平台对齐
+  （0.3.3 纪律），上层 inspect/flow/reasm/规则引擎**零改动**。
+- **共用 attach 位**：aisafeguard_xdp 程序尾部（XDP_PASS 之前）追加 redirect 到
+  XSKMAP——样本即镜像副本，不阻断；一个程序同时承担快速丢弃（G2）+ 流表（G1）+
+  采样镜像，避免双程序抢占网卡 attach 位。
+- 旁路纪律不变：AF_XDP 是感知侧，不注回、不改包；隐私红线原样适用（control 模式
+  仍只取 SYN 元数据，full 载荷仅判定可疑时截断留存）。
+- 默认关：`[detect.capture]` 增加可选 backend 字段（缺省按平台自动选），启用需
+  Linux + root/CAP_BPF + 网卡支持。
+
+**关键风险**：
+1. zero-copy 依赖驱动（ixgbe/i40e/mlx5 原生；virtio-net/WSL2 只能 copy 模式，目标打折）
+2. ring 满丢帧比内核栈常见——重组器已有乱序容忍，但需加丢帧计数进 status（G3 同款）
+3. umem/ring 参数（frame 数、chunk 4K、fill ring 深度）与 LRO/GRO 的相互影响
+4. 内核门槛：AF_XDP ≥4.18，zero-copy ≥5.4+；执行层 XDP 程序改造需重跑 ebpf/build.sh
+
+**生产化清单**（立项时执行）：
+- [ ] spike 双机：virtio-net（copy 模式）与 ixgbe（zero-copy）各一，吞吐目标 >1Gbps
+- [ ] capture 后端 trait 化（第三个后端出现时才抽，AGENTS：不做预防性抽象）
+- [ ] ring 满丢帧计数 + status 暴露
+- [ ] golden 对齐：同一 pcap 喂 AF_PACKET 与 AF_XDP，检测判定逐条一致
+- [ ] 基准报告：同负载 CPU 占用 vs AF_PACKET
+
+### 9.2 H3：WFP callout 只做感知——POC 计划（未实现，需 WDK + 测试签名）
+
+**定位**（对齐「Windows 数据面决策」）：callout 只做**感知**——classify 阶段上送
+元数据给用户态流表/检测；不执行封禁（封禁仍走 COM/WFP 用户态规则 + Firewall
+trait），不膨胀成第二套执行器。
+
+**POC 最小闭环**：
+- 驱动侧（`aisafeguard-wfp-callout`，WDK 工程不进 workspace 成员）：
+  `FWPM_LAYER_ALE_FLOW_ESTABLISHED_V4`（入站/出站各一）注册 callout，classifyFn 取
+  FWPS_FIELDS_ALE_FLOW_ESTABLISHED_V4（五元组 + flags），FwpsFlowAssociateContext +
+  流注队列经 Flow I/O 只读上送——**只上元数据不带载荷**（载荷语义仍是 WinDivert
+  full 模式职责）。
+- 用户态侧：`\.\aisafeguard-callout` 设备读取 → 五元组喂 aisafeguard-detect 流表
+  （FlowKey 已有）→ 判定照走事件总线。
+- **验收标准**：VM 实机 nmap 扫描，用户态流表计数与 WinDivert control 模式一致
+  （±重传）；进程退出后 callout 正常反注册、零句柄泄漏、无蓝屏。
+
+**构建与签名清单**（正式立项前置）：
+- [ ] EWDK 容器构建（避免本机 VS/WDK 版本地狱）
+- [ ] POC：测试签名（Enable test signing + 自签证书）+ VM 快照 + WinDbg 内核调试
+- [ ] 正式分发：EV 证书 + WHQL 提交（与发布签名共用证书采购决策，正式流程单列）
+- [ ] HVCI 验证（签名不合规直接拒载）
+- [ ] 服务依赖顺序：驱动服务随 aisafeguard 启动，停止先驱动后服务
+- 风险即它一直是 stretch 的原因：内核代码蓝屏成本高，POC 必须在隔离 VM。
+
+### 9.3 H4：eBPF-for-windows 实验轨文档包
+
+> **⚠️ 大字警告：ebpf-for-windows 不是本产品依赖——不出现在默认安装、构建链、CI、
+> 发布物中。以下仅供未来评估，不得据此在任何环境部署。**
+
+- **是什么**：Microsoft ebpf-for-windows 把 eBPF 编程模型（clang 编译、verifier、
+  map、bpf2c 预编译）移植到 Windows，hook 依托 WFP。
+- **为什么维持实验轨**（与「Windows 数据面决策」一致）：
+  1. hook 面窄于 Linux eBPF（XDP-like/bind/sock_ops 等子集），不是平行完整过滤栈；
+     与 Linux 程序不二进制兼容——「跨平台同一份 eBPF 程序」不成立；
+  2. 部署成本：运行时安装（MSI）、系统版本门槛、bpf2c 原生驱动仍需 WHQL 签名；
+  3. 等价能力已在手：执行侧 COM/WFP 用户态规则（BFE 内核执行）+ 感知侧 WinDivert
+     采样，0.5.0 已完成 Windows 能力对等，无功能缺口驱动引入。
+- **重评估触发条件**（满足其一才立项 spike）：hook 覆盖到所需感知点且稳定发布；
+  客户明确要求跨 Win/Linux 统一 eBPF 运维面；WFP callout 签名成本被证明不可接受。
+
+### 9.4 JA4 差异表（实现 vs FoxIO 官方 python/ja4.py）
+
+实现：`aisafeguard_l7::parse_ja4`（算法逐项对照官方代码；期望值 = 官方算法
+hashlib 预计算，已知向量 ×2 + 模糊测试）。
+
+| 维度 | FoxIO 官方（tshark 全解析） | 本实现 | 影响 |
+|------|------|------|------|
+| ClientHello 定位 | 协议树，支持跨 TCP 段重组 | 重组流前缀的首个 TLS record（非 0x16/0x01 → None） | 跨段分片 → None（**漏报不误报**） |
+| record 内多 handshake | 支持 | 只取第一个 | 同上 |
+| 传输类型 | q（QUIC）/d（DTLS）/t（TCP） | 恒 "t" | QUIC/DTLS 不产 JA4 |
+| 版本映射/计数/GREASE/SNI+ALPN 剔除/签名算法原序/ALPN 首尾字符 | — | 同（TLS_MAPPER 逐项对照官方源码） | 无差异 |
+| ALPN | tshark 字符串列表 | 原始字节（list_len + name_len + name） | 等价；首字节 >127 → "99"（官方同） |
+| 空列表哈希 | 字面 000000000000 | 同（sha12 空输入特判） | 无差异 |
+| 对拍验证 | 官方工具 | 未直接跑 FoxIO 二进制 | **后续**：真实流量 pcap 双工具对拍（0.6 感知加固时） |
+
+已知非偏差：cipher/ext 计数封顶 99、无签名算法时哈希输入不带下划线段、
+supported_versions 去 GREASE 后为空 → None（官方同为异常跳过）。
