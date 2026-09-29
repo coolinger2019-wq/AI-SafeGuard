@@ -11,6 +11,7 @@
 mod http;
 mod listener;
 mod protocol;
+pub mod shell;
 
 use std::time::Duration;
 
