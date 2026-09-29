@@ -76,13 +76,38 @@ impl Default for ApiConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HoneypotConfig {
     pub enabled: bool,
     pub listeners: Vec<ListenerConfig>,
     /// 假 Shell（中交互 SSH，0.5.9 H104）：默认关，显式开启
     pub shell: ShellConfig,
+    /// 凭证采集与本地喷洒检测（0.5.10 H200）
+    pub credentials: CredentialConfig,
+}
+
+/// 凭证采集与本地喷洒检测（0.5.10 H200）：蜜罐会话的 用户名/口令 对以
+/// argon2id 加盐哈希落库（明文永不落盘），与本机账号快照做喷洒比对。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CredentialConfig {
+    /// 默认开：凭证本来就是蜜罐已在采集的数据（事件里本就留有用户名），
+    /// 落库的是不可逆哈希，喷洒检测是被动分析。关闭 = 不建凭证库、不发
+    /// credential_spray 事件（改后需重启）。
+    pub enabled: bool,
+    /// 本地账号快照刷新周期（秒）；0 = 仅启动时枚举一次。只取用户名集合，
+    /// 绝不触碰真实口令数据。
+    pub snapshot_interval_secs: u64,
+}
+
+impl Default for CredentialConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            snapshot_interval_secs: 3600,
+        }
+    }
 }
 
 /// 假 Shell 会话参数（0.5.9 H104）：开启后 ssh 监听器认证后进入命令仿真会话
@@ -123,39 +148,51 @@ impl Default for HoneypotConfig {
         Self {
             enabled: true,
             shell: ShellConfig::default(),
+            credentials: CredentialConfig::default(),
             listeners: vec![
                 ListenerConfig {
                     name: "ssh".into(),
                     port: 2222,
                     kind: "ssh".into(),
+                    enabled: true,
                 },
                 ListenerConfig {
                     name: "http".into(),
                     port: 8081,
                     kind: "http".into(),
+                    enabled: true,
                 },
                 ListenerConfig {
                     name: "telnet".into(),
                     port: 2323,
                     kind: "telnet".into(),
+                    enabled: true,
                 },
                 ListenerConfig {
                     name: "generic".into(),
                     port: 1337,
                     kind: "generic".into(),
+                    enabled: true,
                 },
             ],
         }
     }
 }
 
-/// kind 取值：ssh | http | telnet | generic
+/// kind 取值：ssh | http | telnet | generic | mysql | redis（未知 kind 按 generic 处理）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ListenerConfig {
     pub name: String,
     pub port: u16,
     pub kind: String,
+    /// 单监听器启停（0.5.10 H130）：false = 保留配置但不绑定端口；改动需重启
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -630,6 +667,7 @@ impl AppConfig {
         if old.honeypot.enabled != new.honeypot.enabled
             || old.honeypot.listeners != new.honeypot.listeners
             || old.honeypot.shell != new.honeypot.shell
+            || old.honeypot.credentials != new.honeypot.credentials
         {
             out.push("蜜罐监听");
         }
@@ -801,8 +839,42 @@ mod tests {
             .map(|l| l.kind.as_str())
             .collect();
         assert_eq!(kinds, ["ssh", "http", "telnet", "generic"]);
+        // 单监听器启停默认开（0.5.10 H130）：关掉某一行是显式动作
+        assert!(cfg.honeypot.listeners.iter().all(|l| l.enabled));
+        // 凭证采集默认开（0.5.10 H200）：落库的只有不可逆哈希，喷洒检测是被动
+        // 分析——不属「新采集面默认关」范畴，但明文永不落盘的断言在 store 测试钉住
+        assert!(cfg.honeypot.credentials.enabled);
+        assert_eq!(cfg.honeypot.credentials.snapshot_interval_secs, 3600);
         // AI 默认人工确认
         assert!(!cfg.ai.enabled);
         assert!(!cfg.ai.auto_apply);
+    }
+
+    /// H130 监听器启停字段：旧配置（无 enabled）默认 true；显式 false 可序列化
+    /// roundtrip——GUI 保存的 toml 与手写完全同构（deny_unknown_fields 不炸）。
+    #[test]
+    fn listener_enabled_roundtrip() {
+        let legacy = r#"
+[[listeners]]
+name = "mysql"
+port = 3307
+kind = "mysql"
+"#;
+        let cfg: HoneypotConfig = toml::from_str(legacy).expect("旧格式监听行应可解析");
+        assert!(cfg.listeners[0].enabled, "缺省 enabled 应为 true");
+
+        let disabled = HoneypotConfig {
+            listeners: vec![ListenerConfig {
+                name: "ssh".into(),
+                port: 2222,
+                kind: "ssh".into(),
+                enabled: false,
+            }],
+            ..Default::default()
+        };
+        let text = toml::to_string_pretty(&disabled).expect("序列化");
+        let back: HoneypotConfig = toml::from_str(&text).expect("GUI 保存的 toml 应可回读");
+        assert!(!back.listeners[0].enabled);
+        assert_eq!(back, disabled);
     }
 }

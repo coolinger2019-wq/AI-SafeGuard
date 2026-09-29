@@ -81,6 +81,23 @@ pub enum SecurityEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         tls_ja4: Option<String>,
     },
+    /// 蜜罐凭证采集（0.5.10 H200）：蜜罐会话里的 用户名/口令 对。username 明文
+    /// 用于与本地账号做喷洒比对；口令只携带 argon2id PHC 哈希（会话内加盐，不可逆），
+    /// 明文在离开蜜罐 crate 前即被丢弃。pass_hash 为 None = 协议层面拿不到口令
+    /// （MySQL 握手只有用户名，口令是不可逆的 scramble）。
+    CredentialObserved {
+        ts: i64,
+        listener: String,
+        /// 协议 kind（ssh | telnet | http | mysql | redis）
+        kind: String,
+        port: u16,
+        remote_ip: String,
+        remote_port: u16,
+        username: String,
+        /// argon2id PHC 串（含随机盐）；None = 无口令可采
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pass_hash: Option<String>,
+    },
     Engine {
         ts: i64,
         level: String,
@@ -98,6 +115,7 @@ impl SecurityEvent {
             SecurityEvent::ProposalApplied { .. } => "proposal_applied",
             SecurityEvent::AiRun { .. } => "ai_run",
             SecurityEvent::Detection { .. } => "detection",
+            SecurityEvent::CredentialObserved { .. } => "credential_observed",
             SecurityEvent::Engine { .. } => "engine",
         }
     }
@@ -111,6 +129,7 @@ impl SecurityEvent {
             | SecurityEvent::ProposalApplied { ts, .. }
             | SecurityEvent::AiRun { ts, .. }
             | SecurityEvent::Detection { ts, .. }
+            | SecurityEvent::CredentialObserved { ts, .. }
             | SecurityEvent::Engine { ts, .. } => *ts,
         }
     }
@@ -144,6 +163,11 @@ impl SecurityEvent {
             } => {
                 format!("[{kind}] {src_ip}: {evidence}")
             }
+            SecurityEvent::CredentialObserved {
+                username, listener, ..
+            } => {
+                format!("凭证采集: {username}@{listener}")
+            }
             SecurityEvent::Engine { level, message, .. } => {
                 format!("[{level}] {message}")
             }
@@ -166,9 +190,10 @@ impl SecurityEvent {
             SecurityEvent::Detection { .. } => 4, // warning
             SecurityEvent::FirewallRuleAdded { .. } => 4,
             SecurityEvent::ProposalApplied { .. } => 4,
-            // 蜜罐被触碰、AI 产出建议：值得看但未执行处置
+            // 蜜罐被触碰、AI 产出建议、凭证被采集：值得看但未执行处置
             SecurityEvent::HoneypotHit { .. } => 5, // notice
             SecurityEvent::ProposalCreated { .. } => 5,
+            SecurityEvent::CredentialObserved { .. } => 5,
             // 例行流水
             SecurityEvent::FirewallRuleRemoved { .. } => 6, // informational（TTL 到期解封是常态）
             SecurityEvent::AiRun { .. } => 6,

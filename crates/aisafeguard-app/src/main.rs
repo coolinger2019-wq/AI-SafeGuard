@@ -601,6 +601,7 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
         started: Instant::now(),
         ai_running: Arc::new(AtomicBool::new(false)),
         honeypot,
+        local_accounts: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
         token,
         version: VERSION,
     });
@@ -608,6 +609,9 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
     // 快路径频次检测 + TTL 自动解封
     engine::spawn_detect_task(&engine);
     engine::spawn_expiry_janitor(&engine);
+
+    // 凭证采集与本地喷洒检测（0.5.10 H200，默认开；[honeypot.credentials] 门控）
+    engine::spawn_credential_task(&engine);
 
     // 规则子集引擎（0.5.0 Batch F，默认关闭）：启动加载 + 文件签名变化整包热重载
     engine::spawn_rules_task(&engine);

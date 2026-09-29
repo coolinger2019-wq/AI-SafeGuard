@@ -6,6 +6,8 @@
 //! 完整性（[A.8.15]）：事件表维护链式 SHA-256 哈希（hash = H(prev_hash | 规范化行)），
 //! `verify_chain` 可离线校验任一行是否被篡改。
 
+pub mod credentials;
+
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
@@ -14,6 +16,8 @@ use aisafeguard_core::event::SecurityEvent;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+pub use credentials::{CredentialRecord, CredentialStore};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventRow {
@@ -466,6 +470,24 @@ impl Store {
                         .unwrap_or_default(),
                     tls_fingerprint.clone().unwrap_or_default(),
                     tls_ja4.clone().unwrap_or_default(),
+                    String::new(),
+                ),
+                // 凭证采集（0.5.10 H200）：事件行只落用户名（payload 列），
+                // pass_hash 刻意不出现在任何落库列——哈希只进独立凭证库
+                SecurityEvent::CredentialObserved {
+                    listener,
+                    remote_ip,
+                    remote_port,
+                    username,
+                    ..
+                } => (
+                    listener.clone(),
+                    remote_ip.clone(),
+                    *remote_port as i64,
+                    username.clone(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
                     String::new(),
                 ),
                 _ => (
@@ -1289,6 +1311,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         Store::open(&dir.join("t.db")).unwrap()
+    }
+
+    /// H200 验收（API 全字段扫描）：事件 API 的任何行都不携带口令明文或
+    /// 凭证哈希——CredentialObserved 事件行只有用户名，pass_hash 刻意丢弃。
+    #[test]
+    fn credential_event_row_carries_no_secret() {
+        let store = tmp_store("credrow");
+        store
+            .insert_event(&SecurityEvent::CredentialObserved {
+                ts: aisafeguard_core::now_ts(),
+                listener: "ssh".into(),
+                kind: "ssh".into(),
+                port: 2222,
+                remote_ip: "203.0.113.9".into(),
+                remote_port: 5555,
+                username: "root".into(),
+                pass_hash: Some("$argon2id$v=19$m=8192,t=2,p=1$SALTXSALT$HIDDEN".into()),
+            })
+            .unwrap();
+        let rows = store.recent_events(10, None).unwrap();
+        let row = rows
+            .iter()
+            .find(|r| r.kind == "credential_observed")
+            .expect("credential_observed 行应入库");
+        assert_eq!(row.payload, "root", "payload 列只落用户名");
+        let json = serde_json::to_string(&rows).unwrap();
+        assert!(!json.contains("argon2id"), "哈希不得进事件 API: {json}");
+        assert!(!json.contains("HIDDEN"), "哈希不得进事件 API: {json}");
+        assert!(json.contains("root"));
     }
 
     /// 指纹覆盖统计（0.5.0 H6）：Detection 总数与携带 JA3 的条数按窗口计数。

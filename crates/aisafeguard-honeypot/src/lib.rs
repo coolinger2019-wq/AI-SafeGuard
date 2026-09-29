@@ -8,6 +8,7 @@
 //! 模块划分（0.5.9 H102）：[`listener`] 监听与并发预算、`http` HTTP 协议仿真、
 //! `protocol` banner 级协议仿真；本文件是门面：公共 API 重导出 + 攻击者输入清洗。
 
+mod cred;
 mod http;
 mod listener;
 mod mysql;
@@ -33,6 +34,9 @@ pub(crate) struct SessionOutcome {
     pub http_hint: Option<l7::HttpHint>,
     /// 交互会话逐命令记录：中交互假 Shell 填充，低交互恒 None
     pub interaction: Option<Vec<aisafeguard_core::event::ShellStep>>,
+    /// 会话内采集的凭证对（0.5.10 H200）：口令明文只到 handle_conn 哈希为止，
+    /// 之后只发 argon2id PHC 哈希。由 [honeypot.credentials].enabled 门控发布。
+    pub credentials: Vec<cred::RawCredential>,
 }
 
 pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(10);

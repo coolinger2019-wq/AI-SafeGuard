@@ -122,6 +122,9 @@ pub struct AisafeApp {
     settings_exposure_secs: String,
     settings_xdp_iface: String,
     settings_fp_days: String,
+    // 蜜罐域（0.5.10 H130）：假 Shell 命令上限 + 监听表端口列的文本输入缓冲
+    settings_shell_max_cmds: String,
+    settings_listener_ports: Vec<String>,
     // 已保存的界面偏好（缓存值；每 2 秒随 cache 刷新）
     ui_prefs: (ThemeId, f32),
     // 上一帧已应用的主题+缩放（变化才重新 apply，避免每帧重建样式）
@@ -197,6 +200,8 @@ impl AisafeApp {
             settings_exposure_secs: String::new(),
             settings_xdp_iface: String::new(),
             settings_fp_days: String::new(),
+            settings_shell_max_cmds: String::new(),
+            settings_listener_ports: Vec::new(),
             ui_prefs,
             applied_ui: Some(ui_prefs),
         }
@@ -547,6 +552,8 @@ fn event_color(kind: &str) -> Color32 {
         "proposal_created" => purple(),
         "ai_run" => accent(),
         "detection" => orange(),
+        // 凭证采集（0.5.10 H200）：单独着色，事件页可辨识
+        "credential_observed" => purple(),
         "engine" => text_dim(),
         _ => text_dim(),
     }

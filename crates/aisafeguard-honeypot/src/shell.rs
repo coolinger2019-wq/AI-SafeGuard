@@ -128,6 +128,8 @@ struct ShellShared {
     session: Mutex<ShellSession>,
     line: Mutex<String>,
     auth_user: Mutex<String>,
+    /// 认证口令（0.5.10 H200）：只在此暂存，会话出口哈希后即丢
+    auth_pw: Mutex<String>,
 }
 
 /// 在已 accept 的 TCP 流上驱动一次 SSH 假 Shell 会话。
@@ -144,6 +146,7 @@ pub(crate) async fn ssh_shell_session(
         )),
         line: Mutex::new(String::new()),
         auth_user: Mutex::new(String::new()),
+        auth_pw: Mutex::new(String::new()),
         rt,
     });
     let handler = SshShellHandler {
@@ -167,8 +170,18 @@ pub(crate) async fn ssh_shell_session(
     }
     let session = shared.session.lock().await;
     let steps = session.steps();
+    // 凭证采集（H200）：认证过的 用户名/口令 对出会话前统一收集，handle_conn 哈希
+    let auth_user = shared.auth_user.lock().await.clone();
+    let credentials = if auth_user.is_empty() {
+        Vec::new()
+    } else {
+        let auth_pw = shared.auth_pw.lock().await.clone();
+        vec![crate::cred::RawCredential {
+            username: auth_user.clone(),
+            password: Some(auth_pw),
+        }]
+    };
     if steps.is_empty() {
-        let auth_user = shared.auth_user.lock().await.clone();
         let summary = if auth_user.is_empty() {
             "SSH 握手未完成认证".to_string()
         } else {
@@ -179,6 +192,7 @@ pub(crate) async fn ssh_shell_session(
             payload: String::new(),
             http_hint: None,
             interaction: None,
+            credentials,
         }
     } else {
         let payload = steps
@@ -191,6 +205,7 @@ pub(crate) async fn ssh_shell_session(
             payload,
             http_hint: None,
             interaction: Some(steps.to_vec()),
+            credentials,
         }
     }
 }
@@ -294,8 +309,12 @@ pub(crate) async fn telnet_shell_session(
         _ => return empty_session_outcome("Telnet 连接未完成登录"),
     };
     reply!("Password: ");
-    let _password = read_line(&mut stream, &mut line_buf, &mut raw).await;
-    // 口令不落任何留痕(H200 接管采集);任意凭证放行
+    // read_line 的 Result/Option 折叠成 Option：连接中断=没拿到口令
+    let password = read_line(&mut stream, &mut line_buf, &mut raw)
+        .await
+        .ok()
+        .flatten();
+    // 口令不落任何留痕(H200 接管采集:进凭证对,handle_conn 哈希);任意凭证放行
     reply!(format!(
         "\r\nWelcome to Ubuntu 22.04 LTS (GNU/Linux 6.1.0-18-amd64 x86_64)\r\n\r\n{}",
         shell.prompt()
@@ -341,6 +360,10 @@ pub(crate) async fn telnet_shell_session(
         } else {
             Some(steps.to_vec())
         },
+        credentials: vec![crate::cred::RawCredential {
+            username,
+            password,
+        }],
     }
 }
 
@@ -350,15 +373,18 @@ fn empty_session_outcome(summary: &str) -> SessionOutcome {
         payload: String::new(),
         http_hint: None,
         interaction: None,
+        credentials: Vec::new(),
     }
 }
 
 impl Handler for SshShellHandler {
     type Error = russh::Error;
 
-    async fn auth_password(&mut self, user: &str, _password: &str) -> Result<Auth, Self::Error> {
-        // 任意凭证放行是蜜罐前提;口令明文/长度都不落任何留痕(H200 接管采集)
+    async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
+        // 任意凭证放行是蜜罐前提;口令明文/长度都不落任何留痕(H200 接管采集:
+        // 暂存到 shared,会话出口统一哈希)
         *self.shared.auth_user.lock().await = user.to_string();
+        *self.shared.auth_pw.lock().await = password.to_string();
         Ok(Auth::Accept)
     }
 

@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod accounts;
 pub mod config;
 pub mod error;
 pub mod event;

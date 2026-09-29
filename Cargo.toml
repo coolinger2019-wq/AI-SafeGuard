@@ -75,6 +75,14 @@ russh = { version = "0.63", default-features = false, features = ["ring"] }
 # 版本必须与 russh 内部一致（其依赖树是 rand 0.10 / rand_core 0.10），否则
 # PrivateKey::random 的 Rng 泛型不匹配。
 rand = "0.10"
+# H200 凭证哈希（0.5.10）：RustCrypto argon2id，纯 Rust 无 C 后端。口令只存
+# 加盐哈希用于比对与频次统计，不还原不展示。参数刻意调低（见 cred.rs）：
+# 被哈希的是攻击者自选的口令，抗爆破价值趋近于零，换取高频撞库时不烧 CPU。
+argon2 = "0.6"
+# H200 本机账号快照（0.5.10）：跨平台账号枚举的安全封装（Windows 内部走
+# NetUserEnum、Linux 读 /etc/passwd）。仓库 forbid(unsafe_code)，不能直接调
+# FFI，按 AGENTS 第 5 条选成熟维护库；只开 users 特性收敛依赖面。
+sysinfo = { version = "0.37", default-features = false, features = ["user"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

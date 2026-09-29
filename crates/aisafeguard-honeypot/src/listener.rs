@@ -24,6 +24,17 @@ pub struct ListenerState {
     pub name: String,
     pub port: u16,
     pub kind: String,
+    /// 交互模式：「低交互」banner 级 /「中交互」假 Shell（0.5.10 H150 能力可见）
+    pub mode: String,
+}
+
+/// kind + 假 Shell 运行时可用性 → 交互模式（与 is_interactive_session 同一口径）
+fn interaction_mode(kind: &str, shell: Option<&ShellRuntime>) -> &'static str {
+    if is_interactive_session(kind, shell) {
+        "中交互"
+    } else {
+        "低交互"
+    }
 }
 
 pub struct HoneypotHandle {
@@ -42,6 +53,7 @@ impl HoneypotHandle {
 pub fn start(cfg: &HoneypotConfig, bus: EventBus, data_dir: &std::path::Path) -> HoneypotHandle {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut listeners = Vec::new();
+    let collect_creds = cfg.credentials.enabled;
     if cfg.enabled {
         // 假 Shell 运行时：host key 失败 → 降级 banner 低交互并留事件
         let shell = if cfg.shell.enabled {
@@ -68,16 +80,26 @@ pub fn start(cfg: &HoneypotConfig, bus: EventBus, data_dir: &std::path::Path) ->
             None
         };
         for l in &cfg.listeners {
-            tokio::spawn(run_listener(
-                l.clone(),
-                bus.clone(),
-                shutdown_rx.clone(),
-                shell.clone(),
-            ));
+            // 单监听器启停（0.5.10 H130）：disabled 行保留在状态表里（模式=未启用），
+            // 但不绑定端口——GUI 能看到这条配置的存在
+            if l.enabled {
+                tokio::spawn(run_listener(
+                    l.clone(),
+                    bus.clone(),
+                    shutdown_rx.clone(),
+                    shell.clone(),
+                    collect_creds,
+                ));
+            }
             listeners.push(ListenerState {
                 name: l.name.clone(),
                 port: l.port,
                 kind: l.kind.clone(),
+                mode: if l.enabled {
+                    interaction_mode(&l.kind, shell.as_deref()).to_string()
+                } else {
+                    "未启用".to_string()
+                },
             });
         }
     }
@@ -92,6 +114,7 @@ async fn run_listener(
     bus: EventBus,
     mut shutdown: watch::Receiver<bool>,
     shell: Option<Arc<ShellRuntime>>,
+    collect_creds: bool,
 ) {
     let addr = std::net::SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), l.port);
     let listener = match TcpListener::bind(addr).await {
@@ -149,7 +172,7 @@ async fn run_listener(
         let kind = l.kind.clone();
         let shell = shell.clone();
         tokio::spawn(async move {
-            handle_conn(stream, name, kind, bus, shell).await;
+            handle_conn(stream, name, kind, bus, shell, collect_creds).await;
             drop(interactive_permit);
             drop(permit);
         });
@@ -176,6 +199,7 @@ async fn handle_conn(
     kind: String,
     bus: EventBus,
     shell: Option<Arc<ShellRuntime>>,
+    collect_creds: bool,
 ) {
     let (remote_ip, remote_port) = match stream.peer_addr() {
         Ok(a) => (a.ip().to_string(), a.port()),
@@ -218,9 +242,31 @@ async fn handle_conn(
                 payload: String::new(),
                 http_hint: None,
                 interaction: None,
+                credentials: Vec::new(),
             }
         }
     };
+
+    // 凭证采集（0.5.10 H200）：[honeypot.credentials].enabled 门控；口令明文只到
+    // 本函数为止——先 argon2id 加盐哈希，再进事件（事件与落盘表面只见哈希）
+    if collect_creds {
+        for raw in &outcome.credentials {
+            if raw.username.is_empty() {
+                continue;
+            }
+            let hashed = crate::cred::hash_credential(raw);
+            bus.publish(SecurityEvent::CredentialObserved {
+                ts: now_ts(),
+                listener: listener.clone(),
+                kind: kind.clone(),
+                port: local_port,
+                remote_ip: remote_ip.clone(),
+                remote_port,
+                username: hashed.username,
+                pass_hash: hashed.pass_hash,
+            });
+        }
+    }
 
     let ev = SecurityEvent::HoneypotHit {
         ts: now_ts(),
@@ -322,6 +368,7 @@ mod tests {
         let mut rx = bus.subscribe();
         let cfg = HoneypotConfig {
             enabled: true,
+            credentials: Default::default(),
             shell: aisafeguard_core::config::ShellConfig {
                 enabled: true,
                 telnet_enabled: true,
@@ -331,6 +378,7 @@ mod tests {
                 name: "telnet".into(),
                 port,
                 kind: "telnet".into(),
+                enabled: true,
             }],
         };
         let _handle = start(&cfg, bus, &std::env::temp_dir());
@@ -433,6 +481,7 @@ mod tests {
                 name: "telnet".into(),
                 port,
                 kind: "telnet".into(),
+                enabled: true,
             }],
             ..Default::default()
         };
@@ -492,6 +541,7 @@ mod tests {
                 name: "ssh".into(),
                 port,
                 kind: "ssh".into(),
+                enabled: true,
             }],
             ..Default::default()
         };
@@ -552,6 +602,7 @@ mod tests {
         let bus = EventBus::new(256);
         let cfg = HoneypotConfig {
             enabled: true,
+            credentials: Default::default(),
             shell: aisafeguard_core::config::ShellConfig {
                 enabled: true,
                 ..Default::default()
@@ -560,6 +611,7 @@ mod tests {
                 name: "ssh".into(),
                 port,
                 kind: "ssh".into(),
+                enabled: true,
             }],
         };
         let _handle = start(&cfg, bus.clone(), &tmp);

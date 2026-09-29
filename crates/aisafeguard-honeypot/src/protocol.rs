@@ -5,6 +5,7 @@ use aisafeguard_l7 as l7;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
+use crate::cred::RawCredential;
 use crate::{READ_TIMEOUT, MAX_PAYLOAD, SessionOutcome, read_with_timeout, sanitize};
 
 pub(crate) async fn ssh_session(s: &mut TcpStream) -> std::io::Result<SessionOutcome> {
@@ -18,6 +19,7 @@ pub(crate) async fn ssh_session(s: &mut TcpStream) -> std::io::Result<SessionOut
         payload: text,
         http_hint: None,
         interaction: None,
+        credentials: Vec::new(),
     })
 }
 
@@ -29,11 +31,21 @@ pub(crate) async fn telnet_session(s: &mut TcpStream) -> std::io::Result<Session
     let summary = l7::first_line(&text)
         .map(|l| format!("尝试登录: {l}"))
         .unwrap_or_else(|| "登录提示已发送".into());
+    // banner 模式只收到一行 = login 提示后的用户名（无口令），进 H200 凭证库
+    let credentials = l7::first_line(&text)
+        .map(|user| {
+            vec![RawCredential {
+                username: user,
+                password: None,
+            }]
+        })
+        .unwrap_or_default();
     Ok(SessionOutcome {
         summary,
         payload: text,
         http_hint: None,
         interaction: None,
+        credentials,
     })
 }
 
@@ -46,5 +58,6 @@ pub(crate) async fn generic_session(s: &mut TcpStream) -> std::io::Result<Sessio
         payload: text,
         http_hint: None,
         interaction: None,
+        credentials: Vec::new(),
     })
 }

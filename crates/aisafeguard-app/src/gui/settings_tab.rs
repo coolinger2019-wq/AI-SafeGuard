@@ -1,4 +1,21 @@
 use super::*;
+use aisafeguard_core::config::ListenerConfig;
+
+/// 监听表协议枚举（H130 基础校验的合法取值；未知 kind 运行时按 generic 处理）
+const LISTENER_KINDS: [&str; 6] = ["ssh", "http", "telnet", "generic", "mysql", "redis"];
+
+/// kind 原始值 → 表格显示名
+fn kind_display(kind: &str) -> &str {
+    match kind {
+        "ssh" => "SSH",
+        "http" => "HTTP",
+        "telnet" => "Telnet",
+        "generic" => "Generic",
+        "mysql" => "MySQL",
+        "redis" => "Redis",
+        other => other,
+    }
+}
 
 impl AisafeApp {
     pub(crate) fn settings_ui(&mut self, ui: &mut egui::Ui) {
@@ -35,6 +52,13 @@ impl AisafeApp {
             self.settings_exposure_secs = cfg.exposure.auto_scan_secs.to_string();
             self.settings_xdp_iface = cfg.xdp.iface.clone();
             self.settings_fp_days = (cfg.ai.fp_suppress_secs / 86400).to_string();
+            self.settings_shell_max_cmds = cfg.honeypot.shell.max_commands.to_string();
+            self.settings_listener_ports = cfg
+                .honeypot
+                .listeners
+                .iter()
+                .map(|l| l.port.to_string())
+                .collect();
             self.settings_draft = Some(cfg);
         }
         let Some(mut draft) = self.settings_draft.clone() else {
@@ -367,11 +391,140 @@ impl AisafeApp {
     fn settings_honeypot_page(&mut self, ui: &mut egui::Ui, draft: &mut AppConfig) {
         section(ui, "蜜罐");
         ui.checkbox(&mut draft.honeypot.enabled, "启用蜜罐（需重启）");
-        ui.label(
-            RichText::new("监听列表（名称/端口/类型）通过 config.toml 的 [honeypot.listeners] 编辑，重启生效。")
-                .size(type_scale::CAPTION)
-                .color(text_dim()),
+
+        // ---------- 凭证采集与喷洒检测（0.5.10 H200） ----------
+        ui.add_space(space::M);
+        section(ui, "凭证采集与喷洒检测（需重启）");
+        ui.checkbox(
+            &mut draft.honeypot.credentials.enabled,
+            "启用（默认开）：蜜罐收到的用户名/口令对以加盐哈希入库，口令明文永不落盘",
         );
+        ui.label(
+            RichText::new(
+                "当攻击者在蜜罐里试到与本机真实账号相同的用户名时，产生高严重度 \
+「credential_spray」事件（自动封禁仍受内网保护与误报抑制约束）。\
+快照刷新周期在 config.toml [honeypot.credentials].snapshot_interval_secs 配置。",
+            )
+            .size(type_scale::CAPTION)
+            .color(text_dim()),
+        );
+
+        // ---------- 假 Shell（0.5.10 H130：中交互能力进 GUI） ----------
+        ui.add_space(space::M);
+        section(ui, "假 Shell（中交互，需重启）");
+        egui::Grid::new("shell-settings")
+            .num_columns(2)
+            .spacing([14.0, space::S])
+            .show(ui, |ui| {
+                ui.label("SSH 假 Shell");
+                ui.checkbox(
+                    &mut draft.honeypot.shell.enabled,
+                    "（默认关；开启后 ssh 监听器认证后进入命令仿真会话）",
+                );
+                ui.end_row();
+                ui.label("Telnet 假 Shell");
+                ui.checkbox(
+                    &mut draft.honeypot.shell.telnet_enabled,
+                    "（默认关；开启后 telnet 监听器进入命令仿真会话）",
+                );
+                ui.end_row();
+                ui.label("假 Shell 用户名");
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.honeypot.shell.username)
+                        .desired_width(160.0)
+                        .hint_text("deploy"),
+                );
+                ui.end_row();
+                ui.label("假 Shell 主机名");
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.honeypot.shell.hostname)
+                        .desired_width(160.0)
+                        .hint_text("debian-11"),
+                );
+                ui.end_row();
+                ui.label("单会话命令上限");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.settings_shell_max_cmds)
+                        .desired_width(120.0),
+                );
+                ui.end_row();
+            });
+        ui.label(
+            RichText::new(
+                "假 Shell 永不执行真实命令：白名单命令返回仿真结果，逐命令留痕进事件；\
+组合命令只解析首个，未知命令文案对齐真实 bash。",
+            )
+            .size(type_scale::CAPTION)
+            .color(text_dim()),
+        );
+
+        // ---------- 监听表编辑器（0.5.10 H130） ----------
+        ui.add_space(space::M);
+        section(ui, format!(
+            "监听表（{} 行，改动需重启生效）",
+            draft.honeypot.listeners.len()
+        ));
+        // 端口列文本缓冲与监听表行数对齐（增删行时同步维护，此处兜底重建）
+        if self.settings_listener_ports.len() != draft.honeypot.listeners.len() {
+            self.settings_listener_ports = draft
+                .honeypot
+                .listeners
+                .iter()
+                .map(|l| l.port.to_string())
+                .collect();
+        }
+        let mut remove_idx: Option<usize> = None;
+        egui::Grid::new("listener-table")
+            .num_columns(6)
+            .spacing([10.0, space::XS])
+            .show(ui, |ui| {
+                for h in ["启用", "名称", "协议", "端口", ""] {
+                    ui.label(caption(h).color(text_dim()));
+                }
+                ui.end_row();
+                for (i, l) in draft.honeypot.listeners.iter_mut().enumerate() {
+                    ui.checkbox(&mut l.enabled, "");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut l.name).desired_width(90.0),
+                    );
+                    egui::ComboBox::from_id_salt(("listener-kind", i))
+                        .selected_text(kind_display(&l.kind))
+                        .show_ui(ui, |ui| {
+                            for k in LISTENER_KINDS {
+                                ui.selectable_value(&mut l.kind, k.to_string(), kind_display(k));
+                            }
+                        });
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.settings_listener_ports[i])
+                            .desired_width(70.0),
+                    );
+                    if ui.small_button("删除").clicked() {
+                        remove_idx = Some(i);
+                    }
+                    ui.end_row();
+                }
+            });
+        if let Some(i) = remove_idx {
+            draft.honeypot.listeners.remove(i);
+            self.settings_listener_ports.remove(i);
+        }
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("+ 添加监听器").clicked() {
+                draft.honeypot.listeners.push(ListenerConfig {
+                    name: "mysql".into(),
+                    port: 3307,
+                    kind: "mysql".into(),
+                    enabled: true,
+                });
+                self.settings_listener_ports.push("3307".into());
+            }
+            ui.label(
+                RichText::new("协议：SSH / HTTP / Telnet / Generic / MySQL / Redis；端口 1-65535 且不得重复。\
+某一行绑定失败不影响其他监听器。")
+                    .size(type_scale::CAPTION)
+                    .color(text_dim()),
+            );
+        });
 
         ui.add_space(space::M);
         section(ui, "XDP 快速执行层（仅 Linux，需重启）");
@@ -810,6 +963,44 @@ impl AisafeApp {
         if !cfg.xdp.valid_mode() {
             self.set_toast("XDP 模式非法（skb | native）");
             return;
+        }
+        // 蜜罐监听表（0.5.10 H130）：端口解析 + 基础格式校验（范围/去重/命名），
+        // 不做实时占用探测（bind 失败仅该监听器不起并留事件）
+        {
+            let mut seen_ports = std::collections::HashSet::new();
+            for (i, l) in cfg.honeypot.listeners.iter_mut().enumerate() {
+                let raw = self
+                    .settings_listener_ports
+                    .get(i)
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+                match raw.parse::<u16>() {
+                    Ok(p) if p > 0 => {
+                        if !seen_ports.insert(p) {
+                            self.set_toast(format!("监听端口重复: {p}"));
+                            return;
+                        }
+                        l.port = p;
+                    }
+                    _ => {
+                        self.set_toast(format!("监听器「{}」端口非法（1-65535）", l.name));
+                        return;
+                    }
+                }
+                l.name = l.name.trim().to_string();
+                if l.name.is_empty() {
+                    self.set_toast("监听器名称不能为空");
+                    return;
+                }
+            }
+        }
+        // 假 Shell 会话参数（H130）：命令上限收敛到合理区间
+        match self.settings_shell_max_cmds.trim().parse::<usize>() {
+            Ok(v) if (1..=500).contains(&v) => cfg.honeypot.shell.max_commands = v,
+            _ => {
+                self.set_toast("假 Shell 单会话命令上限需在 1-500 之间");
+                return;
+            }
         }
         // 界面外观：主题名归一化（未知值回退默认），字号收敛到合法区间
         cfg.ui.theme = ThemeId::from_str(&cfg.ui.theme).as_str().to_string();

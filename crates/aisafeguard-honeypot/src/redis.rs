@@ -186,6 +186,7 @@ fn render_line(args: &[String]) -> String {
 pub(crate) async fn redis_session(s: &mut tokio::net::TcpStream) -> std::io::Result<SessionOutcome> {
     use tokio::io::AsyncWriteExt;
     let mut steps: Vec<ShellStep> = Vec::new();
+    let mut credentials: Vec<crate::cred::RawCredential> = Vec::new();
     let mut pending: Vec<u8> = Vec::new();
     'session: loop {
         let (n, buf) = read_with_timeout(s, READ_TIMEOUT).await?;
@@ -198,6 +199,21 @@ pub(crate) async fn redis_session(s: &mut tokio::net::TcpStream) -> std::io::Res
                 TakeOutcome::Command(args) => {
                     if steps.len() >= MAX_COMMANDS {
                         break 'session;
+                    }
+                    // AUTH 凭证采集（H200）：AUTH [user] password——口令进凭证对，
+                    // 留痕行仍走 respond 的脱敏（***）
+                    if args.first().map(|s| s.to_ascii_uppercase()).as_deref() == Some("AUTH") {
+                        let (user, pw) = match args.len() {
+                            2 => ("default".to_string(), args[1].clone()),
+                            n if n >= 3 => (args[1].clone(), args[2].clone()),
+                            _ => (String::new(), String::new()),
+                        };
+                        if !user.is_empty() {
+                            credentials.push(crate::cred::RawCredential {
+                                username: user,
+                                password: Some(pw),
+                            });
+                        }
                     }
                     let (response, recorded, quit) = respond(&args);
                     s.write_all(response.as_bytes()).await?;
@@ -239,6 +255,7 @@ pub(crate) async fn redis_session(s: &mut tokio::net::TcpStream) -> std::io::Res
         } else {
             Some(steps)
         },
+        credentials,
     })
 }
 
@@ -376,6 +393,7 @@ mod tests {
                 name: "redis".into(),
                 port,
                 kind: "redis".into(),
+                enabled: true,
             }],
             ..Default::default()
         };

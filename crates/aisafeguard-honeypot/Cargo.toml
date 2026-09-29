@@ -10,6 +10,8 @@ aisafeguard-l7.workspace = true
 # H104：russh SSH 服务端(ring 后端,workspace 注释见根 Cargo.toml)
 russh.workspace = true
 rand.workspace = true
+# H200：凭证口令的 argon2id 加盐哈希（选型与参数理由见根 Cargo.toml 与 cred.rs）
+argon2.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

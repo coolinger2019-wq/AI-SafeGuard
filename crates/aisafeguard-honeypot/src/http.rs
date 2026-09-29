@@ -30,6 +30,9 @@ const LOGIN_PATHS: &[&str] = &["/admin", "/login", "/api/login", "/wp-login.php"
 /// 密码类表单键名（词边界匹配）：值一律脱敏，不落库明文（0.5.6 F12）
 const SECRET_KEYS: &[&str] = &["password", "passwd", "pwd", "pass"];
 
+/// 用户名类表单键名（0.5.10 H200 凭证采集用，词边界匹配）
+const USERNAME_KEYS: &[&str] = &["username", "user", "login", "email", "acct", "user_name"];
+
 /// 请求路径 → 诱饵路由。path 为去查询串后的前缀（HttpHint.path 语义）；
 /// 精确匹配或子路径（/admin/ → 命中 /admin）。
 pub fn is_login_path(path: &str) -> bool {
@@ -115,6 +118,75 @@ fn boundary_after(chars: &[char], i: usize) -> bool {
     i >= chars.len() || !chars[i].is_ascii_alphanumeric()
 }
 
+/// form 值 URL 解码（%XX 与 + → 空格）：非法序列原样保留，字节流按 lossy UTF-8。
+fn url_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            // % 后须还有两个字节且都是十六进制
+            b'%' if i + 2 < bytes.len()
+                && bytes[i + 1].is_ascii_hexdigit()
+                && bytes[i + 2].is_ascii_hexdigit() =>
+            {
+                let h = u8::from_str_radix(&text[i + 1..i + 3], 16).unwrap_or(b'%');
+                out.push(h);
+                i += 3;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// 从 POST body 提取一对凭证（0.5.10 H200）：form `k=v&k=v` 形态按词边界找
+/// 用户名键与密码键；值解码清洗截断。用户名与密码都拿到才算一对——
+/// 没有口令的表单提交不是凭证（用户名仍会出现在脱敏 payload 里）。
+pub(crate) fn extract_form_credentials(body: &[u8]) -> Option<crate::cred::RawCredential> {
+    let text = String::from_utf8_lossy(body);
+    let mut username = None;
+    let mut password = None;
+    for pair in text.split('&') {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        let take = |keys: &[&str]| keys.iter().any(|k| {
+            let kc: Vec<char> = k.chars().collect();
+            let lc: Vec<char> = key.chars().collect();
+            lc.starts_with(&kc)
+                && boundary_before(&lc, 0)
+                && boundary_after(&lc, kc.len())
+        });
+        if password.is_none() && take(SECRET_KEYS) {
+            password = Some(sanitize(url_decode(value).as_bytes(), 128));
+        } else if username.is_none() && take(USERNAME_KEYS) {
+            username = Some(sanitize(url_decode(value).as_bytes(), 128));
+        }
+        if username.is_some() && password.is_some() {
+            break;
+        }
+    }
+    // 用户名/密码都是空 → 没有采集价值
+    match (username, password) {
+        (Some(u), Some(p)) if !u.is_empty() && !p.is_empty() => {
+            Some(crate::cred::RawCredential {
+                username: u,
+                password: Some(p),
+            })
+        }
+        _ => None,
+    }
+}
+
 /// 假登录页（0.5.6 F12）：GET 短表单；POST 返回通用失败页，无真实会话。
 fn login_page(path: &str, failed: bool) -> String {
     let msg = if failed {
@@ -155,9 +227,11 @@ pub(crate) async fn http_session(s: &mut TcpStream) -> std::io::Result<SessionOu
     let path = hint.as_ref().map(|h| h.path.clone()).unwrap_or_default();
 
     // POST：头部完整后继续读 body（Content-Length 有界，总长仍不超 8 KiB）
+    let mut body_start: Option<usize> = None;
     if method == "POST"
         && let Some(start) = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
     {
+        body_start = Some(start);
         let want = (start + content_length(&head_text).min(4096)).min(8192);
         let mut chunk = [0u8; 1024];
         for _ in 0..8 {
@@ -225,11 +299,22 @@ pub(crate) async fn http_session(s: &mut TcpStream) -> std::io::Result<SessionOu
         l7::request_summary(&text, "空 HTTP 请求"),
         l7::tags_suffix(&tags)
     );
+    // 凭证采集（H200）：登录路径的 POST body 提取 用户名/口令 对——
+    // 提取发生在 redact_secrets 之前，payload 落库仍是脱敏后的 ***
+    let credentials = if is_post && login
+        && let Some(start) = body_start
+        && let Some(raw) = extract_form_credentials(&buf[start..])
+    {
+        vec![raw]
+    } else {
+        Vec::new()
+    };
     Ok(SessionOutcome {
         summary,
         payload: text,
         http_hint: hint,
         interaction: None,
+        credentials,
     })
 }
 
@@ -348,12 +433,13 @@ mod tests {
         let rx = bus.subscribe();
         let cfg = HoneypotConfig {
             enabled: true,
-            shell: Default::default(),
             listeners: vec![ListenerConfig {
                 name: "http".into(),
                 port,
                 kind: "http".into(),
+                enabled: true,
             }],
+            ..Default::default()
         };
         let handle = start(&cfg, bus, &std::env::temp_dir());
         let mut conn = None;

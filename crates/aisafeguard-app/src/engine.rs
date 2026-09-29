@@ -11,7 +11,7 @@ use aisafeguard_core::error::{Error, Result};
 use aisafeguard_core::event::{EventBus, SecurityEvent};
 use aisafeguard_core::{now_ts, secrets};
 use aisafeguard_firewall::{BlockSpec, Direction, Firewall, Protocol, RULE_PREFIX};
-use aisafeguard_store::{AiRunRow, EventRow, ProposalRow, RuleRow, StatsSummary, Store};
+use aisafeguard_store::{AiRunRow, CredentialStore, EventRow, ProposalRow, RuleRow, StatsSummary, Store};
 use serde::{Deserialize, Serialize};
 
 use crate::console::Console;
@@ -153,6 +153,9 @@ pub struct EngineHandle {
     pub started: Instant,
     pub ai_running: Arc<AtomicBool>,
     pub honeypot: aisafeguard_honeypot::HoneypotHandle,
+    /// 本机账号名快照（0.5.10 H200）：小写用户名集合，快照任务写、凭证任务读；
+    /// 只存用户名，绝不触碰真实口令数据
+    pub local_accounts: Arc<RwLock<std::collections::HashSet<String>>>,
     pub token: String,
     pub version: &'static str,
 }
@@ -162,6 +165,8 @@ pub struct ListenerInfo {
     pub name: String,
     pub port: u16,
     pub kind: String,
+    /// 交互模式：「低交互」banner 级 /「中交互」假 Shell（0.5.10 H150 能力可见）
+    pub mode: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -299,6 +304,7 @@ impl EngineHandle {
                     name: l.name.clone(),
                     port: l.port,
                     kind: l.kind.clone(),
+                    mode: l.mode.clone(),
                 })
                 .collect(),
             rule_count: self.store.count_rules().unwrap_or(0),
@@ -1036,6 +1042,179 @@ fn scan_rules(
         out.push(aisafeguard_rules::matcher::to_hit(rule));
     }
     out
+}
+
+/// 凭证采集与本地喷洒检测（0.5.10 H200）：订阅 CredentialObserved 事件 →
+/// 落独立凭证库（<data_dir>/honeypot/credentials.db，文件 0600，只有哈希）→
+/// 两路判定都走 handle_detection 统一入口（内网保护 / 误报抑制 / auto_block
+/// 约束全部继承，AI 不可用不受影响）：
+/// 1. credential_spray：蜜罐收到的用户名与本机账号同名（快照比对，高严重度）；
+/// 2. credential_reuse：同一来源跨协议提交同一口令（按哈希聚合，中严重度告警）。
+///
+/// 节流：同 (来源, 判定键) 24h 只发一次，防撞库脚本高频刷屏。
+pub fn spawn_credential_task(eng: &Arc<EngineHandle>) {
+    let eng = Arc::clone(eng);
+    let rt = eng.rt.clone();
+    rt.spawn(async move {
+        let cred_store = match CredentialStore::open(
+            &eng.config().data_dir().join("honeypot").join("credentials.db"),
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                eng.bus.publish(SecurityEvent::engine(
+                    "error",
+                    format!("凭证库初始化失败,凭证采集与喷洒检测停用: {e}"),
+                ));
+                return;
+            }
+        };
+        // 本地账号快照：启动立即枚举一次，之后按 [honeypot.credentials].
+        // snapshot_interval_secs 周期刷新（0 = 仅启动一次）；只取用户名集合
+        {
+            let eng = Arc::clone(&eng);
+            let accounts = Arc::clone(&eng.local_accounts);
+            let rt = eng.rt.clone();
+            rt.spawn(async move {
+                loop {
+                    match aisafeguard_core::accounts::local_usernames() {
+                        Ok(names) => {
+                            *accounts.write().expect("账号快照锁") =
+                                names.into_iter().collect();
+                        }
+                        Err(e) => eng.bus.publish(SecurityEvent::engine(
+                            "warn",
+                            format!("本地账号快照枚举失败（喷洒比对暂停）: {e}"),
+                        )),
+                    }
+                    let interval = eng.config().honeypot.credentials.snapshot_interval_secs;
+                    if interval == 0 {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_secs(interval.max(60))).await;
+                }
+            });
+        }
+        let mut rx = eng.bus.subscribe();
+        let mut spray_fired: HashMap<(String, String), i64> = HashMap::new();
+        let mut reuse_fired: HashMap<(String, String), i64> = HashMap::new();
+        loop {
+            match rx.recv().await {
+                Ok(SecurityEvent::CredentialObserved {
+                    ts,
+                    listener,
+                    kind,
+                    port,
+                    remote_ip,
+                    remote_port,
+                    username,
+                    pass_hash,
+                }) => {
+                    if !eng.config().honeypot.credentials.enabled {
+                        continue;
+                    }
+                    // 此处只有哈希后的形态；明文在蜜罐会话内已被丢弃
+                    let hash = pass_hash.unwrap_or_default();
+                    let record = aisafeguard_store::CredentialRecord {
+                        ts,
+                        remote_ip: &remote_ip,
+                        remote_port,
+                        listener: &listener,
+                        protocol: &kind,
+                        username: &username,
+                        pass_hash: &hash,
+                    };
+                    if let Err(e) = cred_store.insert(record) {
+                        eng.bus.publish(SecurityEvent::engine(
+                            "error",
+                            format!("凭证入库失败: {e}"),
+                        ));
+                        continue;
+                    }
+                    let Ok(ip) = remote_ip.parse::<IpAddr>() else {
+                        continue;
+                    };
+                    let now = now_ts();
+                    let dcfg = eng.config().detect;
+                    let is_local = eng
+                        .local_accounts
+                        .read()
+                        .expect("账号快照锁")
+                        .contains(&username.to_lowercase());
+                    // 1) 用户名命中本机账号 → credential_spray（直推快路径）
+                    if is_local
+                        && fire_once(&mut spray_fired, (&remote_ip, &username), now)
+                    {
+                        handle_detection(
+                            &DetectionSink {
+                                fw: &*eng.firewall,
+                                store: &eng.store,
+                                bus: &eng.bus,
+                                fp_suppress_secs: eng.config().ai.fp_suppress_secs as i64,
+                            },
+                            "credential_spray",
+                            ip,
+                            &format!(
+                                "蜜罐收到与本地账号同名的登录尝试: 用户 {username} ({kind} :{port})"
+                            ),
+                            None,
+                            &dcfg,
+                            dcfg.auto_block,
+                            "high",
+                            L7Evidence::default(),
+                        );
+                    }
+                    // 2) 跨协议同口令 → credential_reuse（聚合告警，不直接处置）
+                    if !hash.is_empty()
+                        && fire_once(&mut reuse_fired, (&remote_ip, &hash), now)
+                    {
+                        let protocols = cred_store
+                            .hash_protocol_count(&remote_ip, &hash, now - 86_400)
+                            .unwrap_or(0);
+                        if protocols >= 2 {
+                            handle_detection(
+                                &DetectionSink {
+                                    fw: &*eng.firewall,
+                                    store: &eng.store,
+                                    bus: &eng.bus,
+                                    fp_suppress_secs: eng.config().ai.fp_suppress_secs as i64,
+                                },
+                                "credential_reuse",
+                                ip,
+                                &format!("同一来源跨 {protocols} 种协议提交相同口令（撞库/喷洒特征）"),
+                                None,
+                                &dcfg,
+                                false,
+                                "medium",
+                                L7Evidence::default(),
+                            );
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("凭证采集通道落后 {n} 条");
+                }
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+/// 同一判定键 24h 只触发一次；键集合超限先清过期项再放行新键。
+fn fire_once(
+    fired: &mut HashMap<(String, String), i64>,
+    key: (&str, &str),
+    now: i64,
+) -> bool {
+    let k = (key.0.to_string(), key.1.to_string());
+    if fired.get(&k).is_some_and(|t| now - *t < 86_400) {
+        return false;
+    }
+    if fired.len() > 10_000 {
+        fired.retain(|_, t| now - *t < 86_400);
+    }
+    fired.insert(k, now);
+    true
 }
 
 /// 规则包装载任务（0.5.0 F5）：启动即加载；之后每 5 秒检查规则包文件签名

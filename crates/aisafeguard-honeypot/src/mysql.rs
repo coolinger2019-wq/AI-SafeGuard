@@ -319,6 +319,11 @@ pub(crate) async fn mysql_session(s: &mut tokio::net::TcpStream) -> std::io::Res
         .map(|s| s.command.as_str())
         .collect::<Vec<_>>()
         .join("\n");
+    // 凭证采集（H200）：握手只有用户名，口令是不可逆的 scramble（pass_hash=None）
+    let credentials = vec![crate::cred::RawCredential {
+        username: username.clone(),
+        password: None,
+    }];
     Ok(SessionOutcome {
         summary,
         payload: payload_text,
@@ -328,6 +333,7 @@ pub(crate) async fn mysql_session(s: &mut tokio::net::TcpStream) -> std::io::Res
         } else {
             Some(steps)
         },
+        credentials,
     })
 }
 
@@ -337,6 +343,7 @@ fn empty_outcome(summary: &str) -> SessionOutcome {
         payload: String::new(),
         http_hint: None,
         interaction: None,
+        credentials: Vec::new(),
     }
 }
 
@@ -439,6 +446,7 @@ mod tests {
                 name: "mysql".into(),
                 port,
                 kind: "mysql".into(),
+                enabled: true,
             }],
             ..Default::default()
         };
