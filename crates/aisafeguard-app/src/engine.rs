@@ -724,11 +724,21 @@ fn self_surface_json(eng: &EngineHandle) -> String {
     .to_string()
 }
 
+/// Detection 事件的可选 L7 字段（0.5.0 E6/E5）：full 捕获流前缀可解析时出现，
+/// 由 [detect.l7] 开关门控。空字段不进事件。
+#[derive(Default)]
+struct L7Evidence {
+    hint: Option<aisafeguard_l7::HttpHint>,
+    ja3: Option<String>,
+    ja4: Option<String>,
+}
+
 /// 快路径判定统一出口：广播 Detection；auto 时自动封禁（TTL + 内网保护 + 审计）。
 /// 频次引擎（蜜罐源）与采样捕获（真实流量源）都走这里，行为一致。
 /// F6 解耦：是否自动封禁由调用方决定——内置检测器看 [detect].auto_block，
 /// 规则命中看 [detect.rules].auto_block（默认 false 只告警）。
-#[allow(clippy::too_many_arguments)] // 证据/规则/L7 字段并列，语义清晰
+// 参数并列了判定/处置/L7 三组语义字段，逐位传参比拆结构体更直白
+#[allow(clippy::too_many_arguments)]
 fn handle_detection(
     sink: &DetectionSink<'_>,
     kind: &str,
@@ -738,8 +748,7 @@ fn handle_detection(
     dcfg: &DetectConfig,
     auto_block: bool,
     severity: &str,
-    hint: Option<aisafeguard_l7::HttpHint>,
-    tls_fp: Option<String>,
+    l7: L7Evidence,
 ) {
     let src = ip.to_string();
     sink.bus.publish(SecurityEvent::Detection {
@@ -750,8 +759,9 @@ fn handle_detection(
         severity: severity.to_string(),
         evidence: evidence.to_string(),
         rule_id: rule_id.map(str::to_string),
-        http_hint: hint,
-        tls_fingerprint: tls_fp,
+        http_hint: l7.hint,
+        tls_fingerprint: l7.ja3,
+        tls_ja4: l7.ja4,
     });
     if !auto_block {
         return;
@@ -854,8 +864,7 @@ pub fn spawn_detect_task(eng: &Arc<EngineHandle>) {
                             &cfg,
                             cfg.auto_block,
                             "medium",
-                            None,
-                            None,
+                            L7Evidence::default(),
                         );
                     }
                     // 规则子集匹配：payload 即窗口（蜜罐会话完整载荷），方向恒 client→server
@@ -899,8 +908,7 @@ pub fn spawn_detect_task(eng: &Arc<EngineHandle>) {
                                 &cfg,
                                 rcfg.auto_block,
                                 hit.severity,
-                                None,
-                                None,
+                                L7Evidence::default(),
                             );
                         }
                     }
@@ -1139,25 +1147,30 @@ pub fn spawn_capture_task(eng: &Arc<EngineHandle>) {
                                 }
                             }
                             let dcfg = eng.config().detect;
-                            // E6 + H5：full 模式且 [detect.l7].enabled 时才解析
-                            // HTTP 提示与 JA3（默认关——深检默认 off，热更即时生效）
-                            let (hint, tls_fp) = if cap_cfg.mode == "full" && dcfg.l7.enabled {
+                            // E6/E5 + H5：full 模式且 [detect.l7].enabled 时才解析
+                            // HTTP 提示与 JA3/JA4（默认关——深检默认 off，热更即时生效）
+                            let l7ev = if cap_cfg.mode == "full" && dcfg.l7.enabled {
                                 match pipeline.stream_bytes(&d.key) {
                                     Some(stream) => {
                                         let hint = std::str::from_utf8(&stream)
                                             .ok()
                                             .and_then(aisafeguard_l7::parse_http_hint);
-                                        let tls_fp = if dcfg.l7.ja3 {
+                                        let ja3 = if dcfg.l7.ja3 {
                                             aisafeguard_l7::parse_ja3(&stream).map(|j| j.md5)
                                         } else {
                                             None
                                         };
-                                        (hint, tls_fp)
+                                        let ja4 = if dcfg.l7.ja4 {
+                                            aisafeguard_l7::parse_ja4(&stream)
+                                        } else {
+                                            None
+                                        };
+                                        L7Evidence { hint, ja3, ja4 }
                                     }
-                                    None => (None, None),
+                                    None => L7Evidence::default(),
                                 }
                             } else {
-                                (None, None)
+                                L7Evidence::default()
                             };
                             handle_detection(
                                 &DetectionSink {
@@ -1173,8 +1186,7 @@ pub fn spawn_capture_task(eng: &Arc<EngineHandle>) {
                                 &dcfg,
                                 dcfg.auto_block,
                                 "medium",
-                                hint,
-                                tls_fp,
+                                l7ev,
                             );
                         }
                         // 规则子集匹配（0.5.0 F4）：full 模式下有新载荷产出的流 →
@@ -1242,8 +1254,7 @@ pub fn spawn_capture_task(eng: &Arc<EngineHandle>) {
                                         &eng.config().detect,
                                         rcfg.auto_block,
                                         hit.severity,
-                                        None,
-                                        None,
+                                        L7Evidence::default(),
                                     );
                                 }
                             }
@@ -1938,8 +1949,7 @@ mod tests {
             &f.dcfg(),
             f.dcfg().auto_block,
             "medium",
-            None,
-            None,
+            L7Evidence::default(),
         );
 
         // 防火墙收到封禁（入站 / 任意协议 / 目标 IP）
@@ -1986,8 +1996,7 @@ mod tests {
                 &f.dcfg(),
                 f.dcfg().auto_block,
                 "medium",
-                None,
-                None,
+                L7Evidence::default(),
             );
         }
         assert!(
@@ -2023,8 +2032,7 @@ mod tests {
             &dcfg,
             dcfg.auto_block,
             "medium",
-            None,
-            None,
+            L7Evidence::default(),
         );
         assert!(
             f.fw.added.lock().unwrap().is_empty(),
@@ -2116,8 +2124,7 @@ mod tests {
             &dcfg,
             rcfg.auto_block,
             "critical",
-            None,
-            None,
+            L7Evidence::default(),
         );
         // 事件照发（告警路径不受 auto_block 影响）
         let mut kinds = Vec::new();
@@ -2148,8 +2155,7 @@ mod tests {
             &dcfg,
             true,
             "critical",
-            None,
-            None,
+            L7Evidence::default(),
         );
         assert_eq!(
             f2.fw.added.lock().unwrap().len(),

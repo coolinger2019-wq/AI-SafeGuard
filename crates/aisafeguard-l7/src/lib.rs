@@ -190,82 +190,37 @@ fn be24(d: &[u8], off: usize) -> Option<u32> {
 /// 从 TLS record 起始字节（一个 TCP 段的载荷起点）解析 ClientHello 并计算 JA3。
 /// 数据不足 / 非 handshake record / 非 ClientHello → None（不阻断，调用方跳过）。
 pub fn parse_ja3(data: &[u8]) -> Option<Ja3> {
-    // TLS record header: type(1)=0x16 handshake, version(2), length(2)
-    if data.first() != Some(&0x16) {
-        return None;
-    }
-    let rec_len = be16(data, 3)? as usize;
-    let end = (5 + rec_len).min(data.len());
-    let hs = &data[5..end];
-    // handshake: type(1)=0x01 client_hello, length(3)
-    if hs.first() != Some(&0x01) {
-        return None;
-    }
-    let hs_len = be24(hs, 1)? as usize;
-    let hs_end = (4 + hs_len).min(hs.len());
-    let body = &hs[4..hs_end];
-    let mut off = 0usize;
-    let client_version = be16(body, off)?;
-    off += 2;
-    off += 32; // random
-    // session_id
-    let sid_len = *body.get(off)? as usize;
-    off += 1 + sid_len;
-    // cipher suites
-    let cs_len = be16(body, off)? as usize;
-    off += 2;
-    if off + cs_len > body.len() || !cs_len.is_multiple_of(2) {
-        return None;
-    }
-    let ciphers: Vec<u16> = (0..cs_len / 2)
-        .map(|i| u16::from_be_bytes([body[off + i * 2], body[off + i * 2 + 1]]))
-        .collect();
-    off += cs_len;
-    // compression methods
-    let comp_len = *body.get(off)? as usize;
-    off += 1 + comp_len;
-    // extensions
-    let mut ext_types: Vec<u16> = Vec::new();
+    let ch = walk_client_hello(data)?;
+    let ext_types: Vec<u16> = ch.extensions.iter().map(|(t, _)| *t).collect();
     let mut groups: Vec<u16> = Vec::new();
     let mut formats: Vec<u8> = Vec::new();
-    if off + 2 <= body.len() {
-        let ext_total = be16(body, off)? as usize;
-        off += 2;
-        let ext_end = (off + ext_total).min(body.len());
-        while off + 4 <= ext_end {
-            let etype = be16(body, off)?;
-            let elen = be16(body, off + 2)? as usize;
-            off += 4;
-            let edata = body.get(off..(off + elen).min(body.len()))?;
-            off += elen;
-            ext_types.push(etype);
-            match etype {
-                0x000a => {
-                    // supported_groups: list_len(2) + 每项 2 字节
-                    if let Some(glen) = be16(edata, 0) {
-                        let gend = (2 + glen as usize).min(edata.len());
-                        let mut i = 2usize;
-                        while i + 2 <= gend {
-                            groups.push(u16::from_be_bytes([edata[i], edata[i + 1]]));
-                            i += 2;
-                        }
+    for (etype, edata) in &ch.extensions {
+        match *etype {
+            0x000a => {
+                // supported_groups: list_len(2) + 每项 2 字节
+                if let Some(glen) = be16(edata, 0) {
+                    let gend = (2 + glen as usize).min(edata.len());
+                    let mut i = 2usize;
+                    while i + 2 <= gend {
+                        groups.push(u16::from_be_bytes([edata[i], edata[i + 1]]));
+                        i += 2;
                     }
                 }
-                0x000b => {
-                    // ec_point_formats: list_len(1) + 每项 1 字节
-                    if let Some(&flen) = edata.first() {
-                        let fend = (1 + flen as usize).min(edata.len());
-                        formats = edata[1..fend].to_vec();
-                    }
-                }
-                _ => {}
             }
+            0x000b => {
+                // ec_point_formats: list_len(1) + 每项 1 字节
+                if let Some(&flen) = edata.first() {
+                    let fend = (1 + flen as usize).min(edata.len());
+                    formats = edata[1..fend].to_vec();
+                }
+            }
+            _ => {}
         }
     }
     let raw = format!(
         "{},{},{},{},{}",
-        client_version,
-        ciphers
+        ch.legacy_version,
+        ch.ciphers
             .iter()
             .map(|c| c.to_string())
             .collect::<Vec<_>>()
@@ -292,6 +247,217 @@ pub fn parse_ja3(data: &[u8]) -> Option<Ja3> {
         d.iter().map(|b| format!("{b:02x}")).collect::<String>()
     };
     Some(Ja3 { raw, md5: md5hex })
+}
+
+/// TLS record 内的 ClientHello 原始字段（JA3/JA4 共用的解析底座）。
+struct RawClientHello {
+    /// ClientHello body 的 Protocol Version 字段（JA4 称 legacy version）
+    legacy_version: u16,
+    ciphers: Vec<u16>,
+    /// (扩展类型, 原始数据)——按出现顺序
+    extensions: Vec<(u16, Vec<u8>)>,
+}
+
+/// 从 TLS record 起始字节解析 ClientHello。
+/// 语义与 JA3 基线一致：截断/畸形 → None，不 panic。
+fn walk_client_hello(data: &[u8]) -> Option<RawClientHello> {
+    // TLS record header: type(1)=0x16 handshake, version(2), length(2)
+    if data.first() != Some(&0x16) {
+        return None;
+    }
+    let rec_len = be16(data, 3)? as usize;
+    let end = (5 + rec_len).min(data.len());
+    let hs = &data[5..end];
+    // handshake: type(1)=0x01 client_hello, length(3)
+    if hs.first() != Some(&0x01) {
+        return None;
+    }
+    let hs_len = be24(hs, 1)? as usize;
+    let hs_end = (4 + hs_len).min(hs.len());
+    let body = &hs[4..hs_end];
+    let mut off = 0usize;
+    let legacy_version = be16(body, off)?;
+    off += 2;
+    off += 32; // random
+    // session_id
+    let sid_len = *body.get(off)? as usize;
+    off += 1 + sid_len;
+    // cipher suites
+    let cs_len = be16(body, off)? as usize;
+    off += 2;
+    if off + cs_len > body.len() || !cs_len.is_multiple_of(2) {
+        return None;
+    }
+    let ciphers: Vec<u16> = (0..cs_len / 2)
+        .map(|i| u16::from_be_bytes([body[off + i * 2], body[off + i * 2 + 1]]))
+        .collect();
+    off += cs_len;
+    // compression methods
+    let comp_len = *body.get(off)? as usize;
+    off += 1 + comp_len;
+    // extensions
+    let mut extensions: Vec<(u16, Vec<u8>)> = Vec::new();
+    if off + 2 <= body.len() {
+        let ext_total = be16(body, off)? as usize;
+        off += 2;
+        let ext_end = (off + ext_total).min(body.len());
+        while off + 4 <= ext_end {
+            let etype = be16(body, off)?;
+            let elen = be16(body, off + 2)? as usize;
+            off += 4;
+            let edata = body.get(off..(off + elen).min(body.len()))?;
+            off += elen;
+            extensions.push((etype, edata.to_vec()));
+        }
+    }
+    Some(RawClientHello {
+        legacy_version,
+        ciphers,
+        extensions,
+    })
+}
+
+// ---------- E5：JA4（客户端指纹，算法对齐 FoxIO ja4 官方实现 python/ja4.py） ----------
+
+/// JA4 指纹（客户端）：`t13d1516h2_8daaf6152771_b186095e22b6` 形式——
+/// 三段下划线分隔：`协议+版本+SNI+套件数+扩展数+ALPN _ 套件哈希 _ 扩展哈希`，
+/// 两段哈希为小写 SHA-256 截断 12 字符。
+pub type Ja4 = String;
+
+/// GREASE 判定（RFC 8701）：0x?A?A 模式；官方实现用 16 值表，同余式覆盖。
+fn is_grease(v: u16) -> bool {
+    (v & 0x0f0f) == 0x0a0a
+}
+
+/// TLS 版本 → JA4 两字符（官方 TLS_MAPPER）：TLS1.2 是 "12"（不是并入 "13"）。
+fn tls_version_str(v: u16) -> &'static str {
+    match v {
+        0x0002 => "s2",
+        0x0300 => "s3",
+        0x0301 => "10",
+        0x0302 => "11",
+        0x0303 => "12",
+        0x0304 => "13",
+        _ => "00",
+    }
+}
+
+/// sha256 前 12 字符（小写 hex）；空输入返回字面 0 串（官方 sha_encode 语义）。
+fn sha12(input: &str) -> String {
+    if input.is_empty() {
+        return "000000000000".into();
+    }
+    use sha2::Digest as _;
+    let d = sha2::Sha256::digest(input.as_bytes());
+    d.iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()
+        .chars()
+        .take(12)
+        .collect()
+}
+
+/// 两字节列表扩展（supported_versions / signature_algorithms）→ u16 列表（去 GREASE）。
+/// 线格式：list_len(2) + 每项 2 字节——跳过长度前缀取项。
+fn ext_u16_list(edata: &[u8]) -> Vec<u16> {
+    let Some(list_len) = be16(edata, 0) else {
+        return Vec::new();
+    };
+    let end = (2 + list_len as usize).min(edata.len());
+    let pairs: &[[u8; 2]] = edata[2..end].as_chunks::<2>().0;
+    pairs
+        .iter()
+        .map(|c| u16::from_be_bytes(*c))
+        .filter(|v| !is_grease(*v))
+        .collect()
+}
+
+/// 计算 JA4。数据不足 / 非 ClientHello → None；supported_versions 存在但
+/// 去 GREASE 后为空 → None（官方实现该情形异常跳过）。
+pub fn parse_ja4(data: &[u8]) -> Option<Ja4> {
+    let ch = walk_client_hello(data)?;
+
+    // 版本：supported_versions(0x002b) 取最高（去 GREASE），否则用 legacy version
+    let version = match ch.extensions.iter().find(|(t, _)| *t == 0x002b) {
+        Some((_, d)) => {
+            let mut vs = ext_u16_list(d);
+            vs.sort_unstable();
+            tls_version_str(*vs.last()?)
+        }
+        None => tls_version_str(ch.legacy_version),
+    };
+    // SNI：server_name(0x0000) 存在 → d（域名），否则 i（IP）
+    let sni = if ch.extensions.iter().any(|(t, _)| *t == 0x0000) {
+        "d"
+    } else {
+        "i"
+    };
+    // 套件：去 GREASE、4 位小写 hex、按字典序；计数封顶 99
+    let mut ciphers: Vec<String> = ch
+        .ciphers
+        .iter()
+        .filter(|c| !is_grease(**c))
+        .map(|c| format!("{c:04x}"))
+        .collect();
+    let cipher_count = ciphers.len().min(99);
+    ciphers.sort();
+    let cipher_hash = sha12(&ciphers.join(","));
+    // 扩展：去 GREASE，并剔除 SNI(0000) 与 ALPN(0010)——哈希对目标域名/ALPN 稳定
+    let mut exts: Vec<String> = ch
+        .extensions
+        .iter()
+        .filter(|(t, _)| !is_grease(*t) && *t != 0x0000 && *t != 0x0010)
+        .map(|(t, _)| format!("{t:04x}"))
+        .collect();
+    let ext_count = ch
+        .extensions
+        .iter()
+        .filter(|(t, _)| !is_grease(*t))
+        .count()
+        .min(99);
+    exts.sort();
+    let mut ext_input = exts.join(",");
+    // 签名算法(0x000d)：原顺序、去 GREASE，加下划线缀在扩展列表后
+    if let Some((_, d)) = ch.extensions.iter().find(|(t, _)| *t == 0x000d) {
+        let sigs: Vec<String> = ext_u16_list(d).iter().map(|s| format!("{s:04x}")).collect();
+        if !sigs.is_empty() {
+            if !ext_input.is_empty() {
+                ext_input.push('_');
+            }
+            ext_input.push_str(&sigs.join(","));
+        }
+    }
+    let ext_hash = sha12(&ext_input);
+    // ALPN：取第一个值；>2 字符取首尾字符；首字节非 ASCII → "99"；无 → "00"
+    let alpn: String = match ch.extensions.iter().find(|(t, _)| *t == 0x0010) {
+        Some((_, d)) => {
+            // d = list_len(2) + [name_len(1) + name]*，取首项
+            let name_len = *d.get(2)? as usize;
+            let name = d.get(3..(3 + name_len).min(d.len()))?;
+            if name.is_empty() {
+                "00".to_string()
+            } else {
+                let a: String = if name.len() > 2 {
+                    [name[0], name[name.len() - 1]]
+                        .iter()
+                        .map(|b| *b as char)
+                        .collect()
+                } else {
+                    name.iter().map(|b| *b as char).collect()
+                };
+                if a.as_bytes()[0] > 127 {
+                    "99".to_string()
+                } else {
+                    a
+                }
+            }
+        }
+        None => "00".to_string(),
+    };
+
+    Some(format!(
+        "t{version}{sni}{cipher_count:02}{ext_count:02}{alpn}_{cipher_hash}_{ext_hash}"
+    ))
 }
 
 fn clean(s: &str, max: usize) -> String {
@@ -417,6 +583,141 @@ mod tests {
         assert!(parse_ja3(b"GET / HTTP/1.1").is_none());
         // 截断
         assert!(parse_ja3(&[0x16, 0x03]).is_none());
+    }
+
+    // ---------- E5：JA4 测试（算法对齐 FoxIO python/ja4.py，期望值 hashlib 预计算） ----------
+
+    /// 测试用 ClientHello 构造器：record(0x16) + handshake(0x01) + body。
+    fn build_client_hello(
+        legacy_version: u16,
+        ciphers: &[u16],
+        exts: &[(u16, Vec<u8>)],
+    ) -> Vec<u8> {
+        let mut body = legacy_version.to_be_bytes().to_vec();
+        body.extend_from_slice(&[0u8; 32]); // random
+        body.push(0); // session_id 空
+        body.extend_from_slice(&(ciphers.len() as u16 * 2).to_be_bytes());
+        for c in ciphers {
+            body.extend_from_slice(&c.to_be_bytes());
+        }
+        body.push(1);
+        body.push(0); // compression: null
+        let mut ext = Vec::new();
+        for (etype, edata) in exts {
+            ext.extend_from_slice(&etype.to_be_bytes());
+            ext.extend_from_slice(&(edata.len() as u16).to_be_bytes());
+            ext.extend_from_slice(edata);
+        }
+        body.extend_from_slice(&(ext.len() as u16).to_be_bytes());
+        body.extend_from_slice(&ext);
+
+        let mut hs = vec![0x01];
+        let hs_len = (body.len() as u32).to_be_bytes();
+        hs.extend_from_slice(&hs_len[1..]);
+        hs.extend_from_slice(&body);
+        let mut rec = vec![0x16, 0x03, 0x01];
+        rec.extend_from_slice(&(hs.len() as u16).to_be_bytes());
+        rec.extend_from_slice(&hs);
+        rec
+    }
+
+    /// E5 已知向量 1：现代 TLS1.3 客户端——supported_versions 选 "13"、SNI→d、
+    /// ALPN "h2"、GREASE（cipher 0x0a0a / 扩展 0x1a1a）被剔除、SNI/ALPN 不进
+    /// 扩展哈希但计入扩展数（6）。期望值 = 官方算法 hashlib 预计算。
+    #[test]
+    fn ja4_known_vector_modern_client() {
+        let sni = {
+            let name = b"example.test";
+            let mut d = vec![0x00, 0x0f]; // server_name_list 长度 = 3 + 12
+            d.extend_from_slice(&[0x00, name.len() as u8]); // type=host_name + 长度
+            d.extend_from_slice(name);
+            d
+        };
+        let alpn = {
+            let mut d = vec![0x00, 0x0e]; // 列表长 2 + (1+2) + (1+8)
+            d.push(2);
+            d.extend_from_slice(b"h2");
+            d.push(8);
+            d.extend_from_slice(b"http/1.1");
+            d
+        };
+        let rec = build_client_hello(
+            0x0303,
+            &[0x1301, 0x0a0a, 0x1302, 0xc02f], // 0x0a0a 是 GREASE
+            &[
+                (0x0000, sni),
+                (0x000a, vec![0x00, 0x02, 0x00, 0x1d]),
+                (0x000b, vec![0x01, 0x00]),
+                (0x000d, vec![0x00, 0x06, 0x04, 0x03, 0x08, 0x04, 0x04, 0x01]),
+                (0x0010, alpn),
+                (0x002b, vec![0x00, 0x04, 0x03, 0x04, 0x03, 0x03]),
+                (0x1a1a, vec![0x00]), // GREASE 扩展
+            ],
+        );
+        let ja4 = parse_ja4(&rec).expect("应解析成功");
+        assert_eq!(ja4, "t13d0306h2_40b44b994229_0d385148b956", "实际: {ja4}");
+        // 同输入同输出
+        assert_eq!(parse_ja4(&rec).unwrap(), ja4);
+    }
+
+    /// E5 已知向量 2：无 supported_versions（legacy 0x0303 → "12"）、无 SNI（i）、
+    /// 无 ALPN（00）、SCSV 0x00ff 保留计数。无签名算法时扩展输入不带下划线段。
+    #[test]
+    fn ja4_known_vector_legacy_minimal() {
+        let rec = build_client_hello(
+            0x0303,
+            &[0xc013, 0x00ff], // SCSV 保留（非 GREASE）
+            &[
+                (0x000a, vec![0x00, 0x02, 0x00, 0x1d]),
+                (0x000b, vec![0x01, 0x00]),
+                (0x000d, vec![0x00, 0x02, 0x04, 0x03]),
+            ],
+        );
+        let ja4 = parse_ja4(&rec).expect("应解析成功");
+        assert_eq!(ja4, "t12i020300_a0546e0689fc_2bbaf9536c97", "实际: {ja4}");
+    }
+
+    /// E5 差异语义：supported_versions 缺失时用 legacy version；未知版本 → "00"。
+    #[test]
+    fn ja4_version_fallback_and_unknown() {
+        let exts = [(0x000a, vec![0x00, 0x02, 0x00, 0x1d])];
+        // legacy 0x0304（无 supported_versions）→ "13"
+        let rec = build_client_hello(0x0304, &[0x1301], &exts);
+        let ja4 = parse_ja4(&rec).unwrap();
+        assert!(ja4.starts_with("t13i"), "{ja4}");
+        // 未知版本 0x0999 → "00"
+        let rec = build_client_hello(0x0999, &[0x1301], &exts);
+        let ja4 = parse_ja4(&rec).unwrap();
+        assert!(ja4.starts_with("t00i"), "{ja4}");
+        // 无签名算法：扩展哈希输入无下划线段
+        let rec = build_client_hello(0x0303, &[0x1301], &[(0x000a, vec![0x00, 0x02, 0x00, 0x1d])]);
+        let ja4 = parse_ja4(&rec).unwrap();
+        assert!(!ja4.contains('-'));
+    }
+
+    #[test]
+    fn ja4_non_client_hello_is_none() {
+        assert!(parse_ja4(b"GET / HTTP/1.1").is_none());
+        assert!(parse_ja4(&[0x16, 0x03]).is_none());
+        let rec = [0x16, 0x03, 0x03, 0x00, 0x04, 0x02, 0x00, 0x00, 0x00]; // ServerHello
+        assert!(parse_ja4(&rec).is_none());
+    }
+
+    /// 确定性模糊（E DoD）：随机字节喂 JA3/JA4 不 panic。
+    #[test]
+    fn ja3_ja4_fuzz_never_panics() {
+        let mut state = 0x1234_5678_9abc_def0u64;
+        for _ in 0..10_000u32 {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let len = (state >> 33) as usize % 512;
+            let bytes: Vec<u8> = std::iter::once(0x16)
+                .chain((0..len).map(|j| ((state.wrapping_add(j as u64) >> 33) % 256) as u8))
+                .collect();
+            let _ = parse_ja3(&bytes);
+            let _ = parse_ja4(&bytes);
+        }
     }
 
     /// 确定性模糊（E DoD）：随机字节不 panic、hint 输出无控制字符、path 有上限。

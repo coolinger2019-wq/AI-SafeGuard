@@ -62,6 +62,9 @@ pub enum SecurityEvent {
         /// JA3 客户端指纹 md5（0.5.0 E6：TLS ClientHello 可见时出现）
         #[serde(skip_serializing_if = "Option::is_none")]
         tls_fingerprint: Option<String>,
+        /// JA4 客户端指纹（0.5.0 E5：[detect.l7].ja4 开启且 ClientHello 可见时出现）
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tls_ja4: Option<String>,
     },
     Engine {
         ts: i64,

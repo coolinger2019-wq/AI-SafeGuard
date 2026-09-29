@@ -29,6 +29,8 @@ pub struct EventRow {
     pub http_hint: String,
     /// JA3 md5（0.5.0 E6，TLS ClientHello 可见时非空）
     pub tls_fp: String,
+    /// JA4 指纹（0.5.0 E5，[detect.l7].ja4 开启且 ClientHello 可见时非空）
+    pub tls_ja4: String,
     pub prev_hash: String,
     pub hash: String,
 }
@@ -152,6 +154,7 @@ CREATE TABLE IF NOT EXISTS events (
     payload     TEXT NOT NULL DEFAULT '',
     http_hint   TEXT NOT NULL DEFAULT '',
     tls_fp      TEXT NOT NULL DEFAULT '',
+    tls_ja4     TEXT NOT NULL DEFAULT '',
     prev_hash   TEXT NOT NULL DEFAULT '',
     hash        TEXT NOT NULL DEFAULT ''
 );
@@ -313,6 +316,7 @@ impl Store {
             "ALTER TABLE fp_feedback ADD COLUMN local_port INTEGER",
             "ALTER TABLE events ADD COLUMN http_hint TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE events ADD COLUMN tls_fp TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE events ADD COLUMN tls_ja4 TEXT NOT NULL DEFAULT ''",
         ] {
             let _ = conn.execute(sql, []); // 列已存在时报错，忽略
         }
@@ -389,7 +393,7 @@ impl Store {
     // ---------- 事件 ----------
 
     pub fn insert_event(&self, ev: &SecurityEvent) -> Result<()> {
-        let (listener, remote_ip, remote_port, payload, http_hint, tls_fp) = match ev {
+        let (listener, remote_ip, remote_port, payload, http_hint, tls_fp, tls_ja4) = match ev {
             SecurityEvent::HoneypotHit {
                 listener,
                 remote_ip,
@@ -403,11 +407,13 @@ impl Store {
                 payload.clone(),
                 String::new(),
                 String::new(),
+                String::new(),
             ),
             SecurityEvent::Detection {
                 src_ip,
                 http_hint,
                 tls_fingerprint,
+                tls_ja4,
                 ..
             } => (
                 String::new(),
@@ -419,11 +425,13 @@ impl Store {
                     .map(|h| serde_json::to_string(h).unwrap_or_default())
                     .unwrap_or_default(),
                 tls_fingerprint.clone().unwrap_or_default(),
+                tls_ja4.clone().unwrap_or_default(),
             ),
             _ => (
                 String::new(),
                 String::new(),
                 0,
+                String::new(),
                 String::new(),
                 String::new(),
                 String::new(),
@@ -451,9 +459,9 @@ impl Store {
         );
         let hash = chain_hash(&prev_hash, &canonical);
         conn.execute(
-            "INSERT INTO events (ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, prev_hash, hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, prev_hash, hash],
+            "INSERT INTO events (ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, tls_ja4, prev_hash, hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, tls_ja4, prev_hash, hash],
         )
         .map_err(|e| Error::Store(e.to_string()))?;
         Ok(())
@@ -463,11 +471,11 @@ impl Store {
         let conn = self.lock()?;
         let sql = match ip_filter {
             Some(_) => {
-                "SELECT id, ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, prev_hash, hash
+                "SELECT id, ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, tls_ja4, prev_hash, hash
                  FROM events WHERE remote_ip LIKE ?1 ORDER BY id DESC LIMIT ?2"
             }
             None => {
-                "SELECT id, ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, prev_hash, hash
+                "SELECT id, ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, tls_ja4, prev_hash, hash
                  FROM events ORDER BY id DESC LIMIT ?2"
             }
         };
@@ -486,8 +494,9 @@ impl Store {
                     payload: r.get(7)?,
                     http_hint: r.get(8)?,
                     tls_fp: r.get(9)?,
-                    prev_hash: r.get(10)?,
-                    hash: r.get(11)?,
+                    tls_ja4: r.get(10)?,
+                    prev_hash: r.get(11)?,
+                    hash: r.get(12)?,
                 })
             })
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -617,7 +626,7 @@ impl Store {
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, prev_hash, hash
+                "SELECT id, ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, tls_ja4, prev_hash, hash
                  FROM events WHERE kind = 'honeypot_hit' ORDER BY id DESC LIMIT ?1",
             )
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -634,8 +643,9 @@ impl Store {
                     payload: r.get(7)?,
                     http_hint: r.get(8)?,
                     tls_fp: r.get(9)?,
-                    prev_hash: r.get(10)?,
-                    hash: r.get(11)?,
+                    tls_ja4: r.get(10)?,
+                    prev_hash: r.get(11)?,
+                    hash: r.get(12)?,
                 })
             })
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -683,7 +693,7 @@ impl Store {
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, prev_hash, hash
+                "SELECT id, ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, tls_ja4, prev_hash, hash
                  FROM events ORDER BY id",
             )
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -700,8 +710,9 @@ impl Store {
                     payload: r.get(7)?,
                     http_hint: r.get(8)?,
                     tls_fp: r.get(9)?,
-                    prev_hash: r.get(10)?,
-                    hash: r.get(11)?,
+                    tls_ja4: r.get(10)?,
+                    prev_hash: r.get(11)?,
+                    hash: r.get(12)?,
                 })
             })
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -1304,6 +1315,7 @@ mod tests {
             rule_id: Some("sid:1".into()),
             http_hint: None,
             tls_fingerprint: (!fp.is_empty()).then(|| fp.to_string()),
+            tls_ja4: None,
         };
         store
             .insert_event(&detection("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"))

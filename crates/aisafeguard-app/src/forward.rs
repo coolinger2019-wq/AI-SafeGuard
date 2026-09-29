@@ -314,6 +314,7 @@ mod tests {
             rule_id: Some("builtin.tcp_scan".into()),
             http_hint: None,
             tls_fingerprint: None,
+            tls_ja4: None,
         }
     }
 

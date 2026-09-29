@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 md-5 = "0.10"
+# JA4 指纹哈希（E5，FoxIO 官方算法用 SHA-256 截断 12 字符）
+sha2.workspace = true
 serde.workspace = true
 
 [lints]
