@@ -13,7 +13,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
 
 use crate::shell::ShellRuntime;
-use crate::{SessionOutcome, http, protocol};
+use crate::{SessionOutcome, http, mysql, protocol, redis};
 
 const MAX_CONCURRENT: usize = 64;
 /// 交互会话独立预算（0.5.9 跨任务红线）：默认 8，防止长会话刷满全局 64 额度。
@@ -185,6 +185,8 @@ async fn handle_conn(
         ("ssh", None) => protocol::ssh_session(&mut stream).await,
         ("http", _) => http::http_session(&mut stream).await,
         ("telnet", _) => protocol::telnet_session(&mut stream).await,
+        ("mysql", _) => mysql::mysql_session(&mut stream).await,
+        ("redis", _) => redis::redis_session(&mut stream).await,
         (_, _) => protocol::generic_session(&mut stream).await,
     };
 

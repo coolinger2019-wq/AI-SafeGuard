@@ -787,6 +787,15 @@ mod tests {
         assert!(cfg.honeypot.enabled);
         // 假 Shell（中交互）默认关（0.5.9 红线：新能力默认关，显式开启）
         assert!(!cfg.honeypot.shell.enabled);
+        // 新协议蜜罐不进默认监听表（0.5.9 H110）：用户显式配置 kind=mysql/redis
+        // 才等于开启；默认四协议与端口逐字节不变
+        let kinds: Vec<&str> = cfg
+            .honeypot
+            .listeners
+            .iter()
+            .map(|l| l.kind.as_str())
+            .collect();
+        assert_eq!(kinds, ["ssh", "http", "telnet", "generic"]);
         // AI 默认人工确认
         assert!(!cfg.ai.enabled);
         assert!(!cfg.ai.auto_apply);
