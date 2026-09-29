@@ -390,10 +390,6 @@ impl EngineHandle {
         self.store.recent_events(limit, ip_filter)
     }
 
-    pub fn list_rules(&self) -> Result<Vec<RuleRow>> {
-        self.store.list_rules()
-    }
-
     /// 规则展示模型（0.5.4 F1）：GUI 与 /api/rules 共用，可解释封禁。
     pub fn list_rules_explain(&self) -> Result<Vec<RuleExplain>> {
         Ok(RuleExplain::of_list(self.store.list_rules()?))

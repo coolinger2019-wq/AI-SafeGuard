@@ -13,3 +13,6 @@ api-token
 *.db-shm
 *.log
 *.jsonl
+
+# 发布产物本地暂存（仓库不存二进制，见 CHANGELOG 0.5.3/0.5.6 发布清单）
+/dist/
