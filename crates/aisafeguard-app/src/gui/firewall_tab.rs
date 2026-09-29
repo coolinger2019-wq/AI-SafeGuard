@@ -178,6 +178,18 @@ impl AisafeApp {
                                 self.tab = Tab::Events;
                                 self.refresh_cache();
                             }
+                            // 误报一键入口（0.5.5 F7）：与事件页 / AI 建议行同一逻辑；
+                            // 手动规则默认不动（引擎只解除 engine/ai 来源的自动封禁）
+                            if !r.remote_ip.is_empty()
+                                && ui
+                                    .add(egui::Button::new(
+                                        RichText::new("误报").size(12.0).color(warn()),
+                                    ))
+                                    .clicked()
+                            {
+                                let ip = r.remote_ip.clone();
+                                self.mark_fp(&ip);
+                            }
                             // 灰度规则（试封中）可转正：TTL 延长到 promote_ttl_secs
                             if r.ttl_state == "trial"
                                 && r.enabled

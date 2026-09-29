@@ -135,8 +135,8 @@ pub struct AiConfig {
     pub analyze_interval_secs: u64,
     /// 上送给 LLM 的单条 payload 最大字符数。
     pub max_snippet_chars: usize,
-    /// 误报抑制期（秒，0.4.0 B3 可配置，默认 30 天）：用户标记过误报的来源，
-    /// 自动封禁/自动应用在此期间跳过；人工手动封禁不受影响。
+    /// 误报抑制期（秒，0.5.5 F8 可配置，默认 14 天，建议 7～14 天）：用户标记过
+    /// 误报的来源，自动封禁/自动应用在此期间跳过；人工手动封禁不受影响。
     pub fp_suppress_secs: u64,
     /// 高严重度忽略抑制（0.4.0 B3 可选）：设为 medium|high|critical 时，
     /// 达到该档及以上的 AI 建议自动应用不再受误报抑制约束；空 = 不忽略（默认）。
@@ -155,7 +155,7 @@ impl Default for AiConfig {
             enabled: false,
             base_url: "https://open.bigmodel.cn/api/paas/v4".into(),
             model: "glm-4.7".into(),
-            fp_suppress_secs: 2_592_000,
+            fp_suppress_secs: 1_209_600,
             fp_ignore_min_severity: String::new(),
             auto_apply: false,
             auto_apply_min_severity: "high".into(),

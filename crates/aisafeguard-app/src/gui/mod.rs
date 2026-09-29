@@ -74,6 +74,7 @@ pub struct AisafeApp {
     settings_notify_url: String,
     settings_exposure_secs: String,
     settings_xdp_iface: String,
+    settings_fp_days: String,
     // 已保存的界面偏好（缓存值；每 2 秒随 cache 刷新）
     ui_prefs: (ThemeId, f32),
     // 上一帧已应用的主题+缩放（变化才重新 apply，避免每帧重建样式）
@@ -146,6 +147,7 @@ impl AisafeApp {
             settings_notify_url: String::new(),
             settings_exposure_secs: String::new(),
             settings_xdp_iface: String::new(),
+            settings_fp_days: String::new(),
             ui_prefs,
             applied_ui: Some(ui_prefs),
         }
@@ -185,6 +187,33 @@ impl AisafeApp {
 
     fn set_toast(&mut self, msg: impl Into<String>) {
         self.toast = Some((Instant::now(), msg.into()));
+    }
+
+    /// 误报一键入口（0.5.5 F7）：事件行 / 防火墙规则行 / AI 建议行三处共用
+    /// 同一引擎逻辑与操作反馈（F10）——解封 N 条自动规则、收弃 M 条建议、
+    /// 抑制至某时间。手动规则不受影响（引擎只动 engine/ai 来源）。
+    fn mark_fp(&mut self, ip: &str) {
+        let secs = self
+            .eng
+            .config()
+            .map(|c| c.ai.fp_suppress_secs as i64)
+            .unwrap_or(0);
+        match self.eng.mark_false_positive(ip, "", None) {
+            Ok((dismissed, removed)) => {
+                let until = chrono::DateTime::from_timestamp(aisafeguard_core::now_ts() + secs, 0)
+                    .map(|d| {
+                        d.with_timezone(&chrono::Local)
+                            .format("%Y-%m-%d %H:%M")
+                            .to_string()
+                    })
+                    .unwrap_or_default();
+                self.set_toast(format!(
+                    "已标记误报：解封 {removed} 条自动规则、收弃 {dismissed} 条建议，{until} 前不再自动封禁该来源"
+                ));
+            }
+            Err(e) => self.set_toast(format!("标记失败: {e}")),
+        }
+        self.refresh_cache();
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {

@@ -627,7 +627,8 @@ impl EngineHandle {
         self.bus.publish(SecurityEvent::engine(
             "info",
             format!(
-                "误报反馈：{src} 已标记（自动封禁抑制 30 天；解封 {removed} 条规则，收弃 {dismissed} 条建议）"
+                "误报反馈：{src} 已标记（自动封禁抑制 {}；解封 {removed} 条规则，收弃 {dismissed} 条建议）",
+                crate::explain::humanize_secs(self.config().ai.fp_suppress_secs as i64)
             ),
         ));
         Ok((dismissed, removed))
@@ -2224,6 +2225,58 @@ mod tests {
             f2.fw.added.lock().unwrap().len(),
             1,
             "显式 auto_block=true 才自动封禁"
+        );
+    }
+
+    #[test]
+    fn detection_respects_false_positive_suppression_window() {
+        // Batch 2 DoD：标误报后同 IP 在抑制期内不再被快路径自动封；抑制期外恢复
+        let f = Fixture::new("fp-window");
+        let ip: IpAddr = "203.0.113.88".parse().unwrap();
+        let sink = |secs: i64| DetectionSink {
+            fw: &f.fw,
+            store: &f.store,
+            bus: &f.bus,
+            fp_suppress_secs: secs,
+        };
+        // 抑制期内（1 小时窗口，刚刚标记）：自动封禁跳过
+        f.store
+            .insert_fp_feedback("203.0.113.88", now_ts(), "误报", None)
+            .unwrap();
+        handle_detection(
+            &sink(3600),
+            "scan",
+            ip,
+            "证据",
+            None,
+            &f.dcfg(),
+            true,
+            "medium",
+            L7Evidence::default(),
+        );
+        assert!(
+            f.fw.added.lock().unwrap().is_empty(),
+            "抑制期内不得自动封禁"
+        );
+        // 抑制期外（标记时间早于窗口）：恢复自动封禁资格
+        f.store
+            .insert_fp_feedback("203.0.113.88", now_ts() - 7200, "误报", None)
+            .unwrap();
+        handle_detection(
+            &sink(3600),
+            "scan",
+            ip,
+            "证据",
+            None,
+            &f.dcfg(),
+            true,
+            "medium",
+            L7Evidence::default(),
+        );
+        assert_eq!(
+            f.fw.added.lock().unwrap().len(),
+            1,
+            "抑制期外应恢复自动封禁"
         );
     }
 

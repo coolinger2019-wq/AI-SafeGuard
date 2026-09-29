@@ -18,6 +18,7 @@ impl AisafeApp {
             self.settings_notify_url = cfg.notify.url.clone();
             self.settings_exposure_secs = cfg.exposure.auto_scan_secs.to_string();
             self.settings_xdp_iface = cfg.xdp.iface.clone();
+            self.settings_fp_days = (cfg.ai.fp_suppress_secs / 86400).to_string();
             self.settings_draft = Some(cfg);
         }
         let Some(draft) = self.settings_draft.as_mut() else {
@@ -154,6 +155,14 @@ impl AisafeApp {
 
                 ui.label("单条 payload 上送上限（字符）");
                 ui.add(egui::TextEdit::singleline(&mut self.settings_snippet).desired_width(120.0));
+                ui.end_row();
+
+                ui.label("误报抑制时长（天）");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.settings_fp_days)
+                        .desired_width(120.0)
+                        .hint_text("7～14 天较合适"),
+                );
                 ui.end_row();
             });
 
@@ -670,6 +679,14 @@ impl AisafeApp {
             Ok(v) if (40..=2000).contains(&v) => cfg.ai.max_snippet_chars = v,
             _ => {
                 self.set_toast("payload 上送上限需在 40-2000 之间");
+                return;
+            }
+        }
+        // 误报抑制时长（0.5.5 F8）：天 → 秒；建议 7～14 天
+        match self.settings_fp_days.trim().parse::<u64>() {
+            Ok(d) if (1..=90).contains(&d) => cfg.ai.fp_suppress_secs = d * 86_400,
+            _ => {
+                self.set_toast("误报抑制时长需在 1-90 天之间");
                 return;
             }
         }

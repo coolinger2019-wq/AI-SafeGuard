@@ -46,7 +46,11 @@ impl AisafeApp {
                             ui.label(RichText::new(fmt_ts(ev.ts)).size(12.0).color(text_dim()));
                         });
                         row.col(|ui| {
-                            ui.label(RichText::new(&ev.kind).size(12.0).color(event_color(&ev.kind)));
+                            ui.label(
+                                RichText::new(&ev.kind)
+                                    .size(12.0)
+                                    .color(event_color(&ev.kind)),
+                            );
                         });
                         row.col(|ui| {
                             ui.label(RichText::new(&ev.listener).size(12.0));
@@ -60,8 +64,9 @@ impl AisafeApp {
                             ui.label(RichText::new(src).monospace().size(12.0));
                         });
                         row.col(|ui| {
-                            // 检测类事件一键误报：30 天抑制该来源自动封禁 + 解除现有自动封禁
-                            if ev.kind == "detection"
+                            // 误报一键入口（0.5.5 F7）：检测判定与蜜罐命中行均可标记，
+                            // 与防火墙规则行 / AI 建议行走同一引擎逻辑
+                            if matches!(ev.kind.as_str(), "detection" | "honeypot_hit")
                                 && !ev.remote_ip.is_empty()
                                 && ui
                                     .add(egui::Button::new(
@@ -69,13 +74,8 @@ impl AisafeApp {
                                     ))
                                     .clicked()
                             {
-                                match self.eng.mark_false_positive(&ev.remote_ip, "", None) {
-                                    Ok((dismissed, removed)) => self.set_toast(format!(
-                                        "已标记误报：解封 {removed} 条规则，收弃 {dismissed} 条建议（30 天抑制）"
-                                    )),
-                                    Err(e) => self.set_toast(format!("标记失败: {e}")),
-                                }
-                                self.refresh_cache();
+                                let ip = ev.remote_ip.clone();
+                                self.mark_fp(&ip);
                             }
                         });
                         row.col(|ui| {

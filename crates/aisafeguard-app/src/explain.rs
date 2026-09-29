@@ -107,7 +107,8 @@ fn ttl_text(state: &str, expires_ts: Option<i64>) -> String {
     }
 }
 
-fn humanize_secs(secs: i64) -> String {
+/// 秒 → 人读时长（误报抑制期等文案共用）
+pub(crate) fn humanize_secs(secs: i64) -> String {
     match secs {
         s if s < 90 => format!("{s} 秒"),
         m if m < 5400 => format!("{} 分钟", (m + 30) / 60),

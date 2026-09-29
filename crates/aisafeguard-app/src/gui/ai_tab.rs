@@ -217,20 +217,9 @@ impl AisafeApp {
                                 self.refresh_cache();
                             }
                             if !p.remote_ip.is_empty() && ui.button("误报").clicked() {
-                                match self.eng.mark_false_positive(&p.remote_ip, "", None) {
-                                    Ok((dismissed, removed)) => {
-                                        let days = self
-                                            .eng
-                                            .config()
-                                            .map(|c| c.ai.fp_suppress_secs / 86400)
-                                            .unwrap_or(30);
-                                        self.set_toast(format!(
-                                            "已标记误报：收弃 {dismissed} 条建议，解封 {removed} 条规则（{days} 天内不再自动封禁该来源）"
-                                        ));
-                                    }
-                                    Err(e) => self.set_toast(format!("标记失败: {e}")),
-                                }
-                                self.refresh_cache();
+                                // 误报一键入口（0.5.5 F7）：与事件页 / 防火墙规则行同一逻辑
+                                let ip = p.remote_ip.clone();
+                                self.mark_fp(&ip);
                             }
                             if ui.button("忽略").clicked() {
                                 let _ = self.eng.dismiss_proposal(pid);
@@ -279,36 +268,53 @@ impl AisafeApp {
         }
 
         ui.add_space(10.0);
-        section(ui, "生效中的误报抑制");
+        section(ui, "误报 / 白名单抑制");
         if self.cache.feedback.is_empty() {
             ui.label(
-                RichText::new("无（标记误报的来源在此列出，抑制期内自动封禁跳过；可随时清除）。")
+                RichText::new("无（标记误报的来源在此列出，抑制期内自动封禁跳过；可随时取消）。")
                     .color(text_dim())
                     .size(13.0),
             );
         }
+        let fp_secs = self
+            .eng
+            .config()
+            .map(|c| c.ai.fp_suppress_secs as i64)
+            .unwrap_or(0);
         for f in self.cache.feedback.clone() {
+            let until = chrono::DateTime::from_timestamp(f.last_ts + fp_secs, 0)
+                .map(|d| {
+                    d.with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string()
+                })
+                .unwrap_or_default();
             ui.horizontal(|ui| {
                 ui.label(RichText::new(&f.value).strong().size(13.0));
                 ui.label(
-                    RichText::new(format!("标记 {} 次 · 最近 {}", f.count, fmt_ts(f.last_ts)))
-                        .size(11.0)
-                        .color(text_dim()),
+                    RichText::new(format!(
+                        "标记 {} 次 · 最近 {} · 抑制至 {}",
+                        f.count,
+                        fmt_ts(f.last_ts),
+                        until
+                    ))
+                    .size(11.0)
+                    .color(text_dim()),
                 );
                 if !f.note.is_empty() {
                     ui.label(RichText::new(&f.note).size(11.0).color(text_dim()));
                 }
-                if ui.button("清除抑制").clicked() {
+                if ui.button("取消抑制").clicked() {
                     match self.eng.clear_false_positive(&f.value) {
                         Ok(1) => {
                             self.set_toast(format!(
-                                "已清除 {} 的误报抑制（恢复自动封禁资格）",
+                                "已取消 {} 的误报抑制（恢复自动封禁资格）",
                                 f.value
                             ));
                             self.refresh_cache();
                         }
                         Ok(_) => {}
-                        Err(e) => self.set_toast(format!("清除失败: {e}")),
+                        Err(e) => self.set_toast(format!("取消失败: {e}")),
                     }
                 }
             });
