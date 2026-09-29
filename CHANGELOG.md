@@ -31,7 +31,14 @@
 ### 实测(WSL2 Ubuntu 24.04)
 
 - paramiko 全剧本回放 PASS(登录/白名单/组合注入/未知命令/4KB);mysql 8.0.46 CLI 实连(SHOW DATABASES 假库);redis-cli 实连(PING/SET/INFO/SLAVEOF);demo 全流程事件流水 + 哈希链 14/14
-- 已知限制(诚实声明):russh 客户端自连本蜜罐存在上游通道数据兼容问题(paramiko/OpenSSH 不受影响),NEGATIVE-PATH-TESTING §6 明示
+### 已知限制(诚实声明):russh 客户端自连本蜜罐存在上游通道数据兼容问题(paramiko/OpenSSH 不受影响),NEGATIVE-PATH-TESTING §6 明示
+
+### Artifact SHA-256(与发布页同清单;构建源 = 提交 710395d,即 tag v0.5.9 所指树;仓库不存二进制,本地暂存 dist/ 已 gitignore)
+
+- Windows x86_64(MSVC)`aisafeguard-v0.5.9-windows-x86_64.exe`(`--version` = 0.5.9,30,609,408 字节):
+  `e246128501eaf30f9c5337ccfe3b93cd551dd1e2a4be3c2c79d1445b515ffca7`
+- Linux x86_64(WSL2 Ubuntu 24.04 `cargo build --release`)`aisafeguard-v0.5.9-linux-x86_64`(`--version` = 0.5.9,36,186,600 字节):
+  `d68c4ca2d236a446ec2787594f7cf6b6f88c63046be18c75a78fe3222cc07599`
 
 ## [0.5.8] - 2026-09-29
 
