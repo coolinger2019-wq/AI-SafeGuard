@@ -97,6 +97,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn main() -> anyhow::Result<()> {
     let mut headless = false;
+    let mut uac_child = false;
     let mut service_mode = false;
     let mut print_token = false;
     let mut cfg_path: Option<PathBuf> = None;
@@ -109,6 +110,8 @@ fn main() -> anyhow::Result<()> {
     while i < args.len() {
         match args[i].as_str() {
             "--headless" => headless = true,
+            // 提权重启后的子进程标记：跳过再次提权（防循环）
+            "--uac-child" => uac_child = true,
             "--service" => service_mode = true,
             "--print-token" => print_token = true,
             "--version" => {
@@ -386,7 +389,8 @@ fn main() -> anyhow::Result<()> {
         bundle.engine.honeypot.stop();
         Ok(())
     } else {
-        // GUI：已提权 → 内嵌引擎；未提权 → 优先连接提权服务；无服务 → 内嵌回退（防火墙功能受限）
+        // GUI：已提权 → 内嵌引擎；未提权 → 优先连接提权服务；
+        // 无服务 → 自动弹 UAC 请求管理员权限（拒绝则未提权内嵌回退，防火墙功能受限）
         let elevated = aisafeguard_firewall::create_backend().is_elevated();
         let console: Arc<dyn Console> = if elevated {
             let (cfg, cfg_path) = resolve_cfg(cfg_path, data_dir)?;
@@ -396,11 +400,61 @@ fn main() -> anyhow::Result<()> {
             println!("远程控制台模式：已连接 AI-SafeGuard 服务");
             Arc::new(rc)
         } else {
-            println!("未检测到提权服务，回退内嵌模式（防火墙功能需管理员）");
+            #[cfg(windows)]
+            if !uac_child && try_relaunch_elevated() {
+                // UAC 已同意、提权实例已拉起：本进程退出
+                return Ok(());
+            }
+            if uac_child {
+                println!("提权未成功，以普通权限继续（防火墙功能受限）");
+            } else {
+                println!("未检测到提权服务，回退内嵌模式（防火墙功能需管理员）");
+            }
             let (cfg, cfg_path) = resolve_cfg(cfg_path, data_dir)?;
             embedded_console(cfg, cfg_path)?
         };
         gui::run(console)
+    }
+}
+
+/// Windows：以管理员身份重启自身（UAC 弹窗，0.5.12）。PowerShell Start-Process
+/// -Verb RunAs 触发系统提权对话框；std CommandExt::creation_flags 是安全 API，
+/// 不破 forbid(unsafe_code)。返回 true = 提权实例已拉起（调用方应退出本进程）；
+/// false = 用户拒绝 UAC 或 PowerShell 不可用（调用方按未提权继续）。
+#[cfg(windows)]
+fn try_relaunch_elevated() -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let args: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|a| a != "--uac-child")
+        .chain(["--uac-child".to_string()])
+        .collect();
+    // PowerShell 单引号字符串不插值：' → '' 转义，避免路径里的 $ / 空格踩坑
+    let ps_quote = |v: &str| format!("'{}'", v.replace('\'', "''"));
+    let arglist = args
+        .iter()
+        .map(|a| ps_quote(a))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let script = format!(
+        "Start-Process -FilePath {} -ArgumentList @({}) -Verb RunAs",
+        ps_quote(&exe.to_string_lossy()),
+        arglist
+    );
+    let status = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
+    match status {
+        Ok(s) if s.success() => {
+            println!("已请求管理员权限…");
+            true
+        }
+        _ => false,
     }
 }
 

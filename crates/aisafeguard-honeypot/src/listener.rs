@@ -9,6 +9,8 @@ use std::sync::Arc;
 use aisafeguard_core::config::{FingerprintConfig, HoneypotConfig, ListenerConfig};
 use aisafeguard_core::event::{EventBus, SecurityEvent};
 use aisafeguard_core::now_ts;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
 
@@ -40,6 +42,9 @@ pub struct ListenerState {
     pub kind: String,
     /// 交互模式：「低交互」banner 级 /「中交互」假 Shell（0.5.10 H150 能力可见）
     pub mode: String,
+    /// 实际运行状态：bind 成功 = true，停机/绑定失败 = false。
+    /// 配置里有 ≠ 真的在跑——GUI 状态章以这个为准（0.5.12）。
+    pub running: Arc<AtomicBool>,
 }
 
 /// kind + 假 Shell 运行时可用性 → 交互模式（与 is_interactive_session 同一口径）
@@ -157,8 +162,15 @@ pub fn start(cfg: &HoneypotConfig, bus: EventBus, data_dir: &std::path::Path) ->
         for l in cfg.listeners.iter().chain(extra_listeners.iter()) {
             // 单监听器启停（0.5.10 H130）：disabled 行保留在状态表里（模式=未启用），
             // 但不绑定端口——GUI 能看到这条配置的存在
+            let running = Arc::new(AtomicBool::new(false));
             if l.enabled {
-                tokio::spawn(run_listener(l.clone(), bus.clone(), shutdown_rx.clone(), ctx.clone()));
+                tokio::spawn(run_listener(
+                    l.clone(),
+                    bus.clone(),
+                    shutdown_rx.clone(),
+                    ctx.clone(),
+                    running.clone(),
+                ));
             }
             listeners.push(ListenerState {
                 name: l.name.clone(),
@@ -169,6 +181,7 @@ pub fn start(cfg: &HoneypotConfig, bus: EventBus, data_dir: &std::path::Path) ->
                 } else {
                     "未启用".to_string()
                 },
+                running,
             });
         }
     }
@@ -183,6 +196,7 @@ async fn run_listener(
     bus: EventBus,
     mut shutdown: watch::Receiver<bool>,
     ctx: Arc<SessionCtx>,
+    running: Arc<AtomicBool>,
 ) {
     let addr = std::net::SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), l.port);
     let listener = match TcpListener::bind(addr).await {
@@ -192,9 +206,10 @@ async fn run_listener(
                 "error",
                 format!("蜜罐 [{}] 绑定 :{} 失败: {e}", l.name, l.port),
             ));
-            return;
+            return; // running 保持 false：GUI 状态章显示「已停止」
         }
     };
+    running.store(true, Ordering::Relaxed);
     bus.publish(SecurityEvent::engine(
         "info",
         format!("蜜罐 [{}] ({}) 已监听 :{}", l.name, l.kind, l.port),
@@ -245,6 +260,7 @@ async fn run_listener(
             drop(permit);
         });
     }
+    running.store(false, Ordering::Relaxed);
     bus.publish(SecurityEvent::engine(
         "info",
         format!("蜜罐 [{}] 已停止", l.name),

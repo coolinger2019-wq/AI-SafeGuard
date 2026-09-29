@@ -169,6 +169,8 @@ pub struct ListenerInfo {
     pub kind: String,
     /// 交互模式：「低交互」banner 级 /「中交互」假 Shell（0.5.10 H150 能力可见）
     pub mode: String,
+    /// 实际运行状态（0.5.12）：bind 成功 = true——配置里有 ≠ 真的在跑
+    pub running: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -307,6 +309,7 @@ impl EngineHandle {
                     port: l.port,
                     kind: l.kind.clone(),
                     mode: l.mode.clone(),
+                    running: l.running.load(std::sync::atomic::Ordering::Relaxed),
                 })
                 .collect(),
             rule_count: self.store.count_rules().unwrap_or(0),

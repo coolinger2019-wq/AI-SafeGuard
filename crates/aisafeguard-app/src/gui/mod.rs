@@ -31,6 +31,22 @@ pub(crate) use theme::{
     purple, section_title, space, text as text_color, text_dim, title, toast_bg, toast_text, warn,
 };
 
+/// 监听表协议枚举（H130 基础校验的合法取值；未知 kind 运行时按 generic 处理）
+pub(crate) const LISTENER_KINDS: [&str; 6] = ["ssh", "http", "telnet", "generic", "mysql", "redis"];
+
+/// kind 原始值 → 显示名（蜜罐页卡片 / 监听表编辑器共用）
+pub(crate) fn kind_display(kind: &str) -> &str {
+    match kind {
+        "ssh" => "SSH",
+        "http" => "HTTP",
+        "telnet" => "Telnet",
+        "generic" => "Generic",
+        "mysql" => "MySQL",
+        "redis" => "Redis",
+        other => other,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Tab {
     Dashboard,
