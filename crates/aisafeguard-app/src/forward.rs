@@ -365,6 +365,7 @@ mod tests {
                 remote_port: 0,
                 summary: String::new(),
                 payload: String::new(),
+                http_hint: None,
             }
             .severity(),
             5

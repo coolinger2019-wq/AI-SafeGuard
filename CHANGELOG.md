@@ -2,6 +2,46 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.5.6] - 2026-09-29
+
+地基版 Batch 3 + 文档收官（任务拆分见 docs/ROADMAP-0.5.3.md）：HTTP 蜜罐明显比「空端口监听」好用；仍不进行中交互。
+
+### 新增
+
+- **HTTP 路径诱饵（F11）**：内置一批敏感路径诱饵（`/admin`、`/.env`、
+  `/wp-login.php`、`/api/login`、`/login`、`/phpmyadmin` 等，精确 + 子路径
+  匹配），未命中走通用假页；SSH/Telnet 维持横幅级低交互不变
+- **假登录页（F12）**：GET 登录路径下发短表单；POST 记提交（`login:post`
+  标签）并返回「用户名或密码错误」页——无真实成功会话；**密码字段只记
+  「出现过」**：`redact_secrets` 对 form `k=v` 与 JSON `"k":"v"` 两种形态做
+  值脱敏（词边界匹配，`user_password` 命中、`bypass` 不误伤），明文不落库
+- **事件结构化字段（F13）**：`HttpHint` schema v2——标签并入提示对象
+  （`tags` 单一来源，`http_tags()` 委托解析结果），蜜罐与采样共用同一字段；
+  HoneypotHit 事件携带 `http_hint` 入库（`GET /api/events` 可查）
+- **事件 GUI 详情（F14）**：事件页「详情」按钮展开结构化卡片——
+  method/path/Host/UA/标签/JA3/JA4 与截断载荷（等宽展示，2000 字符上限），
+  再点收起
+- **与检测/AI 衔接（F15）**：撞登录路径的蜜罐命中照走既有频次引擎与
+  `recent_honeypot_hits` → AI 上下文（摘要含 `login:post` 等标签），
+  未新增执行通道
+- **模糊/单测（F16）**：2000 轮伪随机字节过脱敏/路由/解析零 panic（保持
+  `forbid(unsafe_code)`）；HTTP 蜜罐端到端测试（假登录 GET 表单、POST 脱敏
+  落库、诱饵 403、通用假页）
+
+### 文档
+
+- **单机 5 分钟演示（F17）**：`scripts/demo-foundation.sh`——假登录 → 诱饵
+  扫描 → 可读事件 → 可解释封禁 → 一键误报闭环，无 AI 无外网
+- **README「单机地基能力」小节（F18）**：可解释封禁 / 误报一键 / HTTP 诱饵
+  三项收口 + 与 0.6 多机关系；蜜罐与防火墙能力描述对账到实际实现
+- **已知限制（F19）**：低交互加强 ≠ 中交互蜜罐（无假 Shell/命令执行），
+  非 0.6 多机
+
+### 验证
+
+- `cargo test --workspace` 全绿；l7 HttpHint v2 标签单测、honeypot 诱饵路由 /
+  脱敏 / Content-Length / 端到端共 8 项新增
+
 ## [0.5.5] - 2026-09-29
 
 地基版 Batch 2（误报一键，任务拆分见 docs/ROADMAP-0.5.3.md）：用户只理解一个按钮——「这是误报」。

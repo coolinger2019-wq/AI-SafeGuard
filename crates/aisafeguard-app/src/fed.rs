@@ -159,6 +159,7 @@ async fn fed_events(
                 remote_port: ev.remote_port,
                 summary: ev.summary.clone(),
                 payload: String::new(),
+                http_hint: None,
             }
         } else {
             SecurityEvent::Engine {

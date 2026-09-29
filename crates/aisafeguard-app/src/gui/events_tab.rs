@@ -30,7 +30,7 @@ impl AisafeApp {
             .column(egui_extras::Column::exact(110.0))
             .column(egui_extras::Column::exact(70.0))
             .column(egui_extras::Column::exact(150.0))
-            .column(egui_extras::Column::exact(64.0))
+            .column(egui_extras::Column::exact(110.0))
             .column(egui_extras::Column::remainder())
             .header(22.0, |mut header| {
                 for name in ["时间", "类型", "蜜罐", "来源", "操作", "摘要"] {
@@ -64,19 +64,34 @@ impl AisafeApp {
                             ui.label(RichText::new(src).monospace().size(12.0));
                         });
                         row.col(|ui| {
-                            // 误报一键入口（0.5.5 F7）：检测判定与蜜罐命中行均可标记，
-                            // 与防火墙规则行 / AI 建议行走同一引擎逻辑
-                            if matches!(ev.kind.as_str(), "detection" | "honeypot_hit")
-                                && !ev.remote_ip.is_empty()
-                                && ui
+                            ui.horizontal(|ui| {
+                                // 误报一键入口（0.5.5 F7）：检测判定与蜜罐命中行均可标记，
+                                // 与防火墙规则行 / AI 建议行走同一引擎逻辑
+                                if matches!(ev.kind.as_str(), "detection" | "honeypot_hit")
+                                    && !ev.remote_ip.is_empty()
+                                    && ui
+                                        .add(egui::Button::new(
+                                            RichText::new("误报").size(11.0).color(warn()),
+                                        ))
+                                        .clicked()
+                                {
+                                    let ip = ev.remote_ip.clone();
+                                    self.mark_fp(&ip);
+                                }
+                                // 事件详情（0.5.6 F14）：再点一次收起
+                                if ui
                                     .add(egui::Button::new(
-                                        RichText::new("误报").size(11.0).color(warn()),
+                                        RichText::new("详情").size(11.0).color(accent()),
                                     ))
                                     .clicked()
-                            {
-                                let ip = ev.remote_ip.clone();
-                                self.mark_fp(&ip);
-                            }
+                                {
+                                    self.event_detail_id = if self.event_detail_id == Some(ev.id) {
+                                        None
+                                    } else {
+                                        Some(ev.id)
+                                    };
+                                }
+                            });
                         });
                         row.col(|ui| {
                             ui.label(RichText::new(&ev.summary).size(12.0));
@@ -93,10 +108,120 @@ impl AisafeApp {
                     .color(text_dim()),
             );
         }
+        // 详情面板（F14）：点开看结构化字段；不可信内容等宽展示 + 截断；再点「详情」收起
+        let detail = self
+            .event_detail_id
+            .and_then(|id| rows.iter().find(|e| e.id == id).cloned());
+        if let Some(ev) = detail {
+            event_detail_ui(ui, &ev);
+        }
         ui.label(
             RichText::new("完整 payload（截断存储）可通过本地 API 查看：GET /api/events")
                 .size(11.0)
                 .color(text_dim()),
         );
     }
+}
+
+/// 事件详情卡片：摘要之外的结构化字段（http 提示 / 指纹 / 载荷）。
+fn event_detail_ui(ui: &mut egui::Ui, ev: &EventRow) {
+    ui.add_space(8.0);
+    Frame::new()
+        .fill(bg_card())
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(Margin::same(12))
+        .stroke(Stroke::new(1.0, border()))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("事件详情 #{}", ev.id))
+                        .size(14.0)
+                        .strong(),
+                );
+                chip(ui, &ev.kind, event_color(&ev.kind));
+            });
+            ui.add_space(4.0);
+            kv_row(ui, "时间", &fmt_ts(ev.ts));
+            if !ev.listener.is_empty() {
+                kv_row(ui, "蜜罐", &ev.listener);
+            }
+            if !ev.remote_ip.is_empty() {
+                kv_row(ui, "来源", &format!("{}:{}", ev.remote_ip, ev.remote_port));
+            }
+            kv_row(ui, "摘要", &ev.summary);
+            // http 提示（v1/v2 兼容：按 JSON 值读，不依赖版本化结构反序列化）
+            if !ev.http_hint.is_empty()
+                && let Ok(h) = serde_json::from_str::<serde_json::Value>(&ev.http_hint)
+            {
+                if let Some(m) = h["method"].as_str() {
+                    kv_row(ui, "HTTP 方法", m);
+                }
+                if let Some(p) = h["path"].as_str() {
+                    kv_row(ui, "路径", p);
+                }
+                if let Some(hv) = h["host"].as_str() {
+                    kv_row(ui, "Host", hv);
+                }
+                if let Some(ua) = h["user_agent"].as_str() {
+                    kv_row(ui, "User-Agent", ua);
+                }
+                if let Some(tags) = h["tags"].as_array()
+                    && !tags.is_empty()
+                {
+                    let joined = tags
+                        .iter()
+                        .filter_map(|t| t.as_str())
+                        .collect::<Vec<_>>()
+                        .join("  ");
+                    kv_row(ui, "标签", &joined);
+                }
+            }
+            if !ev.tls_fp.is_empty() {
+                kv_row(ui, "JA3", &ev.tls_fp);
+            }
+            if !ev.tls_ja4.is_empty() {
+                kv_row(ui, "JA4", &ev.tls_ja4);
+            }
+            if !ev.payload.is_empty() {
+                ui.add_space(4.0);
+                egui::CollapsingHeader::new(egui::RichText::new("载荷（清洗截断）").size(12.0))
+                    .id_salt(egui::Id::new("event-payload").with(ev.id))
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        const MAX_DETAIL_PAYLOAD: usize = 2000;
+                        let text: String = ev.payload.chars().take(MAX_DETAIL_PAYLOAD).collect();
+                        let truncated = ev.payload.chars().count() > MAX_DETAIL_PAYLOAD;
+                        ui.add(
+                            egui::TextEdit::multiline(&mut text.as_str())
+                                .font(egui::TextStyle::Monospace)
+                                .desired_width(ui.available_width() - 8.0)
+                                .desired_rows(4)
+                                .interactive(false),
+                        );
+                        if truncated {
+                            ui.label(
+                                RichText::new(format!(
+                                    "…已截断（完整 {} 字符，API 可查）",
+                                    ev.payload.chars().count()
+                                ))
+                                .size(11.0)
+                                .color(text_dim()),
+                            );
+                        }
+                    });
+            }
+        });
+    ui.add_space(6.0);
+}
+
+fn kv_row(ui: &mut egui::Ui, key: &str, value: &str) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new(format!("{key}:"))
+                .size(12.0)
+                .color(text_dim())
+                .strong(),
+        );
+        ui.label(RichText::new(value).monospace().size(12.0));
+    });
 }

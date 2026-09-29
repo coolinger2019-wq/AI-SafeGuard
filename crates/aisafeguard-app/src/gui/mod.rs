@@ -64,6 +64,8 @@ pub struct AisafeApp {
     new_tag: String,
     // 事件过滤
     event_filter: String,
+    // 事件详情（0.5.6 F14）：选中事件的 id，详情面板从缓存按 id 取
+    event_detail_id: Option<i64>,
     // 设置草稿（None = 未编辑；进入设置页时从引擎取）
     settings_draft: Option<AppConfig>,
     settings_interval: String,
@@ -138,6 +140,7 @@ impl AisafeApp {
             new_note: String::new(),
             new_tag: String::new(),
             event_filter: String::new(),
+            event_detail_id: None,
             settings_draft: None,
             settings_interval: String::new(),
             settings_port: String::new(),

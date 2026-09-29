@@ -4,7 +4,7 @@
 
 > **这不是 LLM 内容审核/Guardrail 产品**。AI 在这里只做一件事:把蜜罐与真实流量观测到的攻击证据读给 LLM,产出**严格校验的封禁建议**(默认人工确认)。检测与处置不依赖 AI——关掉 AI,快路径全功能照常。
 >
-> 当前版本 **0.5.3**。架构与设计:[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · 路线图:[docs/ROADMAP.md](docs/ROADMAP.md) + [ROADMAP-0.5.md](docs/ROADMAP-0.5.md) · 威胁模型:[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) · ISO 27001 对照:[docs/COMPLIANCE.md](docs/COMPLIANCE.md) · NGFW/协同演进:[docs/NGFW_EVOLUTION.md](docs/NGFW_EVOLUTION.md)
+> 当前版本 **0.5.6**。架构与设计:[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · 路线图:[docs/ROADMAP.md](docs/ROADMAP.md) + [ROADMAP-0.5.md](docs/ROADMAP-0.5.md) + [ROADMAP-0.5.3.md](docs/ROADMAP-0.5.3.md) · 威胁模型:[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) · ISO 27001 对照:[docs/COMPLIANCE.md](docs/COMPLIANCE.md) · NGFW/协同演进:[docs/NGFW_EVOLUTION.md](docs/NGFW_EVOLUTION.md)
 
 ```
  蜜罐(诱捕) ────────┐
@@ -44,7 +44,7 @@ sudo bash scripts/demo-attack.sh   # 或一键演示(含自动封禁与哈希链
 - **Suricata/ET 规则为受限子集**(content/pcre/flow/threshold,范围冻结见 [RULESET_SUBSET.md](docs/RULESET_SUBSET.md)),非完整 Suricata 兼容
 - **深检默认全关**:`[detect.capture]`、`[detect.l7]`、`[detect.rules]`、`[xdp]` 默认 enabled=false,需显式开启
 - **规则引擎默认只告警**:命中只产事件,自动封禁需显式 `auto_block = true`(仍受内网保护约束)
-- **蜜罐仅端口诱捕**(SSH/HTTP/Telnet/通用 四种低交互监听);文件诱捕(canary 文件)未实现
+- **蜜罐是低交互**(HTTP 含假登录页与敏感路径诱饵,SSH/Telnet 维持横幅级);**非中交互蜜罐**(无假 Shell/命令执行),文件诱捕(canary 文件)未实现
 - **eBPF 流表/XDP 仅 Linux**;Windows 无 eBPF 依赖,能力对等由用户态实现(纯用户态,行为构造性一致)
 - AI 是概率性的:默认人工确认;自动应用 = 可选开关 + 严重度阈值 + 灰度 TTL(到期自动解封)
 - 内网/回环地址永不自动封(硬编码,手动封不禁);误报抑制期内自动封禁跳过
@@ -55,20 +55,30 @@ sudo bash scripts/demo-attack.sh   # 或一键演示(含自动封禁与哈希链
 
 ## 当前能力
 
-- **蜜罐**:SSH/HTTP/Telnet/通用 四种低交互监听,假响应逼真,HTTP 带 L7 标签(method/path 前缀/可疑 UA)
+- **蜜罐**:SSH/HTTP/Telnet/通用 四种低交互监听;HTTP 带假登录页(GET 下发表单,POST 记提交、密码字段脱敏不落库)与内置敏感路径诱饵(/admin、/.env、/wp-login.php 等),未命中走通用假页;事件含 method/path/UA/标签,GUI 可点开详情看结构化字段
 - **快路径检测**:频次引擎(扫描/暴破)+ 采样捕获检测器(端口扫描/SYN flood),触发即自动封禁——TTL 到期自动解封,内网/回环永不自动封
 - **流量采样捕获**(默认关闭):WinDivert(Windows)/ AF_PACKET(Linux)被动采样只取副本,control 只看 SYN 元数据、full 带流重组取证(载荷仅可疑时截断留存);可选驱动哈希校验;[Windows 实机验证](docs/WINDOWS-CAPTURE-TESTING.md) / [Linux](docs/LINUX-TESTING.md)
 - **L7 解析与指纹**(`[detect.l7]`,默认关闭):HttpHint(method/path/UA,蜜罐与采样共用同一解析)+ JA3/JA4 客户端指纹(JA4 对齐 FoxIO 官方算法),full 模式重组流前缀解析,字段随 Detection 事件入库;HTTPS 站点经由 JA3/JA4 的 SNI 扩展体现,无独立 SNI 域名字段
 - **规则子集引擎**(`[detect.rules]`,默认关闭):Suricata/ET 书写风格受限子集,整包加载治理(越界即整包拒绝),双平台同一用户态引擎;含 16 条自写示范包(`crates/aisafeguard-rules/demo.rules`)
 - **XDP 快速执行层**(`[xdp]`,Linux,默认关闭):IP 级入站封禁镜像进 eBPF map,内核直丢微秒级生效;eBPF 内核流表(FLOWS LRU map + DROP_TOTAL 丢弃计数);nftables 永远兜底,附加失败自动降级;eBPF 程序内嵌主程序;内网地址永进不了快速丢弃表
-- **防火墙**:Windows COM/WFP 规则;Linux nftables 集合(IP 级 + 端口级拼接集合);只管理自己创建的 `aisafeguard-blk-*` 规则
-- **AI 助手**(慢路径):OpenAI 兼容端点(默认 GLM,内网可指向本地推理),严格 schema 校验的封禁建议;灰度 TTL → 人工转正;误报反馈闭环(抑制时长可配 + 端口粒度 + 一键清除)
+- **防火墙**:Windows COM/WFP 规则;Linux nftables 集合(IP 级 + 端口级拼接集合);只管理自己创建的 `aisafeguard-blk-*` 规则;规则可解释——GUI 与 `GET /api/rules` 暴露来源(手动/检测引擎/AI/情报)、一句话原因、TTL 固定文案(试封中/已转正/自动封禁/手动),规则行可跳转相关事件
+- **AI 助手**(慢路径):OpenAI 兼容端点(默认 GLM,内网可指向本地推理),严格 schema 校验的封禁建议;灰度 TTL → 人工转正;误报一键闭环——事件行/规则行/建议行三处入口,一键完成抑制 + 解除自动封禁 + 收弃建议,抑制列表可查可取消(时长可配,默认 14 天)
 - **价值指标**:24h/7d 建议数、采纳率、误报率、自动封禁数(GUI + `/api/status`)
 - **完整性**:事件哈希链 + `verify-log` 离线校验 + 结构化模糊测试护栏
 - **事件外发**:syslog(RFC 5424 UDP/TCP)+ webhook 告警(severity 口径统一),best-effort 不阻塞引擎
 - **组织协同**:mTLS 每节点证书 + 指纹绑定/预登记/吊销;事件上报、情报同步、建议推送(本地复验、仅慢路径);quorum 可选;`fed audit` 审计导出
 - **暴露面盘点**:监听端口/进程枚举 → 快照入库 → AI 评估
 - **GUI**(egui):仪表盘/事件/防火墙/蜜罐/AI/设置;主题与字号可调;热更项与需重启项明确标注
+
+## 单机地基能力(0.5.4-0.5.6,多机前收口)
+
+单机先够用——能抓、能看懂、误报不折腾(任务书:[docs/ROADMAP-0.5.3.md](docs/ROADMAP-0.5.3.md)):
+
+1. **看得懂「谁、碰了啥」**:扫一下/打开假登录页 → 事件含 method/path/UA/标签,GUI 事件详情给结构化字段与截断载荷
+2. **看得懂「谁、为啥封、多久解」**:防火墙页每条规则可见来源、原因摘要、TTL 文案;从规则一键跳转相关事件
+3. **误报不折腾**:三处「误报」按钮同一逻辑——写入抑制(默认 14 天,可配 1-90 天)+ 解除该来源自动封禁(手动规则不动)+ 收弃 pending 建议;抑制列表可查、可取消
+
+与 0.6 的关系:本批是**单机体验收口**,为多台打底——干净事件与可解释封禁是跨节点印证的输入;多机印证/选举/STIX 与「组织」来源位留给 0.6,不在本批实现。一键演示:`sudo bash scripts/demo-foundation.sh`。
 
 ## 最小配置
 
@@ -134,7 +144,7 @@ aisafeguard fed audit <out.json>                   # 审计导出
 
 ## 路线图
 
-0.3 / 0.4 全部完成(检测平台 + AI 深度介入 + 事件外发 + 组织协同 mTLS + XDP;工程与安全收口)。**0.5 = NGFW 感知层(已完成)**:0.5.0 L7 复用(HttpHint/JA3/JA4)+ Suricata/ET 风格规则子集引擎 + Windows 能力对等(纯用户态,零 eBPF 依赖);0.5.1 Linux eBPF 流表 + XDP map 联动(Batch G);0.5.2 stretch 收官(AF_XDP 设计 / WFP callout POC 计划 / eBPF-for-windows 实验轨 / JA4 差异表);0.6 协同完全体。总览:[docs/ROADMAP.md](docs/ROADMAP.md)。
+0.3 / 0.4 全部完成(检测平台 + AI 深度介入 + 事件外发 + 组织协同 mTLS + XDP;工程与安全收口)。**0.5 = NGFW 感知层(已完成)**:0.5.0 L7 复用(HttpHint/JA3/JA4)+ Suricata/ET 风格规则子集引擎 + Windows 能力对等(纯用户态,零 eBPF 依赖);0.5.1 Linux eBPF 流表 + XDP map 联动(Batch G);0.5.2 stretch 收官(AF_XDP 设计 / WFP callout POC 计划 / eBPF-for-windows 实验轨 / JA4 差异表)。**0.5.4-0.5.6 = 单机地基版(已完成,见上文「单机地基能力」)**;0.6 = 多机协同完全体。总览:[docs/ROADMAP.md](docs/ROADMAP.md)。
 
 ## 安全披露
 

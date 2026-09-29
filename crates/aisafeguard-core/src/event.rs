@@ -17,6 +17,9 @@ pub enum SecurityEvent {
         remote_port: u16,
         summary: String,
         payload: String,
+        /// 结构化 HTTP 提示（0.5.6 F13：http 蜜罐可解析时出现）
+        #[serde(skip_serializing_if = "Option::is_none")]
+        http_hint: Option<HttpHint>,
     },
     FirewallRuleAdded {
         ts: i64,

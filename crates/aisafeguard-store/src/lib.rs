@@ -403,13 +403,17 @@ impl Store {
                 remote_ip,
                 remote_port,
                 payload,
+                http_hint,
                 ..
             } => (
                 listener.clone(),
                 remote_ip.clone(),
                 *remote_port as i64,
                 payload.clone(),
-                String::new(),
+                http_hint
+                    .as_ref()
+                    .map(|h| serde_json::to_string(h).unwrap_or_default())
+                    .unwrap_or_default(),
                 String::new(),
                 String::new(),
             ),
@@ -1440,6 +1444,7 @@ mod tests {
                     remote_port: 55555,
                     summary: "q".into(),
                     payload: String::new(),
+                    http_hint: None,
                 })
                 .unwrap();
         }
@@ -1517,6 +1522,7 @@ mod tests {
                 remote_port: 55555,
                 summary: summary.into(),
                 payload: "p".into(),
+                http_hint: None,
             })
             .unwrap();
     }

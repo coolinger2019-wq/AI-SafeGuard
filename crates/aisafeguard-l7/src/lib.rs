@@ -8,12 +8,13 @@
 //! （控制字符处理、长度上限）；调用方仍按不可信输入对待。
 
 /// HttpHint schema 版本（0.5.0 E2）：字段只增不改义；新增字段走 schema_version bump。
-pub const HINT_SCHEMA_VERSION: u8 = 1;
+/// v2（0.5.6 F13）：新增 `tags`——标签并入提示对象，蜜罐/采样共用同一套字段。
+pub const HINT_SCHEMA_VERSION: u8 = 2;
 
 /// 结构化 HTTP 提示（蜜罐/采样 full 模式两入口共用）。
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct HttpHint {
-    /// schema 版本（当前 1）
+    /// schema 版本（当前 2）
     pub schema_version: u8,
     /// 请求方法（白名单内）
     pub method: String,
@@ -25,6 +26,9 @@ pub struct HttpHint {
     pub user_agent: Option<String>,
     /// 可疑 UA 关键字命中（克制名单）
     pub ua_suspect: Vec<String>,
+    /// 标签（v2）：`http:GET` / `path:/x/y` / `ua-suspect:sqlmap` 等，
+    /// 与 `http_tags()` 输出同源（避免两套字段）；调用方可按场景追加自有标签
+    pub tags: Vec<String>,
 }
 
 /// 可疑 UA 关键字（明确扫描器/攻击工具，克制名单——普通浏览器与 wget/curl 不在列，
@@ -90,25 +94,21 @@ pub fn parse_http_hint(text: &str) -> Option<HttpHint> {
     }
     Some(HttpHint {
         schema_version: HINT_SCHEMA_VERSION,
-        method,
-        path,
+        method: method.clone(),
+        path: path.clone(),
         host,
         user_agent,
-        ua_suspect,
+        ua_suspect: ua_suspect.clone(),
+        tags: hint_tags(&method, &path, &ua_suspect),
     })
 }
 
-/// 兼容 0.4 文案的标签形式（E3）：`http:GET` / `path:/x/y` / `ua-suspect:sqlmap`。
-/// 非 HTTP / 畸形输入返回空。
-pub fn http_tags(text: &str) -> Vec<String> {
-    let Some(hint) = parse_http_hint(text) else {
-        return Vec::new();
-    };
-    let mut tags = vec![format!("http:{}", hint.method)];
+/// 由已解析字段拼装标签（http_tags 的单一来源，v2 起随 HttpHint 一起返回）
+fn hint_tags(method: &str, path: &str, ua_suspect: &[String]) -> Vec<String> {
+    let mut tags = vec![format!("http:{method}")];
     // 0.4 文案：path 标签取前 2 段前缀（HttpHint.path 是完整路径，两者用途不同）
-    if !hint.path.is_empty() {
-        let prefix: String = hint
-            .path
+    if !path.is_empty() {
+        let prefix: String = path
             .split('/')
             .filter(|s| !s.is_empty())
             .take(2)
@@ -118,10 +118,16 @@ pub fn http_tags(text: &str) -> Vec<String> {
             tags.push(format!("path:{prefix}"));
         }
     }
-    for kw in &hint.ua_suspect {
+    for kw in ua_suspect {
         tags.push(format!("ua-suspect:{kw}"));
     }
     tags
+}
+
+/// 兼容 0.4 文案的标签形式（E3）：`http:GET` / `path:/x/y` / `ua-suspect:sqlmap`。
+/// 非 HTTP / 畸形输入返回空。v2 起与 HttpHint.tags 同源（委托解析结果）。
+pub fn http_tags(text: &str) -> Vec<String> {
+    parse_http_hint(text).map(|h| h.tags).unwrap_or_default()
 }
 
 /// 标签序列化为摘要后缀（` [L7 a b c]`；空标签返回空串）。
@@ -475,12 +481,17 @@ mod tests {
     fn parse_http_hint_extracts_all_fields() {
         let req = "GET /admin/config HTTP/1.1\r\nHost: x.test\r\nUser-Agent: sqlmap/1.7\r\n\r\n";
         let h = parse_http_hint(req).unwrap();
-        assert_eq!(h.schema_version, 1);
+        assert_eq!(h.schema_version, 2);
         assert_eq!(h.method, "GET");
         assert_eq!(h.path, "/admin/config");
         assert_eq!(h.host.as_deref(), Some("x.test"));
         assert_eq!(h.user_agent.as_deref(), Some("sqlmap/1.7"));
         assert_eq!(h.ua_suspect, ["sqlmap"]);
+        // v2：标签随提示对象一起返回（单一来源）
+        assert_eq!(
+            h.tags,
+            ["http:GET", "path:/admin/config", "ua-suspect:sqlmap"]
+        );
     }
 
     #[test]
