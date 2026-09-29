@@ -496,7 +496,7 @@ mod tests {
     #[test]
     fn content_length_parses_and_defaults_zero() {
         let req = "POST /login HTTP/1.1\r\nHost: x\r\nContent-Length: 27\r\n\r\n";
-        assert_eq!(content_length(&req), 27);
+        assert_eq!(content_length(req), 27);
         assert_eq!(content_length("GET / HTTP/1.1\r\n\r\n"), 0);
         assert_eq!(
             content_length("POST / HTTP/1.1\r\nContent-Length: abc\r\n\r\n"),

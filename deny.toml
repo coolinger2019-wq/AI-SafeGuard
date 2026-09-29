@@ -4,6 +4,12 @@
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    # egui 0.36 字体栈（winit/sctk-adwaita → ab_glyph → ttf-parser）：作者宣布停止维护，
+    # 无安全升级路径（egui 升级换 skrifa 时移除本条）。0.5.9 H101 首次在
+    # cargo-deny 0.20 下跑绿门禁时评估收录。
+    "RUSTSEC-2026-0192",
+]
 
 [licenses]
 version = 2
@@ -28,6 +34,11 @@ allow = [
     # 满足 LGPL-3 §4 的可重链接要求），内核驱动 WinDivert64.sys 为运行期独立文件，
     # 不构成衍生作品。合规说明见 docs/COMPLIANCE.md。
     "LGPL-3.0-or-later",
+    # egui 0.36 的 epaint_default_fonts 内置字体包（Empyrean 等随 crate 再分发的字体）：
+    # OFL-1.1（OSI/FSF 认可）与 Ubuntu-font-1.0（允许再分发，须保留许可与字体名）。
+    # 均为宽松字体许可，仅影响随包字体文件，0.5.9 H101 评估收录。
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
 ]
 
 [bans]
