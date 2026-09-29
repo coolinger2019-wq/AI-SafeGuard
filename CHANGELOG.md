@@ -2,6 +2,32 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.5.10] - 2026-09-30
+
+0.5.10 第二批(情报价值):凭证采集与本地喷洒检测 + Canary 蜜饵 + 可用性专项(设置页蜜罐域全量 GUI 化/示例配置/内置手册),任务号 H130/H140/H150/H200/H210(见 docs/ROADMAP-0.5.9.md 第二批)。
+
+### 新增
+
+- **蜜罐凭证采集与本地喷洒检测(H200)**:`[honeypot.credentials]` 默认开。SSH/Telnet/HTTP 表单/MySQL/Redis 五协议的 用户名/口令 对统一采集——口令在会话内即完成 argon2id 加盐哈希(RustCrypto 纯 Rust,参数刻意调低:被哈希的是攻击者自选口令,8MiB/2 轮防高频撞库烧 CPU),明文永不落盘、事件与 API 输出只有哈希入独立凭证库(`<数据目录>/honeypot/credentials.db`,文件 0600,不进事件表)。MySQL 握手口令为不可逆 scramble,只记用户名。本机账号快照(sysinfo 安全封装,只取用户名,forbid(unsafe_code) 不破例)与蜜罐用户名做同名比对 → **credential_spray 高严重度事件直推快路径**(自动封禁仍受内网保护与误报抑制约束);同一来源跨协议提交同一口令 → credential_reuse 聚合告警;同键 24h 节流防刷屏。
+- **Canary 蜜饵(H210)**:`[honeypot.canary]` 默认关。HTTP 蜜罐内置 `/backup.zip`、`/.git/config`、`/id_rsa`、`/db.sql` 诱饵资源(合成内容,结构对齐真实文件、数据零值),内容带水印 token(`AC1.<payload>.<mac>`),下载行为本身即事件(事件带 canary 标签);`aisafeguard canary-decode <token>` 离线还原 来源节点/投放时间/资源,支撑外传溯源(密钥来源与引擎一致:配置显式 key 或自动生成的 `<数据目录>/honeypot/canary.key`);关闭状态 HTTP 响应与 0.5.8 逐字节一致(回归测试钉住)。文件系统蜜饵 v1 **仅 Linux**(notify/inotify 只读监听「文件被读取」):配置路径缺失则写入合成诱饵并监控,已存在则拒绝该条并告警(绝不覆盖真实文件);Windows 降级告警明示(用户态无「文件被读取」对等 API)。
+- **蜜罐 GUI 全量可操作(H130)**:设置页蜜罐域新增假 Shell 开关(SSH/Telnet)+用户名/主机名/命令上限输入、监听表编辑器(启停/名称/协议/端口/增删行,端口范围与去重校验,mysql/redis 由此进入可见范围);`ListenerConfig` 新增 `enabled` 字段(缺省 true,旧配置零影响,roundtrip 测试钉住)。
+- **示例配置 + 内置手册(H140)**:`docs/config.example.toml` 全量注释示例(每字段:人话说明+默认值+改了会怎样;默认关的段落以注释态给出,抄一行即用),CI 测试 `config_example_stays_in_sync` 防漂移(新增字段不进示例即红);`docs/MANUAL.md` 人话版集成操作手册,GUI 新增「帮助」页内嵌渲染(离线内置,零新增依赖的受控子集渲染器)。
+- **GUI/配置对齐审计(H150)**:`docs/CONFIG-COVERAGE.md` 全量对账表(AppConfig 每字段 → GUI/示例/手册三态处置);蜜罐 Tab 监听卡片显示交互模式(低交互/中交互/未启用)与单监听器运行状态。
+- **蜜罐界面修正**:监听卡片改 2 个一行换行布局——窄窗口下横排挤压变形的问题(用户实测反馈),极窄窗口退化为单列。
+
+### 实测(Windows 11 本轮自动化)
+
+- 凭证采集:五协议采集接点单测/集成测试全绿;`credential_event_row_carries_no_secret` 钉住「事件 API 无哈希无明文」;凭证库 0600 权限断言(Unix)+ 独立文件设计(Windows 权限沿用目录继承,发布包随目录 ACL)
+- canary:token roundtrip/篡改拒绝/异密钥拒绝;HTTP 蜜饵下发与关闭回归;蜜饵路径冲突拒绝覆盖;Linux inotify 读取告警与 60s 去重为编译门控路径,**WSL2 实机读取告警待发布验证**
+- 门禁:cargo test --workspace / clippy -D warnings / cargo audit / cargo deny check 全绿
+
+### 变更
+
+- `SecurityEvent` 新增 `CredentialObserved` 变体(kind=credential_observed,GUI 事件页单独配色);`HoneypotConfig` derive PartialEq;`restart_required` 契约纳入 credentials/canary 段(蜜罐监听)
+- 净新增依赖:argon2 0.6(凭证哈希)、sysinfo 0.37(仅 user 特性,账号快照;Windows 内部走 NetUserEnum)、notify 8(仅 Linux 目标,文件蜜饵);audit+deny 全绿
+
+### 已知限制(诚实声明):凭证库不做外部泄露库比对(归 0.6 情报通道);文件系统蜜饵仅 Linux,Windows 用户态无读取通知;水印 MAC 为 SHA-256 前缀构造(溯源完整性场景,非对抗性密码学);GUI 验收项(纯 GUI 开假 Shell→重启→replay)待实机操作确认
+
 ## [0.5.9] - 2026-09-30
 
 蜜罐深化专项(0.5.9 第一批:仿真深度):SSH/Telnet 假 Shell 中交互 + MySQL/Redis 蜜罐,统一逐命令留痕,全部默认关、显式开启。任务号 H101-H120(见 docs/ROADMAP-0.5.9.md 切分决议);0.5.10(凭证采集/canary)与 0.5.11(模板/反识别)顺延。

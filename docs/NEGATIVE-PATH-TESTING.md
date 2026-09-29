@@ -177,3 +177,44 @@ cargo test --workspace          # 全绿(2026-09-29,Windows 11;Linux 侧 WSL2 �
 cargo test -p aisafeguard-app   # 本文档引用的 fed/engine/forward 测试所在
 cargo test -p aisafeguard-honeypot   # 本文档第 6/7 节假 Shell 与 MySQL/Redis 负路径
 ```
+
+## 8. 凭证库与蜜饵的负路径（0.5.10 H200/H210）
+
+- 记录日期:2026-09-30(版本 0.5.10)
+- 自动化环境:Windows 11 x64,`cargo test --workspace` 全绿;标注 (Linux) 的条目为编译门控路径,WSL2 实机口径同 §6/§7
+
+### 8.1 凭证哈希/明文永不进事件与 API
+
+机制:`SecurityEvent::CredentialObserved` 的 pass_hash 在 store `insert_event` 显式丢弃(事件行只落用户名);口令明文在蜜罐会话内即 argon2id 哈希后丢弃。
+证据:`store::tests::credential_event_row_carries_no_secret`——插入带 `pass_hash` 的事件,回读 EventRow 序列化 JSON,断言不含 `argon2id`/哈希值,且 payload 只含用户名。
+实机:`cargo test -p aisafeguard-store credential_event_row_carries_no_secret`。
+
+### 8.2 凭证库文件权限与隔离
+
+机制:凭证库是独立 SQLite 文件(`<数据目录>/honeypot/credentials.db`),Unix 上 open 即 chmod 0600;不进主事件库、不进任何 API/Console 方法(结构上不可达)。
+证据:`credentials::tests::insert_query_and_prune_roundtrip` 含 0600 断言(Unix);Windows 权限沿用父目录 ACL(发布建议随 `%PROGRAMDATA%` 目录 ACL 管理)。
+
+### 8.3 蜜罐凭证入口的注入面
+
+机制:用户名/口令在采集点统一 `sanitize`(去控制字符/截断:用户名 128、表单值 128、Redis 参数 512);凭证对只产生三类查询(按 IP 用户名集合/按哈希协议数),SQL 全部参数绑定。
+证据:honeypot crate fuzz 护栏(`fuzz_parse_resp_never_panic` 等 5 条)覆盖 AUTH/表单解析路径;store 查询测试使用含大写与特殊字符用户名(ROOT)验证 lower 归一不注入。
+
+### 8.4 蜜饵关闭状态行为回归(0.5.8 逐字节)
+
+机制:`canary_response` 在 canary 未启用时恒返回 None,HTTP 路由不进入蜜饵分支。
+证据:`http::tests::http_decoy_and_generic_pages`——canary 关闭时 `/backup.zip` 走通用假页且事件无 canary 标签;`/.git/config` 维持 403 诱饵。
+
+### 8.5 蜜饵路径冲突拒绝覆盖
+
+机制:`validate_fs_path`——配置的 fs 蜜饵路径已存在(可能是真实文件)→ 拒绝该条 + engine warn 事件,绝不写入;父目录缺失同样拒绝。
+证据:`canary::tests::fs_path_validation_rejects_existing_and_missing_parent`。
+
+### 8.6 诱饵误读抑制(可配窗口)
+
+机制:fs 蜜饵读取事件按路径 60s 去重(`FS_DEDUP_SECS`),正常业务进程批量扫描目录不会高频刷屏;更长的抑制沿用现有误报闭环(fp_feedback 表 + 自动封禁跳过)。
+证据:去重逻辑在 Linux 监听线程内(编译门控),逻辑与 §8.5 同文件;实机验证口径:Linux 上 `cat` 蜜饵文件两次,1 分钟内只产 1 条事件(随发布验证)。
+
+### 8.7 水印 token 防篡改
+
+机制:`AC1.<b64url(payload)>.<b64url(mac)>`,MAC=SHA-256(key‖payload);密钥不匹配/内容被改/格式不对一律 Err。
+证据:`canary::tests::tamper_and_wrong_key_rejected`(payload 改一位/异节点密钥/非 token 输入/空密钥全拒绝)。

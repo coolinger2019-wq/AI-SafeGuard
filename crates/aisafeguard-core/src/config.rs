@@ -876,6 +876,49 @@ mod tests {
         assert!(!cfg.ai.auto_apply);
     }
 
+    /// H140 示例配置防漂移：(1) docs/config.example.toml 必须能解析进
+    /// AppConfig（deny_unknown_fields 拦住过时字段）；(2) 默认配置的每个叶子
+    /// 字段名必须出现在示例文本里（新增字段忘了写进示例会被拦住）。
+    #[test]
+    fn config_example_stays_in_sync() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/config.example.toml");
+        let text = std::fs::read_to_string(&path).expect("docs/config.example.toml 必须存在");
+        let example: AppConfig = toml::from_str(&text).expect("示例配置必须能解析");
+        assert!(
+            !example.honeypot.canary.enabled && !example.detect.rules.enabled,
+            "示例必须保持默认关的纪律"
+        );
+        let mut names = Vec::new();
+        collect_leaf_keys(&toml::Value::try_from(AppConfig::default()).expect("默认配置可序列化"), &mut names);
+        assert!(names.len() > 40, "字段收集不应为空");
+        for name in names {
+            assert!(
+                text.contains(&name),
+                "docs/config.example.toml 缺少字段 `{name}`（新增配置字段必须同步进示例）"
+            );
+        }
+    }
+
+    fn collect_leaf_keys(value: &toml::Value, out: &mut Vec<String>) {
+        match value {
+            toml::Value::Table(t) => {
+                for (k, v) in t {
+                    if matches!(v, toml::Value::Table(_)) {
+                        collect_leaf_keys(v, out);
+                    } else {
+                        out.push(k.clone());
+                    }
+                }
+            }
+            toml::Value::Array(a) => {
+                for v in a {
+                    collect_leaf_keys(v, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// H130 监听器启停字段：旧配置（无 enabled）默认 true；显式 false 可序列化
     /// roundtrip——GUI 保存的 toml 与手写完全同构（deny_unknown_fields 不炸）。
     #[test]

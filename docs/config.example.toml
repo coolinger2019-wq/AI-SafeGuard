@@ -1,0 +1,252 @@
+# ==============================================================================
+# AI-SafeGuard 配置示例（docs/config.example.toml）
+#
+# 用法：把需要的段落抄进你自己的 config.toml（默认路径见下方 [general]），
+# 复制后改一行就能用。每个字段：一句话人话说明 + 默认值 + 改了会怎样。
+#
+# 三条纪律：
+#   1. 配置文件不承载任何秘密——AI Key 在系统凭据管理器或环境变量
+#      AISAFEGUARD_AI_KEY，API token 用 `aisafeguard --print-token` 查看。
+#   2. 默认安全基线有自动化测试守护：深检/规则/XDP/蜜饵/协同等默认永远关闭。
+#   3. 标注「需重启」的字段保存后要重启程序；其余保存即热更生效。
+#
+# 本文件与 AppConfig 结构由 CI 测试校验同步（新增字段必须进本示例，防漂移）。
+# ==============================================================================
+
+[general]
+# 数据目录（事件库/证书/蜜罐 host key 等都在这里）。
+# 默认空 = %LOCALAPPDATA%\aisafeguard（Windows）/ ~/.local/share/aisafeguard（Linux）。
+# 改了会怎样：数据不会自动迁移，旧目录保留；需重启。
+data_dir = ""
+
+[api]
+# 本机 REST API（只监听 127.0.0.1，供 GUI/脚本本机查询）。默认开。
+# 改了会怎样：关闭后 GUI 仍可本地内嵌运行，但脚本无法用 HTTP 查询。需重启。
+enabled = true
+# API 端口。默认 7420。改了会怎样：需重启。
+port = 7420
+
+[honeypot]
+# 蜜罐总开关（唯一默认开启的数据面——诱捕面对攻击者暴露是产品语义）。
+# 改了会怎样：关闭后所有监听器停止，事件页不再有蜜罐命中。需重启。
+enabled = true
+
+# 监听表：每行 = 一个监听器（名称/端口/协议/启停）。
+# 协议取值：ssh | http | telnet | generic | mysql | redis（未知协议按 generic 处理）。
+# enabled = false 表示保留这行配置但不绑定端口（方便临时停一个）。
+# 默认只有下面四行高位端口；要监听 22/80/23 等标准端口需管理员身份运行。
+# 改了会怎样：任何改动（增删行/改端口/改启停）需重启。
+[[honeypot.listeners]]
+name = "ssh"
+port = 2222
+kind = "ssh"
+enabled = true
+
+[[honeypot.listeners]]
+name = "http"
+port = 8081
+kind = "http"
+enabled = true
+
+[[honeypot.listeners]]
+name = "telnet"
+port = 2323
+kind = "telnet"
+enabled = true
+
+[[honeypot.listeners]]
+name = "generic"
+port = 1337
+kind = "generic"
+enabled = true
+
+# 想抓数据库僵尸网络？取消注释即可（默认关闭——显式开启才算数）：
+# [[honeypot.listeners]]
+# name = "mysql"
+# port = 3307
+# kind = "mysql"
+# enabled = true
+
+# [[honeypot.listeners]]
+# name = "redis"
+# port = 6380
+# kind = "redis"
+# enabled = true
+
+[honeypot.shell]
+# SSH 假 Shell（中交互）：开启后 ssh 监听器认证通过即进入命令仿真会话，
+# 逐命令留痕进事件。白名单命令返回仿真结果，永不执行真实命令。
+# 默认 false。改了会怎样：需重启。
+enabled = false
+# 假 Shell 用户名/主机名（prompt 显示，让伪装更像你的环境）。改了会怎样：需重启。
+username = "deploy"
+hostname = "debian-11"
+# 单会话命令数上限（防自动化脚本无限挂会话刷事件），1-500。改了会怎样：需重启。
+max_commands = 50
+# SSH host key 路径；空 = <数据目录>/honeypot/hostkey.ed25519（首次自动生成并持久化）。
+host_key_path = ""
+# Telnet 假 Shell 独立开关（默认 false，banner 级行为不变）。改了会怎样：需重启。
+telnet_enabled = false
+
+[honeypot.credentials]
+# 凭证采集与本地喷洒检测（默认开）：蜜罐收到的用户名/口令对以 argon2id 加盐
+# 哈希落独立凭证库（口令明文永不落盘），与本机账号做同名比对。
+# 改了会怎样：关闭 = 不建凭证库、不发 credential_spray 事件。需重启。
+enabled = true
+# 本机账号快照刷新周期（秒）；0 = 仅启动时枚举一次。改了会怎样：热更。
+snapshot_interval_secs = 3600
+
+[honeypot.canary]
+# 蜜饵 canary（默认关）：HTTP 蜜罐内置 /backup.zip、/.git/config、/id_rsa、
+# /db.sql 诱饵资源（带水印 token），下载行为本身即高价值事件。
+# 改了会怎样：需重启。
+enabled = false
+# 水印密钥（任意非空字符串）；空 = 自动生成并落 <数据目录>/honeypot/canary.key。
+# 跨节点溯源：让 canary-decode 能解码，需配相同密钥或拷贝密钥文件。
+key = ""
+# 文件系统蜜饵绝对路径（仅 Linux v1，Windows 忽略并告警）。启动时：缺失则写入
+# 合成诱饵并监控读取（读取即告警）；已存在则拒绝该条（防止覆盖真实文件）。
+# 例：fs_paths = ["/srv/app/.env", "/opt/app/config.yml"]
+fs_paths = []
+
+[ai]
+# AI 慢路径分析（默认关）：把蜜罐证据交给大模型分析，产出带理由的封禁建议。
+# Key 不写在这里——存系统凭据管理器（GUI 设置页粘贴）或环境变量 AISAFEGUARD_AI_KEY。
+enabled = false
+# OpenAI 兼容端点（默认智谱 GLM；封闭内网可指向本地推理服务）。
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+model = "glm-4.7"
+# 自动应用建议（默认 false = 每条人工确认）。开启后也只做短 TTL 灰度 + 到期解封。
+auto_apply = false
+# 自动应用生效的最低严重度：low | medium | high | critical。
+auto_apply_min_severity = "high"
+# 自动分析间隔（秒），30-86400。热更。
+analyze_interval_secs = 900
+# 单条 payload 上送给 LLM 的最大字符数（40-2000，控制上送量）。热更。
+max_snippet_chars = 200
+# 误报抑制期（秒，默认 14 天）：标记过误报的来源，自动封禁/自动应用期间跳过。
+fp_suppress_secs = 1209600
+# 高严重度忽略抑制：设为 medium|high|critical 时该档以上 AI 自动应用不受误报
+# 抑制约束；空 = 不忽略（默认）。
+fp_ignore_min_severity = ""
+# 灰度执行：AI 建议应用时的默认封禁时长（秒），到期自动解封。
+trial_ttl_secs = 900
+# 转正时长（秒）：灰度规则经人工「转正」后的封禁时长。
+promote_ttl_secs = 2592000
+
+[detect]
+# 快路径频次检测（默认开）：端口扫描 / 暴力探测判定，阈值见下。热更。
+enabled = true
+# 触发后自动封禁（TTL 到期自动解封 + 内网地址永不封禁）。默认开。
+auto_block = true
+# 端口扫描判定：window_secs 内触达 ≥ N 个不同蜜罐端口。
+scan_distinct_ports = 5
+# 暴力探测判定：同一 (来源, 监听器) window_secs 内 ≥ N 次。
+bruteforce_hits = 10
+# 判定窗口（秒）。
+window_secs = 60
+# 自动封禁 TTL（秒），到期自动解封。
+ttl_secs = 1800
+
+[detect.capture]
+# 真实流量采样捕获（默认关：需要驱动/提权，是对本机网络面的行为）。需重启。
+enabled = false
+# control = 仅 TCP 纯 SYN 包头（元数据）| full = 全 TCP 段（流重组取证）。需重启。
+mode = "control"
+# 采样路径的端口扫描判定：window_secs 内对 ≥ N 个不同目标端口发 SYN。
+scan_distinct_ports = 15
+# Windows 驱动完整性校验：期望的 WinDivert64.sys SHA-256（hex 小写）；空 = 不校验。
+driver_sha256 = ""
+# SYN flood 判定：同一 (来源, 目标 IP:端口) window_secs 内 ≥ N 个 SYN。
+syn_flood_rate = 100
+window_secs = 60
+# 流表空闲回收（秒）。
+flow_idle_secs = 120
+# 流表容量上限（超限驱逐最旧流）。
+flow_table_cap = 65536
+
+[detect.l7]
+# L7 解析与指纹（仅 full 采样模式下产出；深检默认关）。热更。
+enabled = false
+# JA3 客户端指纹（TLS ClientHello）。
+ja3 = true
+# JA4 客户端指纹（FoxIO 规范）。
+ja4 = false
+
+[detect.rules]
+# 规则子集引擎（Suricata/ET 风格，默认关）。热更（文件变化整包热重载）。
+enabled = false
+# 本地规则包路径（单文件；任何一条不合法即整包拒绝，不加载半套规则）。
+# 示范包见仓库 crates/aisafeguard-rules/demo.rules。
+path = ""
+# 规则命中是否自动封禁（默认 false 只告警；仍受内网保护 + 误报抑制约束）。
+auto_block = false
+# 规则条数上限（整包校验）。
+max_rules = 5000
+
+[xdp]
+# XDP 快速执行层（默认关，仅 Linux，需 root/CAP_BPF）：内核收包路径直接丢弃，
+# 微秒级生效；nftables 永远兜底，附加失败自动降级。需重启。
+enabled = false
+# 附加 XDP 程序的网卡名。
+iface = "eth0"
+# skb（generic XDP，所有网卡可用）| native（驱动级，需网卡支持）。
+mode = "skb"
+
+[intel]
+# 威胁情报（默认关：对外网络请求）：abuse.ch Feodo C2 名单与本机观测交集。
+enabled = false
+# 高置信度 C2 情报自动封禁（TTL + 内网保护）。
+auto_block = true
+# 拉取间隔（秒）。
+interval_secs = 21600
+# 情报源地址（可指向自托管/镜像源）。
+feed_url = "https://feodotracker.abuse.ch/downloads/ipblocklist.txt"
+
+[fed]
+# 组织协同（默认关）：多节点经 mTLS 共享观测与建议。
+enabled = false
+# off | coordinator | agent。
+role = "off"
+# 节点名（[a-zA-Z0-9_-]{1,32}，需与签发证书时一致）。
+node = ""
+# agent 角色：协调者地址。
+coordinator = ""
+# quorum（默认 0 = 不启用）：>0 时独立节点数不足的 AI 建议不自动应用。
+min_peers = 0
+# agent 上报间隔（秒）。
+interval_secs = 60
+# coordinator 角色：/fed 面 mTLS 监听地址（独立于本地 API）。
+listen_addr = "0.0.0.0:7421"
+# 证书材料路径；空 = <数据目录>/fed/ 下的 ca.pem / cert.pem / key.pem。
+ca_path = ""
+cert_path = ""
+key_path = ""
+
+[syslog]
+# 远程日志转发（默认关）：事件总线 → RFC 5424 syslog（best-effort 不阻塞引擎）。
+enabled = false
+# 收集器地址。
+target = "127.0.0.1:514"
+# udp（RFC 5426）| tcp（每条一行分帧）。
+protocol = "udp"
+
+[notify]
+# 告警通知（默认关）：达到阈值的事件 POST JSON 到接收端。
+enabled = false
+# 接收端 URL（企业微信/钉钉/Slack 兼容网关或自建接收器）。
+url = ""
+# 最低转发严重度：error | warning | notice | info（含更严重者）。
+min_severity = "warning"
+# 请求超时（秒）。
+timeout_secs = 10
+
+[exposure]
+# 主机暴露面自动扫描间隔（秒）；0 = 关闭（手动扫描不受影响），300-86400 = 定时扫描并入库。
+auto_scan_secs = 0
+
+[ui]
+# 界面主题：deep_blue | light | warm | contrast。GUI 设置页可切换。
+theme = "deep_blue"
+# 全局字号缩放（0.85-1.6）。
+font_scale = 1.15

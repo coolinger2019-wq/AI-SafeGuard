@@ -8,7 +8,7 @@
 >
 > **切分决议(2026-09-29 可行性评估后)**:本文档拆为三个发布批次——**0.5.9 = 第一批(仿真深度:H101-H105 + H110 + H120)**、**0.5.10 = 第二批(情报价值:H200 + H210)**、**0.5.11 = 第三批(产品化与反识别:H300/H310/H320/H400)**。文件名保留 0.5.9(首个发布批次)。评估结论:九个任务中八个是现有架构的顺势扩展;唯一架构级新增是 H100 引入 russh(当前 "ssh" 蜜罐只发 banner 不说 SSH 协议)。三处范围修正已直接写进对应任务节,动工前不再另行讨论。
 >
-> **完成状态(2026-09-30)**:**0.5.9 批次全部完成并已发版**。H101 russh(ring 后端)过三道门 + paramiko 实连;H102 模块化 + interaction 事件字段 + 交互并发上限 8;H103 命令仿真层;H104 SSH 接线(host key 持久化/契约三同步);H110 MySQL+Redis 蜜罐;H120 Telnet 对齐;H105 验收(NEGATIVE-PATH §6/§7、THREAT_MODEL 蜜罐攻击面、demo-honeypot-deep.sh、replay-ssh-shell.py)。WSL2 实测:paramiko 全剧本、mysql 8.0.46 CLI、redis-cli 三协议实连全过,实测修复 3 个真 bug(run_stream spawn 语义 / verify-log --data-dir / MySQL 列定义 lenenc 编码),详见 CHANGELOG 0.5.9 与 LESSONS 0.5.9 批次。验收清单中「demo-attack.sh 假 Shell 段」以独立 demo-honeypot-deep.sh 交付(不污染原快路径演示);THREAT_MODEL 攻击面四条已入册。
+> **完成状态(2026-09-30)**:**0.5.9 批次全部完成并已发版;0.5.10 批次全部完成**(H130/H140/H150/H200/H210;Windows 实机端到端:credential_spray 事件/凭证库落库/蜜饵水印 canary-decode 溯源全通;GUI 纯手工验收待确认;Linux 文件蜜饵实机读取告警随发布验证)。H101 russh(ring 后端)过三道门 + paramiko 实连;H102 模块化 + interaction 事件字段 + 交互并发上限 8;H103 命令仿真层;H104 SSH 接线(host key 持久化/契约三同步);H110 MySQL+Redis 蜜罐;H120 Telnet 对齐;H105 验收(NEGATIVE-PATH §6/§7、THREAT_MODEL 蜜罐攻击面、demo-honeypot-deep.sh、replay-ssh-shell.py)。WSL2 实测:paramiko 全剧本、mysql 8.0.46 CLI、redis-cli 三协议实连全过,实测修复 3 个真 bug(run_stream spawn 语义 / verify-log --data-dir / MySQL 列定义 lenenc 编码),详见 CHANGELOG 0.5.9 与 LESSONS 0.5.9 批次。验收清单中「demo-attack.sh 假 Shell 段」以独立 demo-honeypot-deep.sh 交付(不污染原快路径演示);THREAT_MODEL 攻击面四条已入册。
 
 ---
 
@@ -131,9 +131,9 @@
 - 比对逻辑在独立模块 + 单测:绝不能让蜜罐事件携带真实本地账号哈希。
 
 **验收**
-- [ ] 用与本地用户名同名的账号访问蜜罐 → `credential_spray` 高严重事件,GUI 可见来源与证据链。
-- [ ] API 全字段扫描测试:任何接口不返回口令明文(自动化断言进测试套件)。
-- [ ] 凭证库落盘文件权限与掩码展示,实测记录进 NEGATIVE-PATH-TESTING.md。
+- [x] 用与本地用户名同名的账号访问蜜罐 → `credential_spray` 高严重事件,GUI 可见来源与证据链。
+- [x] API 全字段扫描测试:任何接口不返回口令明文(自动化断言进测试套件)。
+- [x] 凭证库落盘文件权限与掩码展示,实测记录进 NEGATIVE-PATH-TESTING.md（§8.1/§8.2;0600 为 Unix 断言,Windows 沿用目录 ACL）
 
 ### H210 Canary 文件(蜜饵)— 规模 M
 
@@ -156,9 +156,9 @@
 - 诱饵文件路径与文件名可配,避免与用户真实路径冲突(配置冲突时启动拒绝并提示)。
 
 **验收**
-- [ ] `curl http://127.0.0.1:8081/backup.zip` → 下载成功且事件含水印;`canary-decode` 还原投放信息。
+- [x] `curl http://127.0.0.1:8081/backup.zip` → 下载成功且事件含水印;`canary-decode` 还原投放信息（2026-09-30 Windows 实机端到端:token 还原节点/时间/资源,伪造 token 拒绝）
 - [ ] Linux 上读取诱饵文件 → 告警事件;Windows 降级行为文档化实测。
-- [ ] 负路径:诱饵被正常业务进程误读(可配抑制)不误报高频刷屏——沿用现有抑制机制。
+- [x] 负路径:诱饵被正常业务进程误读(可配抑制)不误报高频刷屏——沿用现有抑制机制(60s 去重窗口 + fp_feedback 兜底,NEGATIVE-PATH §8.6)。
 
 ---
 
@@ -179,7 +179,7 @@
 **验收**
 - [ ] 纯 GUI 操作:开假 Shell → 重启提示 → 重启 → 2222 进中交互(replay 脚本过)。
 - [ ] 纯 GUI 操作:加 redis 监听 → 重启 → redis-cli 实连。
-- [ ] 配置 roundtrip:GUI 保存的 toml 与手写等价(deny_unknown_fields 不炸)。
+- [x] 配置 roundtrip:GUI 保存的 toml 与手写等价(deny_unknown_fields 不炸;listener_enabled_roundtrip)。
 
 ### H140 示例配置文件 + 集成操作手册 — 规模 M
 
@@ -192,8 +192,8 @@
 
 **验收**
 - [ ] 全新用户只看手册 + GUI,不读代码,能开起假 Shell 并在事件页看到逐命令留痕。
-- [ ] `config.example.toml` 复制为 config.toml 后引擎可启动(自动化测试解析它)。
-- [ ] GUI 帮助页离线可看,中英文不混排,随版本号更新。
+- [x] `config.example.toml` 复制为 config.toml 后引擎可启动(自动化测试解析它)。
+- [x] GUI 帮助页离线可看,中英文不混排,随版本号更新。
 
 ### H150 GUI 与功能对齐审计 — 规模 M
 
@@ -205,9 +205,9 @@
 **红线**:不为对齐而把危险项塞进 GUI;审计是让能力可见,不是让所有东西都可点。
 
 **验收**
-- [ ] CONFIG-COVERAGE.md 覆盖率 100%(每个字段有一态)。
-- [ ] 抽查 3 个「此前 GUI 不可见」的功能,新用户仅凭界面可发现。
-- [ ] 蜜罐 Tab 能看出六协议各自的模式与状态。
+- [x] CONFIG-COVERAGE.md 覆盖率 100%(每个字段有一态)。
+- [x] 抽查 3 个「此前 GUI 不可见」的功能,新用户仅凭界面可发现。
+- [x] 蜜罐 Tab 能看出六协议各自的模式与状态。
 
 ---
 

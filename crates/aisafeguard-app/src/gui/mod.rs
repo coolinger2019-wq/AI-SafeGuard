@@ -2,6 +2,7 @@ mod ai_tab;
 mod dashboard;
 mod events_tab;
 mod firewall_tab;
+mod help_tab;
 mod honeypot_tab;
 mod settings_tab;
 pub(crate) mod theme;
@@ -38,6 +39,7 @@ enum Tab {
     Honeypot,
     Ai,
     Settings,
+    Help,
 }
 
 /// 设置页子页（0.5.8）：按功能域分页，替代单页长滚动。
@@ -296,6 +298,7 @@ impl AisafeApp {
                     (Tab::Honeypot, "◉  蜜罐"),
                     (Tab::Ai, "✦  AI 助手"),
                     (Tab::Settings, "⚙  设置"),
+                    (Tab::Help, "?  帮助"),
                 ];
                 for (tab, label) in tabs {
                     let selected = self.tab == tab;
@@ -411,6 +414,7 @@ impl eframe::App for AisafeApp {
                         Tab::Honeypot => self.honeypot_ui(ui),
                         Tab::Ai => self.ai_ui(ui),
                         Tab::Settings => self.settings_ui(ui),
+                        Tab::Help => self.help_ui(ui),
                     });
             });
 
