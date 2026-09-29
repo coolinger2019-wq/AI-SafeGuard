@@ -1,0 +1,15 @@
+[package]
+name = "aisafeguard-rules"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# pcre 选项用 rust regex 编译执行：线性时间引擎，天然免疫灾难回溯（ReDoS），
+# 配合 size_limit 上限对应子集规范「编译大小 ≤ 4KB」。
+regex = "1"
+sha2.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

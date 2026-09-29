@@ -5,6 +5,7 @@ members = [
     "crates/aisafeguard-store",
     "crates/aisafeguard-firewall",
     "crates/aisafeguard-l7",
+    "crates/aisafeguard-rules",
     "crates/aisafeguard-xdp",
     "crates/aisafeguard-honeypot",
     "crates/aisafeguard-ai",
@@ -28,6 +29,7 @@ aisafeguard-core = { path = "crates/aisafeguard-core" }
 aisafeguard-store = { path = "crates/aisafeguard-store" }
 aisafeguard-firewall = { path = "crates/aisafeguard-firewall" }
 aisafeguard-l7 = { path = "crates/aisafeguard-l7" }
+aisafeguard-rules = { path = "crates/aisafeguard-rules" }
 aisafeguard-xdp = { path = "crates/aisafeguard-xdp" }
 aisafeguard-honeypot = { path = "crates/aisafeguard-honeypot" }
 aisafeguard-ai = { path = "crates/aisafeguard-ai" }
