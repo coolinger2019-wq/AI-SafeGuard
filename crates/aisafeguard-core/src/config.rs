@@ -87,6 +87,49 @@ pub struct HoneypotConfig {
     pub credentials: CredentialConfig,
     /// 蜜饵 canary（0.5.10 H210）：默认关，显式开启
     pub canary: CanaryConfig,
+    /// 蜜罐模板（0.5.11 H300）：默认关，显式开启
+    pub templates: TemplatesConfig,
+    /// 反识别 banner/指纹参数（0.5.11 H320）：默认与内置值逐字节一致
+    pub fingerprint: FingerprintConfig,
+}
+
+/// 蜜罐模板（0.5.11 H300）：每个模板一个目录（template.toml + 资源文件），
+/// 描述一个假业务系统（页面/banner/敏感路径）。单模板解析失败只拒绝该模板，
+/// 不影响其他模板与内置默认（整包加载哲学的单模板化）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TemplatesConfig {
+    /// 默认关：模板会新增监听器（绑定端口），显式开启
+    pub enabled: bool,
+    /// 模板根目录；空 = <数据目录>/honeypot/templates
+    pub dir: String,
+}
+
+/// 反识别 banner/指纹参数（0.5.11 H320）：banner 全协议可配，默认取值与
+/// 0.5.9 内置值逐字节一致（升级零行为变化）。不承诺对抗主动交互式指纹
+/// 探测——协议行为差异不可能归零，文档明示残余风险（deployment.md）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FingerprintConfig {
+    /// SSH 版本串（协议第一行，发送时自动补 CRLF）
+    pub ssh_banner: String,
+    /// Telnet 问候语（按字面原样发送，含换行需自己写 \r\nr\r\nn）
+    pub telnet_greeting: String,
+    /// MySQL greeting 版本号
+    pub mysql_version: String,
+    /// HTTP Server 响应头
+    pub http_server: String,
+}
+
+impl Default for FingerprintConfig {
+    fn default() -> Self {
+        Self {
+            ssh_banner: "SSH-2.0-OpenSSH_9.6".into(),
+            telnet_greeting: "Welcome to Ubuntu 22.04 LTS\r\nlogin: ".into(),
+            mysql_version: "8.0.36".into(),
+            http_server: "nginx".into(),
+        }
+    }
 }
 
 /// 蜜饵 canary（0.5.10 H210）：HTTP 内置诱饵资源（/backup.zip 等带水印 token）
@@ -170,6 +213,8 @@ impl Default for HoneypotConfig {
             shell: ShellConfig::default(),
             credentials: CredentialConfig::default(),
             canary: CanaryConfig::default(),
+            templates: TemplatesConfig::default(),
+            fingerprint: FingerprintConfig::default(),
             listeners: vec![
                 ListenerConfig {
                     name: "ssh".into(),
@@ -690,6 +735,8 @@ impl AppConfig {
             || old.honeypot.shell != new.honeypot.shell
             || old.honeypot.credentials != new.honeypot.credentials
             || old.honeypot.canary != new.honeypot.canary
+            || old.honeypot.templates != new.honeypot.templates
+            || old.honeypot.fingerprint != new.honeypot.fingerprint
         {
             out.push("蜜罐监听");
         }
@@ -871,6 +918,13 @@ mod tests {
         assert!(!cfg.honeypot.canary.enabled);
         assert!(cfg.honeypot.canary.key.is_empty());
         assert!(cfg.honeypot.canary.fs_paths.is_empty());
+        // 模板默认关（0.5.11 H300 红线）：会新增监听器
+        assert!(!cfg.honeypot.templates.enabled);
+        assert!(cfg.honeypot.templates.dir.is_empty());
+        // 反识别参数默认与内置值逐字节一致（0.5.11 H320：升级零行为变化）
+        assert_eq!(cfg.honeypot.fingerprint.ssh_banner, "SSH-2.0-OpenSSH_9.6");
+        assert_eq!(cfg.honeypot.fingerprint.mysql_version, "8.0.36");
+        assert_eq!(cfg.honeypot.fingerprint.http_server, "nginx");
         // AI 默认人工确认
         assert!(!cfg.ai.enabled);
         assert!(!cfg.ai.auto_apply);

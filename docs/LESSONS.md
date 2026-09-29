@@ -241,3 +241,11 @@
 - **git 提交链里 `cargo test | grep` 会吞退出码**:`A | grep && B` 的
   条件是 grep 命中而非测试通过——提交链里用 `cargo test ... &&
   echo OK` 或看 `${PIPESTATUS[0]}`。
+
+## 0.5.10-0.5.11 批次
+
+1. **INSERT 增列必须重数占位符位置**：`INSERT INTO t (a, b, c) VALUES (1, 2, 'literal')` 这类带字面量的语句，往列清单中间插一列后，字面量按位置错位到别的列（status='pending' 写进了 reason 列），且 SQL 仍然合法、单测之外查不出。教训：增列后逐一对位或改用显式命名参数。
+2. **workspace 级 forbid(unsafe_code) 与「用 windows 系 crate 调 NetUserEnum」直接冲突**：路线图选型时没注意到 FFI 是 unsafe。落点改用 sysinfo（成熟维护库，内部封装 FFI，仅开 user 特性）——选型评审要过一遍「这条路的代码写出来能不能编译」而不只是"库存在"。
+3. **默认值收口单一来源**：MySQL 版本号同时存在 `const MYSQL_VERSION` 与 `[honeypot.fingerprint]` 默认值时，改一处漏一处。参数化后常量降级为 `#[cfg(test)]` 测试断言，生产唯一来源是配置默认值。
+4. **「默认值=内置值逐字节一致」要写成测试**：H320 改造 ssh/telnet/mysql/http 四个协议的对外标识，靠基线断言 `assert_eq!(fingerprint.ssh_banner, "SSH-2.0-OpenSSH_9.6")` + 既有 banner 字节回归测试兜住"升级零行为变化"，比人工比对可靠。
+5. **egui 0.36 起没有 markdown 渲染模块**（egui_extras 早期版本的 markdown feature 已移除），第三方 egui markdown crate 与 0.36 的兼容不可考。自渲染一个受控子集（标题/列表/粗体/行内代码/代码块）约百行，并用测试钉住手册只用该子集——比引一个半维护的渲染依赖更稳。

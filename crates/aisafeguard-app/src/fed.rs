@@ -289,6 +289,7 @@ async fn fed_proposals(
         }
         if let Ok(pid) = state.engine.store.insert_proposal(
             &format!("fed:{}", body.node),
+            "block",
             &valid.severity,
             &valid.direction,
             &valid.protocol,

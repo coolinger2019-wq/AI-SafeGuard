@@ -31,6 +31,8 @@
 | honeypot.canary.enabled | false | ✅ 蜜罐页 | 📄 | 📖 放置蜜饵 | H210 |
 | honeypot.canary.key | 空 | 🔒 | 📄 | 📖 | 运维项：默认自动生成密钥文件，跨节点场景才需要显式配置 |
 | honeypot.canary.fs_paths | 空 | 🔒 | 📄 | 📖 | 平台差异项（仅 Linux），路径是运维决策，不进 GUI |
+| honeypot.templates.enabled / dir | false / 空 | 🔒 | 📄 | 📖（部署指南 §2） | 运维项（0.5.11 H300）：模板是资产文件（html+toml），编辑器解决不了内容生产，目录约定见 deployment.md |
+| honeypot.fingerprint.ssh_banner / telnet_greeting / mysql_version / http_server | 内置默认 | 🔒 | 📄 | 📖（部署指南 §1） | 进阶参数（0.5.11 H320）：与真实环境服务版本强相关，逐环境不同，默认值=内置值零行为变化 |
 | ai.enabled | false | ✅ AI 页 | 📄 | 📖 开启 AI 分析 | |
 | ai.base_url / model | GLM | ✅ AI 页 | 📄 | 📖 | |
 | ai.auto_apply / auto_apply_min_severity | false / high | ✅ AI 页 | 📄 | 📖 | |

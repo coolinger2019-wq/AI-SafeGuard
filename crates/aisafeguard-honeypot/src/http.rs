@@ -88,6 +88,13 @@ pub fn is_decoy_path(path: &str) -> bool {
     matches_list(path, DECOY_PATHS)
 }
 
+/// 模板敏感路径前缀匹配（与 matches_list 同语义，适配 String 列表）
+fn path_in_list(path: &str, list: &[String]) -> bool {
+    let lower = path.to_ascii_lowercase();
+    list.iter()
+        .any(|p| lower == *p || lower.starts_with(&format!("{p}/")))
+}
+
 fn matches_list(path: &str, list: &[&str]) -> bool {
     let lower = path.to_ascii_lowercase();
     list.iter()
@@ -193,9 +200,14 @@ fn url_decode(text: &str) -> String {
 }
 
 /// 从 POST body 提取一对凭证（0.5.10 H200）：form `k=v&k=v` 形态按词边界找
-/// 用户名键与密码键；值解码清洗截断。用户名与密码都拿到才算一对——
-/// 没有口令的表单提交不是凭证（用户名仍会出现在脱敏 payload 里）。
-pub(crate) fn extract_form_credentials(body: &[u8]) -> Option<crate::cred::RawCredential> {
+/// 用户名键与密码键（模板可追加自定义键名，H300）；值解码清洗截断。
+/// 用户名与密码都拿到才算一对——没有口令的表单提交不是凭证（用户名仍会
+/// 出现在脱敏 payload 里）。
+pub(crate) fn extract_form_credentials(
+    body: &[u8],
+    extra_user_keys: &[String],
+    extra_pass_keys: &[String],
+) -> Option<crate::cred::RawCredential> {
     let text = String::from_utf8_lossy(body);
     let mut username = None;
     let mut password = None;
@@ -204,16 +216,20 @@ pub(crate) fn extract_form_credentials(body: &[u8]) -> Option<crate::cred::RawCr
             continue;
         };
         let key = key.trim().to_ascii_lowercase();
-        let take = |keys: &[&str]| keys.iter().any(|k| {
+        let take = |keys: Vec<&str>| keys.iter().any(|k| {
             let kc: Vec<char> = k.chars().collect();
             let lc: Vec<char> = key.chars().collect();
             lc.starts_with(&kc)
                 && boundary_before(&lc, 0)
                 && boundary_after(&lc, kc.len())
         });
-        if password.is_none() && take(SECRET_KEYS) {
+        let mut all_pass: Vec<&str> = SECRET_KEYS.to_vec();
+        all_pass.extend(extra_pass_keys.iter().map(|s| s.as_str()));
+        let mut all_user: Vec<&str> = USERNAME_KEYS.to_vec();
+        all_user.extend(extra_user_keys.iter().map(|s| s.as_str()));
+        if password.is_none() && take(all_pass.clone()) {
             password = Some(sanitize(url_decode(value).as_bytes(), 128));
-        } else if username.is_none() && take(USERNAME_KEYS) {
+        } else if username.is_none() && take(all_user.clone()) {
             username = Some(sanitize(url_decode(value).as_bytes(), 128));
         }
         if username.is_some() && password.is_some() {
@@ -264,9 +280,13 @@ fn generic_page() -> String {
         .into()
 }
 
+/// HTTP 会话。canary（H210）/模板（H300）/Server 头（H320）均为可选上下文，
+/// 未提供时行为与 0.5.8 内置默认逐字节一致。
 pub(crate) async fn http_session(
     s: &mut TcpStream,
     canary: Option<&crate::canary::CanaryState>,
+    tpl: Option<&crate::templates::HttpTemplate>,
+    server: &str,
 ) -> std::io::Result<SessionOutcome> {
     let mut buf = read_http_request(s).await?;
     let head_text = String::from_utf8_lossy(&buf).to_string();
@@ -295,9 +315,14 @@ pub(crate) async fn http_session(
 
     // 诱饵路由（F11 + H210 蜜饵优先）：登录路径 → 假登录页；蜜饵路径 → 带水印
     // 诱饵文件；其余诱饵 → 受限页；未匹配 → 通用假页
+    // 诱饵路由（F11 + H210 蜜饵 + H300 模板）：
+    // 模板监听器：蜜饵 > 模板敏感路径(403) > 模板页面(其余全部路径)；
+    // 内置监听器：登录路径 → 假登录页；蜜饵 → 带水印诱饵；其余诱饵 → 受限页；未匹配 → 通用假页
     let is_post = method == "POST";
-    let login = hint.is_some() && is_login_path(&path);
-    let decoy = hint.is_some() && is_decoy_path(&path);
+    let login = hint.is_some() && tpl.is_none() && is_login_path(&path);
+    let tpl_decoy = hint.is_some()
+        && tpl.as_ref().is_some_and(|t| path_in_list(&path, &t.decoy_paths));
+    let decoy = hint.is_some() && tpl.is_none() && is_decoy_path(&path);
     let canary_hit = if hint.is_some() {
         canary_response(&path, canary)
     } else {
@@ -305,18 +330,33 @@ pub(crate) async fn http_session(
     };
     let (status, ctype, body): (&[u8], &str, Vec<u8>) = if hint.is_none() {
         (b"HTTP/1.1 404 Not Found\r\n".as_slice(), "text/html; charset=utf-8", Vec::new())
+    } else if let Some((ctype, content)) = &canary_hit {
+        (
+            b"HTTP/1.1 200 OK\r\n".as_slice(),
+            *ctype,
+            content.clone().into_bytes(),
+        )
+    } else if let Some(t) = tpl {
+        // 模板页面：敏感路径 403 诱饵页，其余一律返回模板页面（假业务系统形态）
+        if tpl_decoy {
+            (
+                b"HTTP/1.1 403 Forbidden\r\n".as_slice(),
+                "text/html; charset=utf-8",
+                decoy_page().into_bytes(),
+            )
+        } else {
+            (
+                b"HTTP/1.1 200 OK\r\n".as_slice(),
+                "text/html; charset=utf-8",
+                t.page.clone().into_bytes(),
+            )
+        }
     } else if login {
         let page = login_page(&path, is_post);
         (
             b"HTTP/1.1 200 OK\r\n".as_slice(),
             "text/html; charset=utf-8",
             page.into_bytes(),
-        )
-    } else if let Some((ctype, content)) = &canary_hit {
-        (
-            b"HTTP/1.1 200 OK\r\n".as_slice(),
-            *ctype,
-            content.clone().into_bytes(),
         )
     } else if decoy {
         (
@@ -333,7 +373,7 @@ pub(crate) async fn http_session(
     };
     s.write_all(
         format!(
-            "{}Content-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\nServer: nginx\r\n\r\n",
+            "{}Content-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\nServer: {server}\r\n\r\n",
             String::from_utf8_lossy(status),
             body.len()
         )
@@ -355,6 +395,12 @@ pub(crate) async fn http_session(
     } else if canary_hit.is_some() {
         // 蜜饵下载是比「端口被碰」强得多的信号，标签可辨识
         tags.push("canary".into());
+    } else if tpl.is_some() {
+        // 模板页面命中（H300）：区分于内置诱饵
+        tags.push("template".into());
+        if tpl_decoy {
+            tags.push("decoy".into());
+        }
     } else if decoy {
         tags.push("decoy".into());
     }
@@ -368,13 +414,22 @@ pub(crate) async fn http_session(
         l7::request_summary(&text, "空 HTTP 请求"),
         l7::tags_suffix(&tags)
     );
-    // 凭证采集（H200）：登录路径的 POST body 提取 用户名/口令 对——
-    // 提取发生在 redact_secrets 之前，payload 落库仍是脱敏后的 ***
-    let credentials = if is_post && login
-        && let Some(start) = body_start
-        && let Some(raw) = extract_form_credentials(&buf[start..])
-    {
-        vec![raw]
+    // 凭证采集（H200）：登录/模板路径的 POST body 提取 用户名/口令 对——
+    // 提取发生在 redact_secrets 之前，payload 落库仍是脱敏后的 ***。
+    // 模板的表单字段名追加进内置键名表（H300）
+    let tpl_cred = tpl.is_some() && hint.is_some();
+    let cred_body = if is_post && (login || tpl_cred) {
+        body_start
+    } else {
+        None
+    };
+    let credentials = if let Some(start) = cred_body {
+        match tpl {
+            Some(t) => extract_form_credentials(&buf[start..], &t.user_keys, &t.pass_keys),
+            None => extract_form_credentials(&buf[start..], &[], &[]),
+        }
+        .map(|raw| vec![raw])
+        .unwrap_or_default()
     } else {
         Vec::new()
     };

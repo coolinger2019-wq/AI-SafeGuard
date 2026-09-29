@@ -45,7 +45,7 @@ sudo bash scripts/demo-attack.sh   # 或一键演示(含自动封禁与哈希链
 - **深检默认全关**:`[detect.capture]`、`[detect.l7]`、`[detect.rules]`、`[xdp]` 默认 enabled=false,需显式开启
 - **规则引擎默认只告警**:命中只产事件,自动封禁需显式 `auto_block = true`(仍受内网保护约束)
 - **蜜罐中交互默认关**:`[honeypot.shell]`(SSH 假 Shell)与 `telnet_enabled`(Telnet 假 Shell)默认 enabled=false,显式开启;MySQL/Redis 蜜罐默认不在监听表,显式配置 kind 即开启(GUI 监听表可加);蜜饵 canary 默认关(`[honeypot.canary]`:HTTP 内置诱饵资源 + Linux 文件蜜饵,Windows 文件蜜饵降级不启用)
-- **假 Shell 是仿真不是真机**:白名单命令 + 静态假文件系统,永不 fork 真实进程;指纹可被主动探测识别(反识别加固归 0.5.11),russh 客户端自连存在上游兼容问题(paramiko/OpenSSH 不受影响,[NEGATIVE-PATH §6](docs/NEGATIVE-PATH-TESTING.md))
+- **假 Shell 是仿真不是真机**:白名单命令 + 静态假文件系统,永不 fork 真实进程;反识别只做成本可接受的混淆(banner/版本可配 + 模板,见 [deployment.md](docs/deployment.md)),不承诺对抗主动交互式指纹探测;russh 客户端自连存在上游兼容问题(paramiko/OpenSSH 不受影响,[NEGATIVE-PATH §6](docs/NEGATIVE-PATH-TESTING.md))
 - **eBPF 流表/XDP 仅 Linux**;Windows 无 eBPF 依赖,能力对等由用户态实现(纯用户态,行为构造性一致)
 - AI 是概率性的:默认人工确认;自动应用 = 可选开关 + 严重度阈值 + 灰度 TTL(到期自动解封)
 - 内网/回环地址永不自动封(硬编码,手动封不禁);误报抑制期内自动封禁跳过
@@ -56,7 +56,7 @@ sudo bash scripts/demo-attack.sh   # 或一键演示(含自动封禁与哈希链
 
 ## 当前能力
 
-- **蜜罐**:六种协议——SSH/HTTP/Telnet/通用 低交互(HTTP 假登录页 + 敏感路径诱饵,POST 密码字段脱敏)+ **SSH 假 Shell 中交互**(`[honeypot.shell]` 默认关:任意凭证放行 → 白名单命令仿真(whoami/uname/ls/cat/ps/netstat/wget 等)→ 静态假文件系统 → 逐命令 interaction 留痕)+ **Telnet 假 Shell**(独立开关)+ **MySQL/Redis 蜜罐**(显式配置监听即开启:握手采集、SELECT 空结果集/SHOW 假数据、RESP 假响应、AUTH 口令脱敏);交互会话独立并发上限(8)防资源耗尽;GUI 事件详情可展开交互序列;**凭证采集与喷洒检测**(`[honeypot.credentials]` 默认开:五协议用户名/口令对 argon2id 加盐哈希入独立凭证库(0600),口令明文永不落盘;与本机账号同名比对 → credential_spray 高严重度事件,跨协议同口令 → credential_reuse 聚合告警);**蜜饵 canary**(`[honeypot.canary]` 默认关:HTTP 诱饵资源带水印 token,`aisafeguard canary-decode <token>` 离线溯源;Linux 文件蜜饵读取即告警);**GUI 监听表编辑器 + 假 Shell 开关**(设置页直接操作,监听器卡片显示交互模式)
+- **蜜罐**:六种协议——SSH/HTTP/Telnet/通用 低交互(HTTP 假登录页 + 敏感路径诱饵,POST 密码字段脱敏)+ **SSH 假 Shell 中交互**(`[honeypot.shell]` 默认关:任意凭证放行 → 白名单命令仿真(whoami/uname/ls/cat/ps/netstat/wget 等)→ 静态假文件系统 → 逐命令 interaction 留痕)+ **Telnet 假 Shell**(独立开关)+ **MySQL/Redis 蜜罐**(显式配置监听即开启:握手采集、SELECT 空结果集/SHOW 假数据、RESP 假响应、AUTH 口令脱敏);交互会话独立并发上限(8)防资源耗尽;GUI 事件详情可展开交互序列;**凭证采集与喷洒检测**(`[honeypot.credentials]` 默认开:五协议用户名/口令对 argon2id 加盐哈希入独立凭证库(0600),口令明文永不落盘;与本机账号同名比对 → credential_spray 高严重度事件,跨协议同口令 → credential_reuse 聚合告警);**蜜饵 canary**(`[honeypot.canary]` 默认关:HTTP 诱饵资源带水印 token,`aisafeguard canary-decode <token>` 离线溯源;Linux 文件蜜饵读取即告警);**GUI 监听表编辑器 + 假 Shell 开关**(设置页直接操作,监听器卡片显示交互模式);**蜜罐模板**(`[honeypot.templates]` 默认关:模板目录放 html+toml 即新增假业务监听器,单模板损坏只拒绝该模板,内容热重载);**反识别参数**(`[honeypot.fingerprint]`:SSH 版本串/Telnet 问候语/MySQL 版本/HTTP Server 头全协议可配,默认值=内置值零行为变化);**AI 慢路径蜜罐上下文**(假 Shell 逐命令/掩码凭证+喷洒命中/蜜饵命中/JA3-JA4 指纹进 AI 请求;建议 schema 新增 credential_spray 观察类动作,仅人工确认,不自动处置)
 - **快路径检测**:频次引擎(扫描/暴破)+ 采样捕获检测器(端口扫描/SYN flood),触发即自动封禁——TTL 到期自动解封,内网/回环永不自动封
 - **流量采样捕获**(默认关闭):WinDivert(Windows)/ AF_PACKET(Linux)被动采样只取副本,control 只看 SYN 元数据、full 带流重组取证(载荷仅可疑时截断留存);可选驱动哈希校验;[Windows 实机验证](docs/WINDOWS-CAPTURE-TESTING.md) / [Linux](docs/LINUX-TESTING.md)
 - **L7 解析与指纹**(`[detect.l7]`,默认关闭):HttpHint(method/path/UA,蜜罐与采样共用同一解析)+ JA3/JA4 客户端指纹(JA4 对齐 FoxIO 官方算法),full 模式重组流前缀解析,字段随 Detection 事件入库;HTTPS 站点经由 JA3/JA4 的 SNI 扩展体现,无独立 SNI 域名字段

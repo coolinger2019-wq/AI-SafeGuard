@@ -72,6 +72,19 @@ AI-SafeGuard 是一台装在你自己电脑上的**终端入侵诱捕与自动�
 
 「设置 → 蜜罐 → 蜜饵 canary」勾选启用：HTTP 蜜罐会开始内置 `/backup.zip`、`/id_rsa` 等诱饵资源，谁下载谁就会留下带水印的事件。想埋文件系统蜜饵（谁读文件谁告警），在 `config.toml` 的 `[honeypot.canary].fs_paths` 里写绝对路径（仅 Linux）。诱饵内容里的水印 token，外传后用 `aisafeguard canary-decode <token>` 可还原来源节点与投放时间。
 
+### 做一个假业务系统（模板）
+
+想伪装成 Grafana、公司 OA 或任何登录页？在模板目录里放一个文件夹：
+一个 `template.toml`（协议、端口、表单字段名、敏感路径）加一个 `page.html`，
+重启后就多了一个对应的蜜罐监听器。单模板写坏了只会拒绝那一个并告警；
+改了页面内容约 5 秒自动热重载。目录约定与完整字段见 `docs/deployment.md`。
+
+### 改对外标识（banner）
+
+`config.toml` 的 `[honeypot.fingerprint]` 里可以改 SSH 版本串、Telnet 问候语、
+MySQL 版本、HTTP Server 头——建议抄你环境里真实服务的版本。改得好能降低被
+指纹库认出的概率，但不承诺对抗主动探测（详见 `docs/deployment.md`）。
+
 ### 开启 AI 分析
 
 「设置 → AI 分析」勾选启用，填 OpenAI 兼容地址与模型名，Key 存到系统凭据管理器（不写进配置文件）。分析默认按间隔轮询；建议默认人工确认。内网无外联也可用：把地址指向本地推理服务即可。

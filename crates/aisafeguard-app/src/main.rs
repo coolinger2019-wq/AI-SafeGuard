@@ -89,7 +89,7 @@ use aisafeguard_core::event::{EventBus, SecurityEvent};
 // secrets 只在 Windows 凭据管理器分支用到（Linux 落文件，见 load_or_create_token）
 #[cfg(windows)]
 use aisafeguard_core::secrets;
-use aisafeguard_store::Store;
+use aisafeguard_store::{CredentialStore, Store};
 use console::Console;
 use engine::EngineHandle;
 
@@ -630,6 +630,10 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
         bus.publish(SecurityEvent::engine("info", "蜜罐功能已禁用"));
     }
 
+    // 凭证库（0.5.10 H200）：与主库同级的独立文件，启动失败按配置错误处理
+    let credentials = Arc::new(CredentialStore::open(
+        &cfg.data_dir().join("honeypot").join("credentials.db"),
+    )?);
     let engine = Arc::new(EngineHandle {
         cfg: RwLock::new(cfg.clone()),
         cfg_path: cfg_path.clone(),
@@ -646,6 +650,7 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
         ai_running: Arc::new(AtomicBool::new(false)),
         honeypot,
         local_accounts: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
+        credentials,
         token,
         version: VERSION,
     });

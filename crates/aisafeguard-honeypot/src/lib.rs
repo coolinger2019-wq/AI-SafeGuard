@@ -16,6 +16,7 @@ mod mysql;
 mod protocol;
 mod redis;
 pub mod shell;
+mod templates;
 
 use std::time::Duration;
 

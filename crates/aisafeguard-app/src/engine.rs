@@ -156,6 +156,8 @@ pub struct EngineHandle {
     /// 本机账号名快照（0.5.10 H200）：小写用户名集合，快照任务写、凭证任务读；
     /// 只存用户名，绝不触碰真实口令数据
     pub local_accounts: Arc<RwLock<std::collections::HashSet<String>>>,
+    /// 凭证库（0.5.10 H200）：AI 慢路径上下文也要读（H310 只取掩码形态）
+    pub credentials: Arc<CredentialStore>,
     pub token: String,
     pub version: &'static str,
 }
@@ -497,6 +499,11 @@ impl EngineHandle {
             .store
             .get_proposal(id)?
             .ok_or_else(|| Error::Store(format!("建议 #{id} 不存在")))?;
+        if p.action == "credential_spray" {
+            return Err(Error::Store(
+                "观察类建议（credential_spray）不走防火墙，请用「确认战役」".into(),
+            ));
+        }
         if p.status != "pending" {
             return Err(Error::Store(format!(
                 "建议 #{id} 状态为 {}，无法应用",
@@ -634,6 +641,34 @@ impl EngineHandle {
             ),
         ));
         Ok((dismissed, removed))
+    }
+
+    /// 确认凭证喷洒战役（0.5.11 H310）：credential_spray 类建议的人工确认入口。
+    /// 不是封禁——登记为「已确认进入观察」（灰度 TTL 到期后自然淡出 AI 上下文），
+    /// 并广播 ProposalApplied 留痕。
+    pub fn confirm_campaign(&self, id: i64) -> Result<()> {
+        let p = self
+            .store
+            .get_proposal(id)?
+            .ok_or_else(|| Error::Store(format!("建议 #{id} 不存在")))?;
+        if p.action != "credential_spray" {
+            return Err(Error::Store(
+                "只有 credential_spray 类建议使用「确认战役」".into(),
+            ));
+        }
+        if p.status != "pending" {
+            return Err(Error::Store(format!(
+                "建议 #{id} 状态为 {}，无法确认",
+                p.status
+            )));
+        }
+        self.store.set_proposal_status(id, "applied", None)?;
+        self.bus.publish(SecurityEvent::ProposalApplied {
+            ts: now_ts(),
+            proposal_id: id,
+            rule_name: format!("凭证喷洒战役观察: {}", p.remote_ip),
+        });
+        Ok(())
     }
 
     /// 清除某来源的误报抑制（0.4.0 B3）：删除后该来源恢复自动封禁资格并留痕。
@@ -1056,18 +1091,7 @@ pub fn spawn_credential_task(eng: &Arc<EngineHandle>) {
     let eng = Arc::clone(eng);
     let rt = eng.rt.clone();
     rt.spawn(async move {
-        let cred_store = match CredentialStore::open(
-            &eng.config().data_dir().join("honeypot").join("credentials.db"),
-        ) {
-            Ok(v) => v,
-            Err(e) => {
-                eng.bus.publish(SecurityEvent::engine(
-                    "error",
-                    format!("凭证库初始化失败,凭证采集与喷洒检测停用: {e}"),
-                ));
-                return;
-            }
-        };
+        let cred_store = Arc::clone(&eng.credentials);
         // 本地账号快照：启动立即枚举一次，之后按 [honeypot.credentials].
         // snapshot_interval_secs 周期刷新（0 = 仅启动一次）；只取用户名集合
         {
@@ -1637,6 +1661,85 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
             .collect::<Vec<_>>()
     )
     .to_string();
+    // 蜜罐上下文增强（0.5.11 H310）：有则附带，无则不阻塞——
+    // ① 中交互会话逐命令序列
+    let interactions_json = serde_json::json!(
+        hits.iter()
+            .filter(|h| !h.interaction.is_empty())
+            .take(3)
+            .map(|h| {
+                let commands: Vec<String> = serde_json::from_str::<
+                    Vec<aisafeguard_core::event::ShellStep>,
+                >(&h.interaction)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|s| truncate(&s.command, 200))
+                .collect();
+                serde_json::json!({
+                    "ts": h.ts,
+                    "remote_ip": h.remote_ip,
+                    "listener": h.listener,
+                    "commands": commands,
+                })
+            })
+            .collect::<Vec<_>>()
+    )
+    .to_string();
+    let interactions_json = if interactions_json == "[]" { None } else { Some(interactions_json) };
+    // ② 凭证尝试（口令只以掩码出现；spray 标记 = 用户名与本机账号同名）
+    let accounts = eng.local_accounts.read().expect("账号快照锁").clone();
+    let credentials_json = match eng.credentials.recent(now_ts() - 86_400, 20) {
+        Ok(rows) if !rows.is_empty() => {
+            let json = serde_json::json!(
+                rows.iter()
+                    .map(|c| serde_json::json!({
+                        "remote_ip": c.remote_ip,
+                        "username": c.username,
+                        "password": if c.has_password { "***" } else { "(no password)" },
+                        "spray_hit": accounts.contains(&c.username.to_lowercase()),
+                    }))
+                    .collect::<Vec<_>>()
+            )
+            .to_string();
+            Some(json)
+        }
+        _ => None,
+    };
+    // ③ 蜜饵水印命中
+    let canary_json = {
+        let rows: Vec<serde_json::Value> = hits
+            .iter()
+            .filter(|h| h.listener == "canary-fs" || h.summary.contains("canary"))
+            .take(10)
+            .map(|h| {
+                serde_json::json!({
+                    "ts": h.ts,
+                    "remote_ip": h.remote_ip,
+                    "summary": truncate(&h.summary, 200),
+                })
+            })
+            .collect();
+        if rows.is_empty() { None } else { Some(serde_json::json!(rows).to_string()) }
+    };
+    // ④ JA3/JA4 指纹（l7 开启且有指纹事件才出现）
+    let fingerprints_json = match eng.store.recent_events(50, None) {
+        Ok(rows) => {
+            let fps: Vec<serde_json::Value> = rows
+                .iter()
+                .filter(|r| r.kind == "detection" && !r.tls_fp.is_empty())
+                .take(10)
+                .map(|r| {
+                    serde_json::json!({
+                        "remote_ip": r.remote_ip,
+                        "ja3": r.tls_fp,
+                        "ja4": r.tls_ja4,
+                    })
+                })
+                .collect();
+            if fps.is_empty() { None } else { Some(serde_json::json!(fps).to_string()) }
+        }
+        Err(_) => None,
+    };
     let stats_json = serde_json::to_string(&stats).unwrap_or_default();
     // 30 分钟内扫过暴露面 → 一并送评
     let exposure_json = eng
@@ -1695,6 +1798,10 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                 flows: flows_json.as_deref(),
                 feedback: feedback_json.as_deref(),
                 self_endpoints: Some(&self_endpoints_json),
+                interactions: interactions_json.as_deref(),
+                credentials: credentials_json.as_deref(),
+                canary: canary_json.as_deref(),
+                fingerprints: fingerprints_json.as_deref(),
             }),
         )
         .await;
@@ -1714,6 +1821,7 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                     }
                     let Ok(pid) = eng.store.insert_proposal(
                         &cfg.ai.model,
+                        &p.action,
                         &p.severity,
                         &p.direction,
                         &p.protocol,
@@ -1769,7 +1877,10 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                             Err(_) => true,
                         }
                     };
-                    if cfg.ai.auto_apply
+                    // AI 不自动处置红线：观察类建议（credential_spray）只等人确认，
+                    // 自动应用只作用于 block
+                    if p.action == "block"
+                        && cfg.ai.auto_apply
                         && severity_ok
                         && quorum_ok
                         && (ignore_fp || !fp_suppressed)
@@ -1872,6 +1983,10 @@ impl Console for EmbeddedConsole {
 
     fn remove_rule(&self, id: i64) -> anyhow::Result<()> {
         self.0.remove_rule(id).map_err(anyhow::Error::msg)
+    }
+
+    fn confirm_campaign(&self, id: i64) -> anyhow::Result<()> {
+        self.0.confirm_campaign(id).map_err(anyhow::Error::msg)
     }
 
     fn apply_proposal(&self, id: i64) -> anyhow::Result<RuleRow> {

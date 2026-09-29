@@ -109,6 +109,29 @@ key = ""
 # 例：fs_paths = ["/srv/app/.env", "/opt/app/config.yml"]
 fs_paths = []
 
+[honeypot.templates]
+# 蜜罐模板（0.5.11 H300，默认关）：把「假业务系统」做成可配置资产——每个模板
+# 一个目录（template.toml + 资源文件），描述页面/表单字段/banner/敏感路径，
+# 由加载器生成对应监听器。不改一行代码即可新增假 Grafana/假 OA 登录页。
+# 单模板损坏只拒绝该模板（告警），不影响其他模板与内置默认；模板内容变更
+# 自动热重载（增删模板需重启）。
+# 改了会怎样：需重启。
+enabled = false
+# 模板根目录；空 = <数据目录>/honeypot/templates。目录约定见 docs/deployment.md。
+dir = ""
+
+[honeypot.fingerprint]
+# 反识别 banner/指纹参数（0.5.11 H320）：默认与内置值逐字节一致（升级零行为
+# 变化）。改成贴近你环境真实服务的版本，降低被指纹库标记的概率。
+# SSH 协议版本串（发送时自动补 CRLF）。
+ssh_banner = "SSH-2.0-OpenSSH_9.6"
+# Telnet 问候语（按字面原样发送，换行要自己写转义）。
+telnet_greeting = "Welcome to Ubuntu 22.04 LTS\r\nlogin: "
+# MySQL greeting 版本号。
+mysql_version = "8.0.36"
+# HTTP Server 响应头。
+http_server = "nginx"
+
 [ai]
 # AI 慢路径分析（默认关）：把蜜罐证据交给大模型分析，产出带理由的封禁建议。
 # Key 不写在这里——存系统凭据管理器（GUI 设置页粘贴）或环境变量 AISAFEGUARD_AI_KEY。

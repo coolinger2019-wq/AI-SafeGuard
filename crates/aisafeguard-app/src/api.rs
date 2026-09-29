@@ -32,6 +32,7 @@ pub async fn serve(engine: Arc<EngineHandle>) {
         .route("/api/rules/{id}/promote", post(promote_rule))
         .route("/api/proposals", get(list_proposals))
         .route("/api/proposals/{id}/apply", post(apply_proposal))
+        .route("/api/proposals/{id}/confirm", post(confirm_campaign))
         .route("/api/proposals/{id}/dismiss", post(dismiss_proposal))
         .route(
             "/api/feedback",
@@ -198,6 +199,14 @@ async fn list_proposals(State(s): State<AppState>) -> Response {
 async fn apply_proposal(State(s): State<AppState>, Path(id): Path<i64>) -> Response {
     match s.engine.apply_proposal(id) {
         Ok(row) => Json(row).into_response(),
+        Err(e) => err_resp(e),
+    }
+}
+
+/// H310：确认凭证喷洒战役（人工确认，非封禁动作）
+async fn confirm_campaign(State(s): State<AppState>, Path(id): Path<i64>) -> Response {
+    match s.engine.confirm_campaign(id) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => err_resp(e),
     }
 }

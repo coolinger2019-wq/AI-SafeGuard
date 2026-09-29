@@ -90,6 +90,8 @@ pub struct ProposalRow {
     pub created_ts: i64,
     pub model: String,
     pub severity: String,
+    /// 建议动作：block（封禁）| credential_spray（确认凭证喷洒战役，0.5.11 H310）
+    pub action: String,
     pub direction: String,
     pub protocol: String,
     pub remote_ip: String,
@@ -214,6 +216,7 @@ CREATE TABLE IF NOT EXISTS proposals (
     created_ts      INTEGER NOT NULL,
     model           TEXT NOT NULL DEFAULT '',
     severity        TEXT NOT NULL,
+    action          TEXT NOT NULL DEFAULT 'block',
     direction       TEXT NOT NULL,
     protocol        TEXT NOT NULL,
     remote_ip       TEXT NOT NULL DEFAULT '',
@@ -351,6 +354,7 @@ impl Store {
             "ALTER TABLE events ADD COLUMN tls_ja4 TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE rules ADD COLUMN promoted INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE events ADD COLUMN interaction TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE proposals ADD COLUMN action TEXT NOT NULL DEFAULT 'block'",
         ] {
             let _ = conn.execute(sql, []); // 列已存在时报错，忽略
         }
@@ -914,6 +918,7 @@ impl Store {
     pub fn insert_proposal(
         &self,
         model: &str,
+        action: &str,
         severity: &str,
         direction: &str,
         protocol: &str,
@@ -925,11 +930,12 @@ impl Store {
     ) -> Result<i64> {
         self.lock()?
             .execute(
-                "INSERT INTO proposals (created_ts, model, severity, direction, protocol, remote_ip, local_port, ttl_secs, reason, status, analysis)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', ?10)",
+                "INSERT INTO proposals (created_ts, model, action, severity, direction, protocol, remote_ip, local_port, ttl_secs, reason, status, analysis)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending', ?11)",
                 params![
                     aisafeguard_core::now_ts(),
                     model,
+                    action,
                     severity,
                     direction,
                     protocol,
@@ -950,11 +956,11 @@ impl Store {
         let conn = self.lock()?;
         let sql = match status {
             Some(_) => {
-                "SELECT id, created_ts, model, severity, direction, protocol, remote_ip, local_port, reason, status, applied_rule_id, analysis, ttl_secs
+                "SELECT id, created_ts, model, action, severity, direction, protocol, remote_ip, local_port, reason, status, applied_rule_id, analysis, ttl_secs
                  FROM proposals WHERE status = ?1 ORDER BY id DESC LIMIT ?2"
             }
             None => {
-                "SELECT id, created_ts, model, severity, direction, protocol, remote_ip, local_port, reason, status, applied_rule_id, analysis, ttl_secs
+                "SELECT id, created_ts, model, action, severity, direction, protocol, remote_ip, local_port, reason, status, applied_rule_id, analysis, ttl_secs
                  FROM proposals ORDER BY id DESC LIMIT ?2"
             }
         };
@@ -965,16 +971,17 @@ impl Store {
                     id: r.get(0)?,
                     created_ts: r.get(1)?,
                     model: r.get(2)?,
-                    severity: r.get(3)?,
-                    direction: r.get(4)?,
-                    protocol: r.get(5)?,
-                    remote_ip: r.get(6)?,
-                    local_port: r.get(7)?,
-                    reason: r.get(8)?,
-                    status: r.get(9)?,
-                    applied_rule_id: r.get(10)?,
-                    analysis: r.get(11)?,
-                    ttl_secs: r.get(12)?,
+                    action: r.get(3)?,
+                    severity: r.get(4)?,
+                    direction: r.get(5)?,
+                    protocol: r.get(6)?,
+                    remote_ip: r.get(7)?,
+                    local_port: r.get(8)?,
+                    reason: r.get(9)?,
+                    status: r.get(10)?,
+                    applied_rule_id: r.get(11)?,
+                    analysis: r.get(12)?,
+                    ttl_secs: r.get(13)?,
                 })
             })
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -1386,6 +1393,7 @@ mod tests {
         store
             .insert_proposal(
                 "glm",
+                "block",
                 "high",
                 "in",
                 "any",
@@ -1399,6 +1407,7 @@ mod tests {
         store
             .insert_proposal(
                 "glm",
+                "block",
                 "high",
                 "in",
                 "any",
@@ -1731,6 +1740,7 @@ mod tests {
         let pid = store
             .insert_proposal(
                 "m",
+                "block",
                 "high",
                 "in",
                 "tcp",

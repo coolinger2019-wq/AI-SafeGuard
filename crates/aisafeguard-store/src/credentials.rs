@@ -14,6 +14,14 @@ use std::sync::Mutex;
 use aisafeguard_core::error::{Error, Result};
 use rusqlite::{Connection, params};
 
+/// 一条凭证观察的展示形态（H310 AI 上下文用）：刻意不含哈希。
+pub struct CredObservation {
+    pub ts: i64,
+    pub remote_ip: String,
+    pub username: String,
+    pub has_password: bool,
+}
+
 /// 一条待入库的凭证记录（字段并列比逐位传参直白，也避开 8 参上限）。
 pub struct CredentialRecord<'a> {
     pub ts: i64,
@@ -119,6 +127,31 @@ impl CredentialStore {
             .map_err(|e| Error::Store(e.to_string()))?;
         let rows = stmt
             .query_map(params![ip, since], |r| r.get::<_, String>(0))
+            .map_err(|e| Error::Store(e.to_string()))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(rows)
+    }
+
+    /// 窗口内最近的凭证观察（H310：供 AI 慢路径上下文）。只返回用户名与
+    /// 「是否有口令」布尔——pass_hash 刻意不出参（不进 API/提示词/日志）。
+    pub fn recent(&self, since: i64, limit: u32) -> Result<Vec<CredObservation>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT ts, remote_ip, username, pass_hash != '' FROM credentials
+                 WHERE ts >= ?1 ORDER BY id DESC LIMIT ?2",
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![since, limit], |r| {
+                Ok(CredObservation {
+                    ts: r.get(0)?,
+                    remote_ip: r.get(1)?,
+                    username: r.get(2)?,
+                    has_password: r.get::<_, i64>(3)? != 0,
+                })
+            })
             .map_err(|e| Error::Store(e.to_string()))?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| Error::Store(e.to_string()))?;

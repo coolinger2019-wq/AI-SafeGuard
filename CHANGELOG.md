@@ -2,6 +2,28 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.5.11] - 2026-09-30
+
+0.5.11 第三批(产品化与反识别):蜜罐模板机制 + AI 慢路径上下文增强 + 反识别加固,任务号 H300/H310/H320/H400(见 docs/ROADMAP-0.5.9.md 第三批)。
+
+### 新增
+
+- **蜜罐页面/协议模板(H300)**:`[honeypot.templates]` 默认关。目录约定 `<root>/<模板名>/{template.toml,page.html}`——协议/端口/页面/表单字段名/敏感路径全模板可配,有效 http 模板自动生成监听器,ssh/telnet 模板可覆盖 banner;**单模板解析失败只拒绝该模板并告警**(不影响其他模板与内置默认,整包加载哲学的单模板化),端口与已有监听器冲突拒绝;模板内容变更(mtime+长度轮询,规则引擎同款先例)约 5 秒热重载,增删模板目录需重启(轮询只告警提示);无模板目录行为与上一发布版逐字节一致(回归)。「不改一行代码,放 html + toml 即新增假 Grafana 登录页(重启生效)」;新增依赖 honeypot crate:serde/toml(已在依赖树)
+- **AI 慢路径蜜罐上下文增强(H310)**:分析请求新增四个可选段(有则附带无则不阻塞)——<interactions> 中交互会话逐命令序列、<credentials> 凭证尝试(口令只以掩码出现,spray=true=与本机账号同名,pass_hash 刻意不出参)、<canary> 蜜饵水印命中、<fingerprints> JA3/JA4(l7 开启才有);建议 schema 扩展 `credential_spray` 动作(remote_ip 必填/无端口/内网来源拒绝,严格校验同 block)——登记为已确认喷洒战役进入观察,**不走防火墙、不自动应用**(AI 不自动处置红线不变),GUI「确认战役」按钮 + `/api/proposals/{id}/confirm`
+- **反识别加固(H320)**:`[honeypot.fingerprint]` banner 全协议可配——SSH 版本串/Telnet 问候语/MySQL greeting 版本/HTTP Server 头,默认值与内置值逐字节一致(升级零行为变化);banner 解析顺序:模板覆盖 > 全局配置 > 内置默认;`docs/deployment.md` 新建「部署与反识别」章节(banner 选择建议/端口混布建议/演示端口不得用于生产的明示/残余风险)
+
+### 变更
+
+- 蜜罐会话运行时收敛为 `SessionCtx`(shell/canary/templates/指纹/凭证采集开关统一入口);`greeting_payload`/`ssh_session`/`telnet_session`/`http_session` 按指纹参数化;`proposals` 表新增 `action` 列(迁移默认 'block');净新增依赖:无(serde/toml 均已在依赖树)
+
+### 实测(Windows 11 本机)
+
+- 模板端到端(自动化):模板监听器对外服务自定义页面、模板敏感路径 403、模板表单字段(account/secret)进凭证采集并哈希落库、事件带 template 标签;损坏模板/端口冲突模板隔离告警
+- H310 schema:credential_spray 合法解析、缺 IP/内网来源/未知动作拒绝(自动化);凭证库 recent 查询只出掩码形态(结构上无哈希出参)
+- 门禁:cargo test --workspace / clippy -D warnings 全绿
+
+### 已知限制(诚实声明):不承诺对抗主动交互式指纹探测(协议行为差异不可能归零,deployment.md 明示);模板内容热重载不覆盖监听器增删(需重启);credential_spray 的确认效果是进入 AI 观察名单而非任何网络动作;nmap -sV 验收为手工步骤(待发布验证)
+
 ## [0.5.10] - 2026-09-30
 
 0.5.10 第二批(情报价值):凭证采集与本地喷洒检测 + Canary 蜜饵 + 可用性专项(设置页蜜罐域全量 GUI 化/示例配置/内置手册),任务号 H130/H140/H150/H200/H210(见 docs/ROADMAP-0.5.9.md 第二批)。

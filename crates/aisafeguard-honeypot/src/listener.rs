@@ -6,14 +6,28 @@
 
 use std::sync::Arc;
 
-use aisafeguard_core::config::{HoneypotConfig, ListenerConfig};
+use aisafeguard_core::config::{FingerprintConfig, HoneypotConfig, ListenerConfig};
 use aisafeguard_core::event::{EventBus, SecurityEvent};
 use aisafeguard_core::now_ts;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
 
+use crate::canary::CanaryState;
 use crate::shell::ShellRuntime;
+use crate::templates::TemplateRegistry;
 use crate::{SessionOutcome, http, mysql, protocol, redis};
+
+/// 每连接会话共享的运行时（0.5.11 收敛：假 Shell/蜜饵/模板/反识别参数/凭证
+/// 采集开关统一入口，协议分派按 kind 取用）。
+pub(crate) struct SessionCtx {
+    pub shell: Option<Arc<ShellRuntime>>,
+    pub canary: Option<Arc<CanaryState>>,
+    /// 模板注册表（H300；None = 未启用）
+    pub templates: Option<Arc<TemplateRegistry>>,
+    /// 反识别参数（H320）：banner/版本固定于启动，会话语义不热变
+    pub fp: FingerprintConfig,
+    pub collect_creds: bool,
+}
 
 const MAX_CONCURRENT: usize = 64;
 /// 交互会话独立预算（0.5.9 跨任务红线）：默认 8，防止长会话刷满全局 64 额度。
@@ -111,25 +125,47 @@ pub fn start(cfg: &HoneypotConfig, bus: EventBus, data_dir: &std::path::Path) ->
         } else {
             None
         };
-        for l in &cfg.listeners {
+        // 模板（0.5.11 H300）：默认关。加载注册表并把模板监听器追加到运行列表；
+        // 内容变更走轮询热重载，增删模板目录需重启（轮询只告警提示）
+        let mut extra_listeners: Vec<ListenerConfig> = Vec::new();
+        let templates: Option<Arc<TemplateRegistry>> = if cfg.templates.enabled {
+            let root = if cfg.templates.dir.is_empty() {
+                data_dir.join("honeypot").join("templates")
+            } else {
+                std::path::PathBuf::from(&cfg.templates.dir)
+            };
+            let occupied: Vec<u16> = cfg
+                .listeners
+                .iter()
+                .filter(|l| l.enabled)
+                .map(|l| l.port)
+                .collect();
+            let (registry, extra) = TemplateRegistry::load(&root, &occupied, &bus);
+            extra_listeners = extra;
+            crate::templates::spawn_template_poller(registry.clone(), bus.clone());
+            Some(registry)
+        } else {
+            None
+        };
+        let ctx = Arc::new(SessionCtx {
+            shell,
+            canary,
+            templates,
+            fp: cfg.fingerprint.clone(),
+            collect_creds,
+        });
+        for l in cfg.listeners.iter().chain(extra_listeners.iter()) {
             // 单监听器启停（0.5.10 H130）：disabled 行保留在状态表里（模式=未启用），
             // 但不绑定端口——GUI 能看到这条配置的存在
             if l.enabled {
-                tokio::spawn(run_listener(
-                    l.clone(),
-                    bus.clone(),
-                    shutdown_rx.clone(),
-                    shell.clone(),
-                    canary.clone(),
-                    collect_creds,
-                ));
+                tokio::spawn(run_listener(l.clone(), bus.clone(), shutdown_rx.clone(), ctx.clone()));
             }
             listeners.push(ListenerState {
                 name: l.name.clone(),
                 port: l.port,
                 kind: l.kind.clone(),
                 mode: if l.enabled {
-                    interaction_mode(&l.kind, shell.as_deref()).to_string()
+                    interaction_mode(&l.kind, ctx.shell.as_deref()).to_string()
                 } else {
                     "未启用".to_string()
                 },
@@ -146,9 +182,7 @@ async fn run_listener(
     l: ListenerConfig,
     bus: EventBus,
     mut shutdown: watch::Receiver<bool>,
-    shell: Option<Arc<ShellRuntime>>,
-    canary: Option<Arc<crate::canary::CanaryState>>,
-    collect_creds: bool,
+    ctx: Arc<SessionCtx>,
 ) {
     let addr = std::net::SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), l.port);
     let listener = match TcpListener::bind(addr).await {
@@ -182,7 +216,7 @@ async fn run_listener(
         };
         // 交互会话占独立小额预算：满额优雅拒绝并留痕（对齐 OpenSSH 正常拒连语义）
         let interactive_permit =
-            if is_interactive_session(&l.kind, shell.as_deref()) {
+            if is_interactive_session(&l.kind, ctx.shell.as_deref()) {
             match interactive_sem.clone().try_acquire_owned() {
                 Ok(p) => Some(p),
                 Err(_) => {
@@ -204,10 +238,9 @@ async fn run_listener(
         let bus = bus.clone();
         let name = l.name.clone();
         let kind = l.kind.clone();
-        let shell = shell.clone();
-        let canary = canary.clone();
+        let ctx = ctx.clone();
         tokio::spawn(async move {
-            handle_conn(stream, name, kind, bus, shell, canary, collect_creds).await;
+            handle_conn(stream, name, kind, bus, ctx).await;
             drop(interactive_permit);
             drop(permit);
         });
@@ -233,9 +266,7 @@ async fn handle_conn(
     listener: String,
     kind: String,
     bus: EventBus,
-    shell: Option<Arc<ShellRuntime>>,
-    canary: Option<Arc<crate::canary::CanaryState>>,
-    collect_creds: bool,
+    ctx: Arc<SessionCtx>,
 ) {
     let (remote_ip, remote_port) = match stream.peer_addr() {
         Ok(a) => (a.ip().to_string(), a.port()),
@@ -243,20 +274,32 @@ async fn handle_conn(
     };
     let local_port = stream.local_addr().map(|a| a.port()).unwrap_or(0);
 
-    // ssh/telnet 假 Shell 启用时流被仿真层消费（提前取端口）;其余按 &mut 读一包
+    // ssh/telnet 假 Shell 启用时流被仿真层消费（提前取端口）;其余按 &mut 读一包。
+    // banner 解析顺序（H300/H320）：模板覆盖 > [honeypot.fingerprint] 全局默认
     let result: std::io::Result<SessionOutcome> = match kind.as_str() {
-        "ssh" if shell.as_ref().is_some_and(|rt| rt.ssh_config.is_some()) => {
-            let rt = shell.clone().expect("守卫已判 Some");
+        "ssh" if ctx.shell.as_ref().is_some_and(|rt| rt.ssh_config.is_some()) => {
+            let rt = ctx.shell.clone().expect("守卫已判 Some");
             Ok(crate::shell::ssh_shell_session(stream, rt).await)
         }
-        "telnet" if shell.as_ref().is_some_and(|rt| rt.telnet_enabled) => {
-            let rt = shell.clone().expect("守卫已判 Some");
+        "telnet" if ctx.shell.as_ref().is_some_and(|rt| rt.telnet_enabled) => {
+            let rt = ctx.shell.clone().expect("守卫已判 Some");
             Ok(crate::shell::telnet_shell_session(stream, rt).await)
         }
-        "ssh" => protocol::ssh_session(&mut stream).await,
-        "http" => http::http_session(&mut stream, canary.as_deref()).await,
-        "telnet" => protocol::telnet_session(&mut stream).await,
-        "mysql" => mysql::mysql_session(&mut stream).await,
+        "ssh" => {
+            let banner = ctx
+                .templates
+                .as_ref()
+                .and_then(|t| t.banner(&listener))
+                .unwrap_or_else(|| ctx.fp.ssh_banner.clone());
+            protocol::ssh_session(&mut stream, &banner).await
+        }
+        "http" => {
+            let tpl = ctx.templates.as_ref().and_then(|t| t.http_tpl(&listener));
+            http::http_session(&mut stream, ctx.canary.as_deref(), tpl.as_ref(), &ctx.fp.http_server)
+                .await
+        }
+        "telnet" => protocol::telnet_session(&mut stream, &ctx.fp.telnet_greeting).await,
+        "mysql" => mysql::mysql_session(&mut stream, &ctx.fp.mysql_version).await,
         "redis" => redis::redis_session(&mut stream).await,
         _ => protocol::generic_session(&mut stream).await,
     };
@@ -285,7 +328,7 @@ async fn handle_conn(
 
     // 凭证采集（0.5.10 H200）：[honeypot.credentials].enabled 门控；口令明文只到
     // 本函数为止——先 argon2id 加盐哈希，再进事件（事件与落盘表面只见哈希）
-    if collect_creds {
+    if ctx.collect_creds {
         for raw in &outcome.credentials {
             if raw.username.is_empty() {
                 continue;
@@ -406,6 +449,8 @@ mod tests {
             enabled: true,
             credentials: Default::default(),
             canary: Default::default(),
+            templates: Default::default(),
+            fingerprint: Default::default(),
             shell: aisafeguard_core::config::ShellConfig {
                 enabled: true,
                 telnet_enabled: true,
@@ -641,6 +686,8 @@ mod tests {
             enabled: true,
             credentials: Default::default(),
             canary: Default::default(),
+            templates: Default::default(),
+            fingerprint: Default::default(),
             shell: aisafeguard_core::config::ShellConfig {
                 enabled: true,
                 ..Default::default()

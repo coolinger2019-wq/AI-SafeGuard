@@ -8,7 +8,7 @@
 >
 > **切分决议(2026-09-29 可行性评估后)**:本文档拆为三个发布批次——**0.5.9 = 第一批(仿真深度:H101-H105 + H110 + H120)**、**0.5.10 = 第二批(情报价值:H200 + H210)**、**0.5.11 = 第三批(产品化与反识别:H300/H310/H320/H400)**。文件名保留 0.5.9(首个发布批次)。评估结论:九个任务中八个是现有架构的顺势扩展;唯一架构级新增是 H100 引入 russh(当前 "ssh" 蜜罐只发 banner 不说 SSH 协议)。三处范围修正已直接写进对应任务节,动工前不再另行讨论。
 >
-> **完成状态(2026-09-30)**:**0.5.9 批次全部完成并已发版;0.5.10 批次全部完成**(H130/H140/H150/H200/H210;Windows 实机端到端:credential_spray 事件/凭证库落库/蜜饵水印 canary-decode 溯源全通;GUI 纯手工验收待确认;Linux 文件蜜饵实机读取告警随发布验证)。H101 russh(ring 后端)过三道门 + paramiko 实连;H102 模块化 + interaction 事件字段 + 交互并发上限 8;H103 命令仿真层;H104 SSH 接线(host key 持久化/契约三同步);H110 MySQL+Redis 蜜罐;H120 Telnet 对齐;H105 验收(NEGATIVE-PATH §6/§7、THREAT_MODEL 蜜罐攻击面、demo-honeypot-deep.sh、replay-ssh-shell.py)。WSL2 实测:paramiko 全剧本、mysql 8.0.46 CLI、redis-cli 三协议实连全过,实测修复 3 个真 bug(run_stream spawn 语义 / verify-log --data-dir / MySQL 列定义 lenenc 编码),详见 CHANGELOG 0.5.9 与 LESSONS 0.5.9 批次。验收清单中「demo-attack.sh 假 Shell 段」以独立 demo-honeypot-deep.sh 交付(不污染原快路径演示);THREAT_MODEL 攻击面四条已入册。
+> **完成状态(2026-09-30)**:**三个批次全部完成**(0.5.9 发版;0.5.10 H130-H210 已收口,Windows 实机端到端 credential_spray/凭证库/蜜饵溯源全通;0.5.11 H300/H310/H320 已收口,模板端到端与 schema 校验自动化全绿;nmap -sV 反识别验收与 Linux 文件蜜饵实机读取随发布验证;GUI 纯手工验收项待用户确认)。H101 russh(ring 后端)过三道门 + paramiko 实连;H102 模块化 + interaction 事件字段 + 交互并发上限 8;H103 命令仿真层;H104 SSH 接线(host key 持久化/契约三同步);H110 MySQL+Redis 蜜罐;H120 Telnet 对齐;H105 验收(NEGATIVE-PATH §6/§7、THREAT_MODEL 蜜罐攻击面、demo-honeypot-deep.sh、replay-ssh-shell.py)。WSL2 实测:paramiko 全剧本、mysql 8.0.46 CLI、redis-cli 三协议实连全过,实测修复 3 个真 bug(run_stream spawn 语义 / verify-log --data-dir / MySQL 列定义 lenenc 编码),详见 CHANGELOG 0.5.9 与 LESSONS 0.5.9 批次。验收清单中「demo-attack.sh 假 Shell 段」以独立 demo-honeypot-deep.sh 交付(不污染原快路径演示);THREAT_MODEL 攻击面四条已入册。
 
 ---
 
@@ -229,9 +229,9 @@
 - 模板不得覆盖真实监听端口——与已有真实服务端口冲突时启动拒绝(沿用现有占用检查)。
 
 **验收**
-- [ ] 不改一行代码,新增一个「假 Grafana 登录页」模板(放 html + toml)即生效。
-- [ ] 损坏模板 → 仅该模板告警拒绝,其余与默认页面正常。
-- [ ] 升级用户无模板目录 → 行为与上一发布版(0.5.8)逐字节一致(回归断言)。
+- [x] 不改一行代码,新增一个「假 Grafana 登录页」模板(放 html + toml)即生效。（模板端到端测试:template.toml+page.html → 监听器服务页面/敏感路径 403/表单字段进凭证采集;需重启一次,分界写入契约与文档）
+- [x] 损坏模板 → 仅该模板告警拒绝,其余与默认页面正常。（load_isolates_broken_templates_and_detects_port_conflict）
+- [x] 升级用户无模板目录 → 行为与上一发布版(0.5.8)逐字节一致(回归断言)。（templates 默认关;banner/页面路由回归测试沿用）
 
 ### H310 AI 慢路径蜜罐上下文增强 — 规模 S
 
@@ -243,8 +243,8 @@
 - AI 不可用 → 全部行为退化为纯快路径,零依赖(回归)。
 
 **验收**
-- [ ] 假 Shell 会话 + 凭证命中场景下,AI 建议单可展开完整证据链。
-- [ ] schema 校验:非法建议类型拒绝,事件留痕。
+- [x] 假 Shell 会话 + 凭证命中场景下,AI 建议单可展开完整证据链。（<interactions>/<credentials>(掩码+spray 标记)/<canary>/<fingerprints> 四段进请求,有则附带无则不阻塞;credential_spray 建议经「确认战役」闭环留痕）
+- [x] schema 校验:非法建议类型拒绝,事件留痕。（ai crate 测试:credential_spray 合法解析;缺 IP/内网来源/未知动作拒绝;自动应用只作用于 block——AI 不自动处置红线不变）
 
 ### H320 反识别加固(banner/指纹混淆)— 规模 S
 
@@ -259,8 +259,8 @@
 **红线**:不承诺对抗主动交互式指纹探测(协议行为差异不可能归零),文档明示残余风险。
 
 **验收**
-- [ ] `nmap -sV --script=ssh-hostkey,banner` 对蜜罐端口:识别为所配置的真实服务与版本。
-- [ ] 常见蜜罐指纹检测脚本跑一遍,结果与加固前对比记录在文档(允许残余,不允许误报为真实蜜罐指纹库已知条目)。
+- [ ] `nmap -sV --script=ssh-hostkey,banner` 对蜜罐端口:识别为所配置的真实服务与版本。（banner 参数化已实现并有回归测试;手工验收步骤写入 docs/deployment.md §1,随发布实机执行）
+- [ ] 常见蜜罐指纹检测脚本跑一遍,结果与加固前对比记录在文档(允许残余,不允许误报为真实蜜罐指纹库已知条目)。（同上,手工步骤已文档化）
 
 ### H400 工程收口 — 规模 M(切分:随各发布走收口切片,不单独成版)
 

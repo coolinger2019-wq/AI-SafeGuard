@@ -215,6 +215,11 @@ impl Console for RemoteConsole {
         Ok(self.post(&format!("/api/proposals/{id}/apply"))?.json()?)
     }
 
+    fn confirm_campaign(&self, id: i64) -> anyhow::Result<()> {
+        self.post(&format!("/api/proposals/{id}/confirm"))?;
+        Ok(())
+    }
+
     fn dismiss_proposal(&self, id: i64) -> anyhow::Result<()> {
         self.post(&format!("/api/proposals/{id}/dismiss"))?;
         Ok(())

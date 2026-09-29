@@ -172,19 +172,44 @@ impl AisafeApp {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         chip(ui, &p.severity, severity_color(&p.severity));
-                        ui.label(
-                            RichText::new(format!(
+                        let title = if p.action == "credential_spray" {
+                            format!("确认喷洒战役 来源 {}", p.remote_ip)
+                        } else {
+                            format!(
                                 "封禁 {} {} {}",
                                 dir_cn(&p.direction),
                                 proto_up(&p.protocol),
                                 target_desc(&p.remote_ip, p.local_port)
-                            ))
-                            .size(type_scale::BODY)
-                            .strong(),
-                        );
+                            )
+                        };
+                        ui.label(RichText::new(title).size(type_scale::BODY).strong());
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let pid = p.id;
-                            if ui
+                            if p.action == "credential_spray" {
+                                // H310：观察类建议——确认战役（人工确认，不封禁）
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("确认战役").color(on_accent()),
+                                        )
+                                        .fill(warn())
+                                        .corner_radius(CornerRadius::same(6))
+                                        .min_size(egui::vec2(96.0, 26.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    match self.eng.confirm_campaign(pid) {
+                                        Ok(()) => {
+                                            self.set_toast(format!(
+                                                "已确认凭证喷洒战役 {}（进入观察，不封禁）",
+                                                p.remote_ip
+                                            ));
+                                        }
+                                        Err(e) => self.set_toast(format!("确认失败: {e}")),
+                                    }
+                                    self.refresh_cache();
+                                }
+                            } else if ui
                                 .add(
                                     egui::Button::new(
                                         RichText::new("灰度应用").color(on_accent()),

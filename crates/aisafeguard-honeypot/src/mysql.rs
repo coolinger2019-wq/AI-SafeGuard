@@ -11,6 +11,8 @@ use aisafeguard_core::event::ShellStep;
 
 use crate::{sanitize, SessionOutcome, MAX_PAYLOAD};
 
+#[cfg(test)]
+// 生产默认值已收口到 [honeypot.fingerprint].mysql_version（config.rs）；此处供测试断言
 const MYSQL_VERSION: &str = "8.0.36";
 /// 单会话语句数上限（与假 Shell 同款防刷纪律）
 const MAX_QUERIES: usize = 200;
@@ -72,10 +74,10 @@ const AUTH_PLUGIN: &str = "mysql_native_password";
 const CAPABILITIES: u32 = 0x0001 | (1 << 9) | (1 << 15) | (1 << 19);
 
 /// 服务端 greeting(handshake v10)
-pub(crate) fn greeting_payload() -> Vec<u8> {
+pub(crate) fn greeting_payload(version: &str) -> Vec<u8> {
     let mut p = Vec::new();
     p.push(0x0a); // protocol version 10
-    p.extend_from_slice(MYSQL_VERSION.as_bytes());
+    p.extend_from_slice(version.as_bytes());
     p.push(0x00);
     p.extend_from_slice(&1u32.to_le_bytes()); // thread id(合成)
     p.extend_from_slice(&AUTH_SCRAMBLE[..8]); // auth data part 1
@@ -211,9 +213,12 @@ pub(crate) fn classify_query(sql: &str) -> QueryKind {
 
 // ---------- 会话 ----------
 
-pub(crate) async fn mysql_session(s: &mut tokio::net::TcpStream) -> std::io::Result<SessionOutcome> {
-    // 1. greeting(seq 0)
-    write_packet(s, 0, &greeting_payload()).await?;
+pub(crate) async fn mysql_session(
+    s: &mut tokio::net::TcpStream,
+    version: &str,
+) -> std::io::Result<SessionOutcome> {
+    // 1. greeting(seq 0)。version 来自 [honeypot.fingerprint].mysql_version（H320）
+    write_packet(s, 0, &greeting_payload(version)).await?;
 
     // 2. 客户端 HandshakeResponse
     let (seq, payload) = match read_packet(s).await {
@@ -353,7 +358,7 @@ mod tests {
 
     #[test]
     fn greeting_is_protocol10_with_version() {
-        let g = greeting_payload();
+        let g = greeting_payload(MYSQL_VERSION);
         assert_eq!(g[0], 0x0a);
         let text = String::from_utf8_lossy(&g);
         assert!(text.contains(MYSQL_VERSION));

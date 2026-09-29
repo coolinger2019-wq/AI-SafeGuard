@@ -12,6 +12,9 @@ russh.workspace = true
 rand.workspace = true
 # H200：凭证口令的 argon2id 加盐哈希（选型与参数理由见根 Cargo.toml 与 cred.rs）
 argon2.workspace = true
+# H300：template.toml 模板解析
+serde.workspace = true
+toml.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
