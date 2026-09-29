@@ -26,6 +26,13 @@ GUI 重设计（frontend-ui-engineering 规范落地）：排版比例体系统�
 - `cargo test --workspace` 全绿；实机截图核验设置页（外观子页）与 AI 助手页
   的层级、间距与控件比例
 
+### Artifact SHA-256(与发布页同清单;构建源 = 提交 1430b92,即 tag v0.5.8 所指树;仓库不存二进制,本地暂存 dist/ 已 gitignore)
+
+- Windows x86_64(MSVC)`aisafeguard.exe`(`--version` = 0.5.8,28,136,448 字节):
+  `9de10be2db94b023d0da7437b696e99864d362c67f23d89942bde632dd486795`
+- Linux x86_64(WSL2 Ubuntu 24.04 `cargo build --release`)`aisafeguard.linux-x86_64`(`--version` = 0.5.8,33,748,072 字节):
+  `c3105451d0f9ef8a215796169ec3ec756acdd6c8c7f27e95b897f620acb4dbb1`
+
 ## [0.5.7] - 2026-09-29
 
 修复内嵌 GUI 模式引擎静默失效（0.2 服务化引入 EngineBundle 起的存量 bug）。
