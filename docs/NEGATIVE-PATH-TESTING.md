@@ -120,9 +120,60 @@ test engine::tests::detection_respects_auto_block_off ... ok
 test engine::tests::rule_scan_hits_and_dedups_per_flow ... ok
 ```
 
+## 6. SSH 假 Shell 负路径(0.5.9 H105)
+
+**机制**:`crates/aisafeguard-honeypot/src/shell.rs`——攻击者输入永远当「数据」:`ShellSession::handle_line` 先 `sanitize`(lossy UTF-8 + 控制字符替换 + 4096 截断)再解析;组合命令(`;` `|` `&`)只仿真首个、整行原样留痕;未知命令回对齐真实 bash 的 `command not found`;命令数达 `max_commands`(默认 50)即优雅退出。任何输入不 fork 真实进程、不拼接系统调用。
+
+**自动化证据**(2026-09-29,`cargo test -p aisafeguard-honeypot` 全绿):
+
+```
+test shell::tests::combinator_only_first_segment_simulated ... ok
+test shell::tests::long_and_binary_input_bounded_never_panic ... ok   # ≥4KB 与二进制乱码
+test shell::tests::fuzz_random_lines_never_panic ... ok               # 2000 轮随机输入
+test shell::tests::exit_and_command_limit_close_session ... ok        # 会话上限
+test shell::tests::unknown_command_matches_bash_text ... ok
+```
+
+**实机复现**(配置 `[honeypot.shell] enabled = true` 后):
+
+```bash
+python3 scripts/replay-ssh-shell.py 127.0.0.1 2222
+# 剧本含:白名单命令 → 组合注入 "whoami; cat /etc/shadow"(只仿真 whoami)→
+# mimikatz(未知命令)→ 4096 个 A(超长)→ 每步断言,末尾打印 REPLAY PASS
+# 会话超时:连上后静置 120 秒,服务端 inactivity_timeout 断开,事件留痕
+```
+
+**已知限制(诚实声明)**:russh 0.63 客户端对 russh 服务端自连时通道数据互传存在上游兼容问题——仅影响「russh 客户端连本蜜罐」这一自连场景;paramiko/OpenSSH 实连全路径已验证。自动化测试因此只断言到 auth+prompt,全命令链路由上述 paramiko 脚本承担。
+
+## 7. MySQL/Redis 蜜罐畸形输入(0.5.9 H110)
+
+**机制**:`mysql.rs`/`redis.rs` 协议解析为纯函数,畸形包一律「回对齐真实服务的错误文案后断开」或「静默结束」,不 panic;MySQL 包长 >2048 视为畸形;RESP 数组上限 64 元素、bulk 长度上限 2048。Redis AUTH 口令在留痕层脱敏为 `***`(明文不落库,COMPLIANCE 纪律;H200 上线后加盐哈希入库)。
+
+**自动化证据**(2026-09-29,`cargo test -p aisafeguard-honeypot` 全绿):
+
+```
+test redis::tests::fuzz_parse_resp_never_panic ... ok          # 5000 轮随机字节
+test redis::tests::parse_inline_and_malformed ... ok           # 负长度/超大长度/坏计数
+test mysql::tests::fuzz_username_and_classify_never_panic ... ok  # 5000 轮
+test mysql::tests::mysql_listener_roundtrip ... ok             # 真实 TCP 全流程
+test redis::tests::redis_listener_roundtrip ... ok             # 真实 TCP + 口令脱敏断言
+test listener::tests::interactive_gate_follows_shell_config ... ok  # 交互并发预算语义
+```
+
+**实机复现**(WSL,见 CHANGELOG 0.5.9 实测段):
+
+```bash
+# 随机字节打两个蜜罐端口:服务不崩、会话被优雅关闭
+head -c 4096 /dev/urandom | timeout 2 nc 127.0.0.1 3307 || true
+head -c 4096 /dev/urandom | timeout 2 nc 127.0.0.1 6380 || true
+redis-cli -h 127.0.0.1 -p 6380 PING          # → PONG
+mysql -h 127.0.0.1 -P 3307 -u root -p        # 任意口令进入,SELECT 1 → 空结果集
+```
+
 ## 复现自动化证据
 
 ```bash
 cargo test --workspace          # 全绿(2026-09-29,Windows 11;Linux 侧 WSL2 同套测试)
 cargo test -p aisafeguard-app   # 本文档引用的 fed/engine/forward 测试所在
+cargo test -p aisafeguard-honeypot   # 本文档第 6/7 节假 Shell 与 MySQL/Redis 负路径
 ```
