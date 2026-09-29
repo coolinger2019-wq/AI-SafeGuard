@@ -41,6 +41,15 @@
 
 - `cargo test --workspace` 全绿；l7 HttpHint v2 标签单测、honeypot 诱饵路由 /
   脱敏 / Content-Length / 端到端共 8 项新增
+- release 双平台构建通过(Windows MSVC / WSL2 Ubuntu 24.04),产物
+  `--version` = 0.5.6
+
+### Artifact SHA-256(与发布页同清单;构建源 = 提交 98ef5d2,即 tag v0.5.6 所指树;仓库不存二进制,本地暂存 dist/ 已 gitignore)
+
+- Windows x86_64(MSVC)`aisafeguard.exe`(`--version` = 0.5.6,28,157,952 字节):
+  `f3f4b9e8e2243b8f8c43cdfa9be27cb1bae2c7eff11c7bf564c6a1204c643733`
+- Linux x86_64(WSL2 Ubuntu 24.04 `cargo build --release`)`aisafeguard.linux-x86_64`(`--version` = 0.5.6,33,718,120 字节):
+  `a284424a6c290a9a5c43eda012eac97a8ca42a937a650a4c069459484382e6a4`
 
 ## [0.5.5] - 2026-09-29
 
