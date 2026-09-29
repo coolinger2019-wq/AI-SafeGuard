@@ -366,6 +366,7 @@ mod tests {
                 summary: String::new(),
                 payload: String::new(),
                 http_hint: None,
+                interaction: None,
             }
             .severity(),
             5

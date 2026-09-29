@@ -1,8 +1,16 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 // Detection 变体携带 L7 提示（0.5.0 E6）——aisafeguard-l7 是无依赖纯解析 crate
 use aisafeguard_l7::HttpHint;
+
+/// 蜜罐交互会话的逐命令记录（0.5.9 H102）：中交互假 Shell 每条命令记一条。
+/// command/response 均为清洗截断后的文本——攻击者输入永远不可信，永不原样落库。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellStep {
+    pub command: String,
+    pub response: String,
+}
 
 /// 统一安全事件。所有模块只通过事件总线对话，互不直接依赖。
 #[derive(Debug, Clone, Serialize)]
@@ -20,6 +28,10 @@ pub enum SecurityEvent {
         /// 结构化 HTTP 提示（0.5.6 F13：http 蜜罐可解析时出现）
         #[serde(skip_serializing_if = "Option::is_none")]
         http_hint: Option<HttpHint>,
+        /// 交互会话逐命令记录（0.5.9 H102：中交互假 Shell 才有，低交互为 None。
+        /// 不进哈希链 canonical——与 http_hint 同类的证据明细，保证存量链兼容）
+        #[serde(skip_serializing_if = "Option::is_none")]
+        interaction: Option<Vec<ShellStep>>,
     },
     FirewallRuleAdded {
         ts: i64,

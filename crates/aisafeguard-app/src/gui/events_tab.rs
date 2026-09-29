@@ -190,6 +190,45 @@ fn event_detail_ui(ui: &mut egui::Ui, ev: &EventRow) {
             if !ev.tls_ja4.is_empty() {
                 kv_row(ui, "JA4", &ev.tls_ja4);
             }
+            // 交互序列（0.5.9 H102：中交互假 Shell 逐命令记录；低交互事件为空串）
+            if !ev.interaction.is_empty()
+                && let Ok(steps) = serde_json::from_str::<Vec<serde_json::Value>>(&ev.interaction)
+                && !steps.is_empty()
+            {
+                ui.add_space(space::XS);
+                egui::CollapsingHeader::new(
+                    RichText::new(format!("交互序列（{} 条命令）", steps.len()))
+                        .size(type_scale::CAPTION),
+                )
+                .id_salt(egui::Id::new("event-interaction").with(ev.id))
+                .default_open(true)
+                .show(ui, |ui| {
+                    const MAX_STEPS: usize = 20;
+                    for step in steps.iter().take(MAX_STEPS) {
+                        let cmd = step["command"].as_str().unwrap_or("");
+                        let resp = step["response"].as_str().unwrap_or("");
+                        let text = format!("$ {cmd}\n{resp}");
+                        ui.add_space(space::XS);
+                        ui.add(
+                            egui::TextEdit::multiline(&mut text.as_str())
+                                .font(egui::TextStyle::Monospace)
+                                .desired_width(ui.available_width() - 8.0)
+                                .desired_rows(2)
+                                .interactive(false),
+                        );
+                    }
+                    if steps.len() > MAX_STEPS {
+                        ui.label(
+                            RichText::new(format!(
+                                "…其余 {} 条命令可通过 API 查看",
+                                steps.len() - MAX_STEPS
+                            ))
+                            .size(type_scale::MICRO)
+                            .color(text_dim()),
+                        );
+                    }
+                });
+            }
             if !ev.payload.is_empty() {
                 ui.add_space(space::XS);
                 egui::CollapsingHeader::new(

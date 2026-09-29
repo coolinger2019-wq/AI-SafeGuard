@@ -160,6 +160,7 @@ async fn fed_events(
                 summary: ev.summary.clone(),
                 payload: String::new(),
                 http_hint: None,
+                interaction: None,
             }
         } else {
             SecurityEvent::Engine {

@@ -31,8 +31,33 @@ pub struct EventRow {
     pub tls_fp: String,
     /// JA4 指纹（0.5.0 E5，[detect.l7].ja4 开启且 ClientHello 可见时非空）
     pub tls_ja4: String,
+    /// 蜜罐交互逐命令 JSON（0.5.9 H102：中交互假 Shell 会话才有；空串 = 无）
+    pub interaction: String,
     pub prev_hash: String,
     pub hash: String,
+}
+
+/// events 表完整列清单（三处查询共用：recent_events / recent_honeypot_hits / verify_chain）。
+/// 新列追加在 tls_ja4 之后、prev_hash/hash 之前——链列永远最后两列。
+const EVENT_COLUMNS: &str = "id, ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, tls_ja4, interaction, prev_hash, hash";
+
+fn event_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
+    Ok(EventRow {
+        id: r.get(0)?,
+        ts: r.get(1)?,
+        kind: r.get(2)?,
+        listener: r.get(3)?,
+        remote_ip: r.get(4)?,
+        remote_port: r.get::<_, i64>(5)? as u16,
+        summary: r.get(6)?,
+        payload: r.get(7)?,
+        http_hint: r.get(8)?,
+        tls_fp: r.get(9)?,
+        tls_ja4: r.get(10)?,
+        interaction: r.get(11)?,
+        prev_hash: r.get(12)?,
+        hash: r.get(13)?,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -321,6 +346,7 @@ impl Store {
             "ALTER TABLE events ADD COLUMN tls_fp TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE events ADD COLUMN tls_ja4 TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE rules ADD COLUMN promoted INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE events ADD COLUMN interaction TEXT NOT NULL DEFAULT ''",
         ] {
             let _ = conn.execute(sql, []); // 列已存在时报错，忽略
         }
@@ -397,54 +423,62 @@ impl Store {
     // ---------- 事件 ----------
 
     pub fn insert_event(&self, ev: &SecurityEvent) -> Result<()> {
-        let (listener, remote_ip, remote_port, payload, http_hint, tls_fp, tls_ja4) = match ev {
-            SecurityEvent::HoneypotHit {
-                listener,
-                remote_ip,
-                remote_port,
-                payload,
-                http_hint,
-                ..
-            } => (
-                listener.clone(),
-                remote_ip.clone(),
-                *remote_port as i64,
-                payload.clone(),
-                http_hint
-                    .as_ref()
-                    .map(|h| serde_json::to_string(h).unwrap_or_default())
-                    .unwrap_or_default(),
-                String::new(),
-                String::new(),
-            ),
-            SecurityEvent::Detection {
-                src_ip,
-                http_hint,
-                tls_fingerprint,
-                tls_ja4,
-                ..
-            } => (
-                String::new(),
-                src_ip.clone(),
-                0,
-                String::new(),
-                http_hint
-                    .as_ref()
-                    .map(|h| serde_json::to_string(h).unwrap_or_default())
-                    .unwrap_or_default(),
-                tls_fingerprint.clone().unwrap_or_default(),
-                tls_ja4.clone().unwrap_or_default(),
-            ),
-            _ => (
-                String::new(),
-                String::new(),
-                0,
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-            ),
-        };
+        let (listener, remote_ip, remote_port, payload, http_hint, tls_fp, tls_ja4, interaction) =
+            match ev {
+                SecurityEvent::HoneypotHit {
+                    listener,
+                    remote_ip,
+                    remote_port,
+                    payload,
+                    http_hint,
+                    interaction,
+                    ..
+                } => (
+                    listener.clone(),
+                    remote_ip.clone(),
+                    *remote_port as i64,
+                    payload.clone(),
+                    http_hint
+                        .as_ref()
+                        .map(|h| serde_json::to_string(h).unwrap_or_default())
+                        .unwrap_or_default(),
+                    String::new(),
+                    String::new(),
+                    interaction
+                        .as_ref()
+                        .map(|steps| serde_json::to_string(steps).unwrap_or_default())
+                        .unwrap_or_default(),
+                ),
+                SecurityEvent::Detection {
+                    src_ip,
+                    http_hint,
+                    tls_fingerprint,
+                    tls_ja4,
+                    ..
+                } => (
+                    String::new(),
+                    src_ip.clone(),
+                    0,
+                    String::new(),
+                    http_hint
+                        .as_ref()
+                        .map(|h| serde_json::to_string(h).unwrap_or_default())
+                        .unwrap_or_default(),
+                    tls_fingerprint.clone().unwrap_or_default(),
+                    tls_ja4.clone().unwrap_or_default(),
+                    String::new(),
+                ),
+                _ => (
+                    String::new(),
+                    String::new(),
+                    0,
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                ),
+            };
         let summary = ev.summary();
         let ts = ev.ts();
         let kind = ev.kind();
@@ -467,9 +501,9 @@ impl Store {
         );
         let hash = chain_hash(&prev_hash, &canonical);
         conn.execute(
-            "INSERT INTO events (ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, tls_ja4, prev_hash, hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, tls_ja4, prev_hash, hash],
+            "INSERT INTO events (ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, tls_ja4, interaction, prev_hash, hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, tls_ja4, interaction, prev_hash, hash],
         )
         .map_err(|e| Error::Store(e.to_string()))?;
         Ok(())
@@ -479,34 +513,16 @@ impl Store {
         let conn = self.lock()?;
         let sql = match ip_filter {
             Some(_) => {
-                "SELECT id, ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, tls_ja4, prev_hash, hash
-                 FROM events WHERE remote_ip LIKE ?1 ORDER BY id DESC LIMIT ?2"
+                format!("SELECT {EVENT_COLUMNS} FROM events WHERE remote_ip LIKE ?1 ORDER BY id DESC LIMIT ?2")
             }
             None => {
-                "SELECT id, ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, tls_ja4, prev_hash, hash
-                 FROM events ORDER BY id DESC LIMIT ?2"
+                format!("SELECT {EVENT_COLUMNS} FROM events ORDER BY id DESC LIMIT ?2")
             }
         };
-        let mut stmt = conn.prepare(sql).map_err(|e| Error::Store(e.to_string()))?;
+        let mut stmt = conn.prepare(&sql).map_err(|e| Error::Store(e.to_string()))?;
         let like = ip_filter.map(|s| format!("%{s}%"));
         let rows = stmt
-            .query_map(params![like, limit], |r| {
-                Ok(EventRow {
-                    id: r.get(0)?,
-                    ts: r.get(1)?,
-                    kind: r.get(2)?,
-                    listener: r.get(3)?,
-                    remote_ip: r.get(4)?,
-                    remote_port: r.get::<_, i64>(5)? as u16,
-                    summary: r.get(6)?,
-                    payload: r.get(7)?,
-                    http_hint: r.get(8)?,
-                    tls_fp: r.get(9)?,
-                    tls_ja4: r.get(10)?,
-                    prev_hash: r.get(11)?,
-                    hash: r.get(12)?,
-                })
-            })
+            .query_map(params![like, limit], event_row)
             .map_err(|e| Error::Store(e.to_string()))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| Error::Store(e.to_string()))
@@ -633,29 +649,12 @@ impl Store {
     pub fn recent_honeypot_hits(&self, limit: u32) -> Result<Vec<EventRow>> {
         let conn = self.lock()?;
         let mut stmt = conn
-            .prepare(
-                "SELECT id, ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, tls_ja4, prev_hash, hash
-                 FROM events WHERE kind = 'honeypot_hit' ORDER BY id DESC LIMIT ?1",
-            )
+            .prepare(&format!(
+                "SELECT {EVENT_COLUMNS} FROM events WHERE kind = 'honeypot_hit' ORDER BY id DESC LIMIT ?1"
+            ))
             .map_err(|e| Error::Store(e.to_string()))?;
         let rows = stmt
-            .query_map(params![limit], |r| {
-                Ok(EventRow {
-                    id: r.get(0)?,
-                    ts: r.get(1)?,
-                    kind: r.get(2)?,
-                    listener: r.get(3)?,
-                    remote_ip: r.get(4)?,
-                    remote_port: r.get::<_, i64>(5)? as u16,
-                    summary: r.get(6)?,
-                    payload: r.get(7)?,
-                    http_hint: r.get(8)?,
-                    tls_fp: r.get(9)?,
-                    tls_ja4: r.get(10)?,
-                    prev_hash: r.get(11)?,
-                    hash: r.get(12)?,
-                })
-            })
+            .query_map(params![limit], event_row)
             .map_err(|e| Error::Store(e.to_string()))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| Error::Store(e.to_string()))
@@ -700,29 +699,10 @@ impl Store {
     pub fn verify_chain(&self) -> Result<ChainReport> {
         let conn = self.lock()?;
         let mut stmt = conn
-            .prepare(
-                "SELECT id, ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, tls_ja4, prev_hash, hash
-                 FROM events ORDER BY id",
-            )
+            .prepare(&format!("SELECT {EVENT_COLUMNS} FROM events ORDER BY id"))
             .map_err(|e| Error::Store(e.to_string()))?;
         let rows = stmt
-            .query_map([], |r| {
-                Ok(EventRow {
-                    id: r.get(0)?,
-                    ts: r.get(1)?,
-                    kind: r.get(2)?,
-                    listener: r.get(3)?,
-                    remote_ip: r.get(4)?,
-                    remote_port: r.get::<_, i64>(5)? as u16,
-                    summary: r.get(6)?,
-                    payload: r.get(7)?,
-                    http_hint: r.get(8)?,
-                    tls_fp: r.get(9)?,
-                    tls_ja4: r.get(10)?,
-                    prev_hash: r.get(11)?,
-                    hash: r.get(12)?,
-                })
-            })
+            .query_map([], event_row)
             .map_err(|e| Error::Store(e.to_string()))?;
         let mut prev = String::new();
         let mut count = 0usize;
@@ -1445,6 +1425,7 @@ mod tests {
                     summary: "q".into(),
                     payload: String::new(),
                     http_hint: None,
+                    interaction: None,
                 })
                 .unwrap();
         }
@@ -1523,6 +1504,7 @@ mod tests {
                 summary: summary.into(),
                 payload: "p".into(),
                 http_hint: None,
+                interaction: None,
             })
             .unwrap();
     }
@@ -1551,6 +1533,58 @@ mod tests {
 
         let filtered = store.recent_events(10, Some("203.0.113.7")).unwrap();
         assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn interaction_roundtrip_and_chain_compatible() {
+        // 0.5.9 H102：逐命令数组落盘往返；不含 interaction 的存量事件读回为空串；
+        // interaction 不进哈希链 canonical——写入前后链校验都通过
+        use aisafeguard_core::event::ShellStep;
+        let store = tmp_store("interaction");
+
+        store
+            .insert_event(&SecurityEvent::HoneypotHit {
+                ts: aisafeguard_core::now_ts(),
+                listener: "ssh".into(),
+                kind: "ssh".into(),
+                port: 2222,
+                remote_ip: "203.0.113.7".into(),
+                remote_port: 40001,
+                summary: "假 Shell 会话".into(),
+                payload: "whoami".into(),
+                http_hint: None,
+                interaction: Some(vec![
+                    ShellStep {
+                        command: "whoami".into(),
+                        response: "root".into(),
+                    },
+                    ShellStep {
+                        command: "uname -a".into(),
+                        response: "Linux debian 6.1.0".into(),
+                    },
+                ]),
+            })
+            .unwrap();
+        // 存量形态：无 interaction
+        hit(&store, "203.0.113.7", "低交互命中");
+
+        let rows = store.recent_events(10, None).unwrap();
+        assert_eq!(rows.len(), 2);
+        let with_steps = rows
+            .iter()
+            .find(|r| !r.interaction.is_empty())
+            .expect("应有交互行");
+        let steps: Vec<ShellStep> = serde_json::from_str(&with_steps.interaction).unwrap();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].command, "whoami");
+        assert_eq!(steps[1].response, "Linux debian 6.1.0");
+        assert_eq!(
+            rows.iter().filter(|r| r.interaction.is_empty()).count(),
+            1,
+            "存量事件 interaction 为空串"
+        );
+
+        assert!(store.verify_chain().unwrap().ok, "链校验不受 interaction 影响");
     }
 
     #[test]
