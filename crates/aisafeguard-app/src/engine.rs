@@ -146,6 +146,8 @@ pub struct EngineHandle {
     pub detect: Arc<aisafeguard_detect::FreqEngine>,
     pub capture: Arc<CaptureState>,
     pub rules: Arc<RulesState>,
+    /// XDP 组合执行器（0.5.1：仅 Linux 且 [xdp].enabled 时 Some；fast 层未附加为 None）
+    pub xdp: Option<Arc<aisafeguard_xdp::composite::CompositeFirewall>>,
     pub rt: tokio::runtime::Handle,
     pub started: Instant,
     pub ai_running: Arc<AtomicBool>,
@@ -192,6 +194,21 @@ pub struct CaptureStatus {
     pub note: String,
 }
 
+/// XDP 快速执行层状态（0.5.1 G1/G3 可观测；全部元数据与计数）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct XdpStatus {
+    /// 快速层已附加
+    pub active: bool,
+    pub iface: String,
+    pub mode: String,
+    /// 已镜像封禁源数
+    pub mirrored: usize,
+    /// XDP 累计丢弃包数（内核计数器，重启清零）
+    pub drops_total: u64,
+    /// 内核流表条目数（LRU 有界 65536）
+    pub flows: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusReport {
     pub version: String,
@@ -212,6 +229,8 @@ pub struct StatusReport {
     pub ai: AiStatus,
     /// 规则子集引擎状态（0.5.0 H6 可观测）
     pub rules: RulesStatus,
+    /// XDP 快速执行层状态（0.5.1 G1/G3 可观测；Windows / 未启用时 active=false）
+    pub xdp: XdpStatus,
     /// JA3 指纹覆盖（0.5.0 H6：24h 内 Detection 事件携带指纹的占比，比率展示层算）
     pub fingerprint_24h: FingerprintStats,
 }
@@ -325,6 +344,7 @@ impl EngineHandle {
                     hits: self.rules.hits(),
                 }
             },
+            xdp: self.xdp_status(),
             fingerprint_24h: {
                 let (detections, with_fingerprint) = self
                     .store
@@ -335,6 +355,33 @@ impl EngineHandle {
                     with_fingerprint,
                 }
             },
+        }
+    }
+
+    /// XDP 快速层运行状态（G1/G3）：未附加 / 非 Linux / 未启用 → active=false。
+    pub fn xdp_status(&self) -> XdpStatus {
+        let cfg = self.config();
+        match &self.xdp {
+            Some(c) if c.fast_active() => {
+                let stats = c.fast_stats().unwrap_or_default();
+                XdpStatus {
+                    active: true,
+                    iface: cfg.xdp.iface.clone(),
+                    mode: cfg.xdp.mode.clone(),
+                    mirrored: stats.mirrored,
+                    drops_total: stats.drops_total,
+                    flows: stats.flows,
+                }
+            }
+            _ => XdpStatus::default(),
+        }
+    }
+
+    /// 一键清空 XDP map（G3）：封禁镜像与流表全清，nftables 兜底不受影响。
+    pub fn xdp_clear_map(&self) -> Result<()> {
+        match &self.xdp {
+            Some(c) => c.fast_clear().map_err(Error::Firewall),
+            None => Ok(()),
         }
     }
 
@@ -813,9 +860,14 @@ fn handle_detection(
                     })
                 })
                 .unwrap_or_default();
+            // via=xdp（0.5.1 G3）：命中规则的封禁已镜像内核快速丢弃路径时留痕，
+            // 避免与 nftables 双执行的可观测性混淆
+            let via_xdp = sink.fw.backend() == "nftables+xdp"
+                && aisafeguard_xdp::composite::mirrorable(&spec).is_some();
+            let via = if via_xdp { "；via=xdp" } else { "" };
             sink.bus.publish(SecurityEvent::engine(
                 "info",
-                format!("已自动封禁 {src} 至 {until}（规则 {}）", row.name),
+                format!("已自动封禁 {src} 至 {until}（规则 {}）{via}", row.name),
             ));
         }
         Err(e) => {
@@ -1617,6 +1669,10 @@ impl Console for EmbeddedConsole {
 
     fn stats_24h(&self) -> anyhow::Result<StatsSummary> {
         self.0.stats_24h().map_err(anyhow::Error::msg)
+    }
+
+    fn clear_xdp_map(&self) -> anyhow::Result<()> {
+        self.0.xdp_clear_map().map_err(anyhow::Error::msg)
     }
 
     fn scan_exposure(&self) -> anyhow::Result<Vec<aisafeguard_detect::exposure::Entry>> {

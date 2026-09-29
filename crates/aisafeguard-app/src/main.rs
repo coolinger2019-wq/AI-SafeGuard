@@ -489,7 +489,10 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
     let bus = EventBus::new(2048);
     // 防火墙执行器：平台后端兜底；Linux 上 [xdp].enabled 时叠加 XDP 快速层
     // （组合执行器：全部规则 nftables 兜底，IP 级入站规则镜像进 eBPF map 微秒级生效）
-    let firewall: std::sync::Arc<dyn aisafeguard_firewall::Firewall> = {
+    let (firewall, xdp): (
+        std::sync::Arc<dyn aisafeguard_firewall::Firewall>,
+        Option<std::sync::Arc<aisafeguard_xdp::composite::CompositeFirewall>>,
+    ) = {
         let base = aisafeguard_firewall::create_backend();
         #[cfg(target_os = "linux")]
         {
@@ -503,9 +506,9 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
                             cfg.xdp.mode
                         ),
                     ));
-                    base
+                    (base, None)
                 } else {
-                    let composite = CompositeFirewall::new(base);
+                    let composite = std::sync::Arc::new(CompositeFirewall::new(base));
                     let mode = XdpMode::parse(&cfg.xdp.mode).unwrap_or(XdpMode::Skb);
                     match composite.attach_fast(&cfg.xdp.iface, mode) {
                         Ok(()) => {
@@ -522,6 +525,8 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
                                     mode.as_str()
                                 ),
                             ));
+                            let xdp = std::sync::Arc::clone(&composite);
+                            (composite, Some(xdp))
                         }
                         Err(e) => {
                             tracing::error!("XDP 快速执行层未启用: {e}");
@@ -529,17 +534,17 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
                                 "error",
                                 format!("XDP 快速执行层未启用（nftables 兜底不受影响）: {e}"),
                             ));
+                            (composite, None)
                         }
                     }
-                    std::sync::Arc::new(composite)
                 }
             } else {
-                base
+                (base, None)
             }
         }
         #[cfg(not(target_os = "linux"))]
         {
-            base
+            (base, None)
         }
     };
     let token = load_or_create_token(&data_dir)?;
@@ -580,6 +585,8 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
         detect: Arc::new(aisafeguard_detect::FreqEngine::new()),
         capture: Arc::new(engine::CaptureState::default()),
         rules: Arc::new(engine::RulesState::default()),
+        xdp,
+
         rt: rt.handle().clone(),
         started: Instant::now(),
         ai_running: Arc::new(AtomicBool::new(false)),

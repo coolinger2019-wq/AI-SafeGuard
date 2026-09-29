@@ -43,6 +43,9 @@ impl XdpMode {
 }
 
 /// 镜像资格：规则是否能由 XDP 承载（IP 级全端口入站 IPv4）。
+/// **内网/回环/链路本地/多播地址永不镜像**（0.5.1 G2：内网前缀永不写入
+/// 高速丢弃表——误配置不能经内核直丢路径放大成全内网断网；nftables 兜底层
+/// 语义不变，内网侧处置仍完整）。负路径测试见 mirrorable_never_takes_protected_ips。
 pub fn mirrorable(spec: &BlockSpec) -> Option<Ipv4Addr> {
     if spec.direction != Direction::In
         || spec.protocol != Protocol::Any
@@ -51,9 +54,26 @@ pub fn mirrorable(spec: &BlockSpec) -> Option<Ipv4Addr> {
         return None;
     }
     match spec.remote_ip {
-        Some(IpAddr::V4(v4)) => Some(v4),
+        Some(IpAddr::V4(v4)) => {
+            if aisafeguard_core::is_protected_ip(IpAddr::V4(v4)) {
+                None
+            } else {
+                Some(v4)
+            }
+        }
         _ => None,
     }
+}
+
+/// XDP 快速层运行统计（0.5.1 G1/G3，status 只读展示；全部元数据与计数）。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct XdpStats {
+    /// 已镜像的封禁源数（= BLOCKLIST 条目数）
+    pub mirrored: usize,
+    /// XDP 累计丢弃包数（内核 DROP_TOTAL 计数器，重启清零）
+    pub drops_total: u64,
+    /// 内核流表条目数（LRU 有界 65536，只存源三元组 + 包计数）
+    pub flows: usize,
 }
 
 /// Linux 侧：附加 XDP 程序 + map 句柄。
@@ -62,15 +82,36 @@ pub struct XdpFastPath {
     /// 保活：aya 对象（程序/链接/map）同生命周期
     _ebpf: aya::Ebpf,
     blocklist: aya::maps::HashMap<aya::maps::MapData, u32, u32>,
+    /// 内核流表（G1：源三元组 → 包计数，LRU 有界）
+    flows: aya::maps::HashMap<aya::maps::MapData, XdpFlowKey, u32>,
+    /// 全局丢弃计数（G3：内核单槽 u64）
+    drop_total: aya::maps::Array<aya::maps::MapData, u64>,
     /// 本侧已镜像的 IPv4（镜像集，resync 用它对账）
     mirror: std::collections::HashSet<Ipv4Addr>,
     pub iface: String,
     pub mode: XdpMode,
 }
 
+/// 内核流表 key（与 eBPF 侧 `repr(C) FlowKey` 逐字段对齐）。
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct XdpFlowKey {
+    pub src: u32,
+    pub sport: u16,
+    pub dport: u16,
+}
+
+// aya map key/value 约束：纯 Copy 数据按字节转译（无 unsafe 语句体，仅为声明）
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+unsafe impl aya::Pod for XdpFlowKey {}
+
 #[cfg(target_os = "linux")]
 impl XdpFastPath {
     /// 附加 XDP 程序到指定网卡并取回 BLOCKLIST map。
+    /// 启动事务（G4）：load → 程序加载 → 附加 → 取 map 串行，任一步失败
+    /// 即整体失败返回——半挂状态的 XDP 程序随对象一起卸载，无残留 hook。
     pub fn attach(iface: &str, mode: XdpMode) -> std::result::Result<Self, String> {
         // to_vec()：include_bytes 数据按 1 字节对齐，堆拷贝获得分配器对齐（见 lib.rs 注）
         let obj = crate::XDP_OBJECT.to_vec();
@@ -95,9 +136,21 @@ impl XdpFastPath {
             .ok_or("eBPF 对象里找不到 map BLOCKLIST")?
             .try_into()
             .map_err(|e| format!("map 类型不匹配: {e}"))?;
+        let flows: aya::maps::HashMap<aya::maps::MapData, XdpFlowKey, u32> = ebpf
+            .take_map("FLOWS")
+            .ok_or("eBPF 对象里找不到 map FLOWS")?
+            .try_into()
+            .map_err(|e| format!("map FLOWS 类型不匹配: {e}"))?;
+        let drop_total: aya::maps::Array<aya::maps::MapData, u64> = ebpf
+            .take_map("DROP_TOTAL")
+            .ok_or("eBPF 对象里找不到 map DROP_TOTAL")?
+            .try_into()
+            .map_err(|e| format!("map DROP_TOTAL 类型不匹配: {e}"))?;
         Ok(Self {
             _ebpf: ebpf,
             blocklist,
+            flows,
+            drop_total,
             mirror: HashSet::new(),
             iface: iface.to_string(),
             mode,
@@ -105,8 +158,9 @@ impl XdpFastPath {
     }
 
     pub fn block(&mut self, ip: Ipv4Addr) -> std::result::Result<(), String> {
+        // value 语义 = 该源被 XDP 丢弃的包计数（内核侧递增），初始 0
         self.blocklist
-            .insert(u32::from(ip), 1, 0)
+            .insert(u32::from(ip), 0, 0)
             .map_err(|e| format!("XDP map 写入 {ip} 失败: {e}"))?;
         self.mirror.insert(ip);
         Ok(())
@@ -142,6 +196,39 @@ impl XdpFastPath {
 
     pub fn mirrored_count(&self) -> usize {
         self.mirror.len()
+    }
+
+    /// 运行统计（G1/G3）：镜像数 / drop 总数 / 内核流表条目数。
+    /// 流表计数需遍历 key（BPF syscall），容量上限 65536，status 按需调用。
+    pub fn stats(&mut self) -> std::result::Result<XdpStats, String> {
+        let mut stats = XdpStats {
+            mirrored: self.mirror.len(),
+            drops_total: self
+                .drop_total
+                .get(&0u32, 0)
+                .map_err(|e| format!("读 DROP_TOTAL 失败: {e}"))?,
+            flows: 0,
+        };
+        let mut keys = self.flows.keys();
+        while let Some(k) = keys.next() {
+            k.map_err(|e| format!("遍历 FLOWS 失败: {e}"))?;
+            stats.flows += 1;
+        }
+        Ok(stats)
+    }
+
+    /// 一键清空（G3）：封禁 map 全清 + 流表全清（镜像集归零）。
+    /// 兜底层 nftables 不受影响——清空后语义回落到 nftables 侧。
+    pub fn clear(&mut self) -> std::result::Result<(), String> {
+        self.reconcile(&[])?;
+        // 先收集 key 再逐个删除（aya 迭代器借用与 remove 的可变借用冲突）
+        let keys: Vec<XdpFlowKey> = self.flows.keys().filter_map(|k| k.ok()).collect();
+        for k in keys {
+            self.flows
+                .remove(&k)
+                .map_err(|e| format!("清空 FLOWS 失败: {e}"))?;
+        }
+        Ok(())
     }
 }
 
@@ -179,6 +266,35 @@ impl CompositeFirewall {
         #[cfg(not(target_os = "linux"))]
         {
             false
+        }
+    }
+
+    /// 运行统计（G1/G3，status 只读）。未附加返回 None。
+    pub fn fast_stats(&self) -> Option<XdpStats> {
+        #[cfg(target_os = "linux")]
+        {
+            let mut guard = self.fast.lock().expect("XDP 状态锁中毒");
+            guard.as_mut().and_then(|f| f.stats().ok())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
+    /// 一键清空 map（G3）：封禁镜像 + 流表全清；nftables 兜底不受影响。
+    pub fn fast_clear(&self) -> std::result::Result<(), String> {
+        #[cfg(target_os = "linux")]
+        {
+            let mut guard = self.fast.lock().expect("XDP 状态锁中毒");
+            match guard.as_mut() {
+                Some(f) => f.clear(),
+                None => Ok(()),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(())
         }
     }
 }
@@ -321,6 +437,43 @@ mod tests {
                 None
             )),
             None
+        );
+    }
+
+    #[test]
+    fn mirrorable_never_takes_protected_ips() {
+        // G2 硬过滤：内网/回环/链路本地/未指定地址永不写入高速丢弃表——
+        // 误配置不能经内核直丢路径放大成全内网断网（nftables 兜底层语义不变）
+        for ip in [
+            "127.0.0.1",
+            "192.168.1.50",
+            "10.0.0.9",
+            "172.16.4.4",
+            "169.254.1.2",
+            "0.0.0.0",
+            "255.255.255.255",
+            "224.0.0.1",
+        ] {
+            assert_eq!(
+                mirrorable(&spec(
+                    Direction::In,
+                    Protocol::Any,
+                    Some(ip.parse().unwrap()),
+                    None
+                )),
+                None,
+                "{ip} 不得镜像进 XDP map"
+            );
+        }
+        // 公网地址不受影响
+        assert!(
+            mirrorable(&spec(
+                Direction::In,
+                Protocol::Any,
+                Some("203.0.113.7".parse().unwrap()),
+                None
+            ))
+            .is_some()
         );
     }
 }

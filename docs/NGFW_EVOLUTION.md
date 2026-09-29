@@ -196,3 +196,38 @@ eBPF-for-windows 维持实验轨（见上节决策）。
 **可观测（H6）**：`/api/status` 与 GUI 暴露 rules（enabled/loaded/条数/SHA-256 前 16 位/
 最近加载说明/命中数）与 fingerprint_24h（Detection 携带 JA3 占比）；capture.note 承载
 降级原因；XDP 计数随 Batch G（0.5.1）补齐。
+
+## 8. 0.5.1 Batch G 落地对账（Linux 高速路径，2026-09）
+
+**G1（eBPF 流表）**：XDP 程序内新增 `FLOWS` LRU map（上限 65536）——入站源三元组
+（src IP / sport / dport，目标恒为本机）→ 包计数；只存元数据与计数，无载荷（隐私红线
+同用户态流表）。用户态 `XdpFastPath::stats()` 经 BPF syscall 遍历读条目数。
+`DROP_TOTAL` 单槽 u64 计数器一次读得丢弃总数；`BLOCKLIST` 的 value 语义升级为
+**该源被 XDP 丢弃的包计数**（内核侧逐包递增）。
+
+**G2（批准集合 → map）**：0.3.7 已有「nftables 兜底 + 镜像」双写与 resync 对账；
+0.5.1 补**内网硬过滤**——`mirrorable` 拒绝回环/内网/链路本地/多播/未指定地址
+（负路径测试 `mirrorable_never_takes_protected_ips`）：误配置不能经内核直丢路径
+放大成全内网断网，nftables 兜底层语义不变。TTL 一致性由既有路径保证：到期解封
+（janitor）走 `remove` → 同步删 map 条目；启动 resync 全量 reconcile。
+
+**G3（drop 计数 / via 标签 / 一键清空）**：`/api/status` 与 GUI 暴露
+`xdp { active, iface, mode, mirrored, drops_total, flows }`；自动封禁命中可镜像规则时
+事件留痕 `via=xdp`（区分与 nftables 的双执行）；`POST /api/xdp/clear` 与 GUI 按钮
+一键清空 map（封禁镜像 + 流表），清空后语义回落 nftables。
+
+**G4（权限与降级，事务化）**：附加流程 = load → 程序加载 → 附加 → 取 map 串行，
+任一步失败整体失败（半挂对象随作用域卸载，无残留 hook）；失败只降级纯 nftables
+并留 error 事件，进程不退出。G6 矩阵见 docs/LINUX-TESTING.md。
+
+**G6（发行版/安全启动矩阵）**：
+- 已实测：WSL2 Ubuntu 24.04（kernel 6.6.x，skb 模式，root）——附加/统计/清空冒烟
+  （`cargo test -p aisafeguard-xdp --test embedded -- --include-ignored`）。
+- 预期可用的目标环境：Ubuntu 22.04+（kernel 5.15+，XDP generic/skb 模式）；
+  native 模式取决于网卡驱动（virtio/e1000 等支持程度不一，失败自动降级 skb 可试）。
+- 已知失败模式：**Secure Boot + lockdown=integrity** 下未签名 BPF 程序加载可能被拒
+  （表现为附加失败自动降级）；内核缺 BTF 时 aya 走重定位降级路径；无 CAP_BPF/root
+  直接拒绝。全部失败路径 = 纯 nftables 继续工作，事件留痕。
+
+**配置说明**：规划草案中的 `[detect.ebpf]` 落地为既有 `[xdp]`（enabled/iface/mode，
+0.3.7 引入）——同一控制点，不设第二份配置。

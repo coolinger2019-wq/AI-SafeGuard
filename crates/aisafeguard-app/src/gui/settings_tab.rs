@@ -296,11 +296,7 @@ impl AisafeApp {
                 if !r.enabled {
                     chip(ui, "未启用", text_dim());
                 } else if r.loaded {
-                    chip(
-                        ui,
-                        &format!("已加载 {} 条", r.rule_count),
-                        ok(),
-                    );
+                    chip(ui, &format!("已加载 {} 条", r.rule_count), ok());
                 } else {
                     chip(ui, "未加载", warn());
                 }
@@ -485,10 +481,46 @@ impl AisafeApp {
                     });
                 ui.end_row();
             });
+        // XDP 运行状态（0.5.1 G1/G3 可观测，只读）+ 一键清空 map
+        let xdp_status = self.cache.status.as_ref().map(|st| st.xdp.clone());
+        if let Some(x) = &xdp_status {
+            let backend_has_xdp = self
+                .cache
+                .status
+                .as_ref()
+                .is_some_and(|st| st.backend.contains("xdp"));
+            ui.horizontal_wrapped(|ui| {
+                if x.active {
+                    chip(
+                        ui,
+                        &format!(
+                            "XDP 生效 · {} · 镜像 {} 源 · 丢弃 {} 包 · 内核流 {} 条",
+                            x.mode, x.mirrored, x.drops_total, x.flows
+                        ),
+                        ok(),
+                    );
+                } else if backend_has_xdp {
+                    chip(ui, "XDP 未生效", warn());
+                } else {
+                    chip(ui, "XDP 未启用", text_dim());
+                }
+                if ui.button("清空 XDP map").clicked() {
+                    match self.eng.clear_xdp_map() {
+                        Ok(()) => {
+                            self.set_toast("已清空 XDP map（nftables 兜底不受影响）");
+                            self.refresh_cache();
+                        }
+                        Err(e) => self.set_toast(format!("清空失败: {e}")),
+                    }
+                }
+            });
+        }
         ui.label(
-            RichText::new("仅 Linux 生效；需 root/CAP_BPF。镜像范围 = 入站 + 任意协议 + 无端口 + IPv4 的封禁规则。")
-                .size(11.0)
-                .color(text_dim()),
+            RichText::new(
+                "仅 Linux 生效；需 root/CAP_BPF。镜像范围 = 入站 + 任意协议 + 无端口 + IPv4 且非内网的封禁规则                 （内网/回环地址永不写入快速丢弃表，G2）。内核流表只存源三元组与包计数（无载荷，LRU 有界）。",
+            )
+            .size(11.0)
+            .color(text_dim()),
         );
 
         ui.add_space(14.0);

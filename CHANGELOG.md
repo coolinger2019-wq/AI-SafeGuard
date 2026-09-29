@@ -2,6 +2,33 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.5.1] - 2026-09-29
+
+按 ROADMAP-0.5 Batch G 完成 Linux 高速路径（G5 AF_XDP 维持 stretch）。
+
+### 新增
+
+- **eBPF 内核流表（G1）**：XDP 程序新增 `FLOWS` LRU map（65536 上限）——
+  入站源三元组 → 包计数，只存元数据无载荷（隐私红线同用户态流表）；
+  `DROP_TOTAL` 单槽计数器一次读得丢弃总数；BLOCKLIST value 语义升级为
+  按源丢弃计数（内核侧递增）
+- **drop 计数 / via=xdp 标签 / 一键清空（G3）**：`/api/status` 与 GUI 设置页
+  暴露 `xdp { active, iface, mode, mirrored, drops_total, flows }`；自动封禁命中
+  可镜像规则时事件留痕 `via=xdp`；`POST /api/xdp/clear` 与 GUI 按钮一键清空
+  map（封禁镜像 + 流表），清空后语义回落 nftables
+- **内网硬过滤（G2）**：`mirrorable` 拒绝回环/内网/链路本地/多播/未指定地址
+  进入 XDP 快速丢弃表（负路径测试钉住）——误配置不能经内核直丢放大成全内网
+  断网；nftables 兜底层语义不变；TTL 一致性由 janitor remove→map 同步保证
+- **发行版/安全启动矩阵文档（G6）**：NGFW_EVOLUTION §8——WSL2 Ubuntu 24.04
+  实测、Ubuntu 22.04+ 预期、Secure Boot lockdown 失败模式（全部失败路径 =
+  纯 nftables 继续工作）
+
+### 修复
+
+- `tests/embedded.rs` 借用错误（0.3.7 起从未在 Linux 编译通过）：include_bytes
+  1 字节对齐需堆拷贝再 load（产品路径一致）；WSL2 实机冒烟
+  `xdp_attach_smoke`（root，附加→统计→清空→卸载）首次真正运行并通过
+
 ## [0.5.0] - 2026-09-29
 
 按 ROADMAP-0.5 完成 Batch E（解析与 L7 复用）+ Batch F（规则子集引擎）+

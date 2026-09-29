@@ -34,6 +34,10 @@ pub trait Console: Send + Sync {
     fn list_proposals(&self, status: Option<&str>, limit: u32) -> anyhow::Result<Vec<ProposalRow>>;
     fn list_ai_runs(&self, limit: u32) -> anyhow::Result<Vec<AiRunRow>>;
     fn stats_24h(&self) -> anyhow::Result<StatsSummary>;
+    /// 一键清空 XDP map（0.5.1 G3，仅 Linux 快速层已附加时有意义）
+    fn clear_xdp_map(&self) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!("XDP 快速执行层不可用（非 Linux 或未附加）"))
+    }
     /// 主机暴露面盘点（扫描 + 存快照 + 广播）
     fn scan_exposure(&self) -> anyhow::Result<Vec<aisafeguard_detect::exposure::Entry>>;
     /// 最近一次暴露面快照（None = 从未扫描）

@@ -307,3 +307,15 @@ cargo test --workspace   # 实测：73 用例全绿（Windows 侧开发的双重
    落库/API 历史里靠证据文案辨识规则。追溯需求若强，可考虑给 EventRow 加列。
 4. **低阈值实验配置下，对同一端口的高频轮询**（本测试的 curl）会触发 syn_flood 判定
    （同端口窗口内 ≥4 连接）——默认阈值 100 下正常监控频率不会触发。
+
+## 13. XDP 快速层实机冒烟（0.5.1 Batch G 回填，2026-09-29 WSL2 实测）
+
+```bash
+sudo cargo test -p aisafeguard-xdp --test embedded -- --include-ignored --nocapture
+```
+
+- `embedded_object_parses`：嵌入对象（含新 FLOWS/DROP_TOTAL map）可解析
+- `xdp_attach_smoke`：eth0 skb 模式附加 → BLOCKLIST 写入 TEST-NET-3 地址 →
+  统计（mirrored=1）→ 清空（mirrored=0）→ 卸载，全链路通过
+- 失败预期：无 root / lockdown=integrity / 内核不支持 → 附加失败返回 Err
+  （产品路径 = 自动降级纯 nftables 并留事件，进程不退出）

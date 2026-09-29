@@ -10,7 +10,7 @@
 
 > 原则：可开关的 NGFW \*\*感知层\*\*；命中只进事件总线；封禁仍走 `Firewall` trait；默认关深检；Linux 可高速、Windows 能力对等但不强制 eBPF。
 
-> **状态（2026-09-29）：0.5.0 完成 Batch E + F + H（P0 全部 + P1 的 E5/F7/H7）；Batch G 按发版建议归 0.5.1。** 落地对账见 docs/NGFW_EVOLUTION.md §7。
+> **状态（2026-09-29）：0.5.0 完成 Batch E + F + H（P0 全部 + P1 的 E5/F7/H7）；0.5.1 完成 Batch G（G1/G2/G3/G4/G6，G5 AF_XDP 维持 stretch）。** 落地对账见 docs/NGFW_EVOLUTION.md §7。
 
 
 
@@ -74,7 +74,7 @@
 
 \- \[x\] 能加载 \*\*Suricata/ET 风格子集\*\*规则包；非法规则整包拒绝，不半生效
 
-\- \[ ] Linux：在文档写明的内核/CAP 条件下，可选 eBPF 流表 ± XDP 可启用；关闭后无残留强制路径（**0.5.1 Batch G**）
+\- \[x\] Linux：在文档写明的内核/CAP 条件下，可选 eBPF 流表 ± XDP 可启用；关闭后无残留强制路径（0.5.1 Batch G，NGFW_EVOLUTION §8）
 
 \- \[x\] Windows：\*\*不\*\*依赖 eBPF 运行时即可使用 L7 + 规则；与 Linux 同一最小规则包行为一致（允许性能差）
 
@@ -226,13 +226,13 @@
 
 
 
-\- \[ ] 默认不加载 eBPF/XDP
+\- \[x\] 默认不加载 eBPF/XDP
 
-\- \[ ] 开关测试：开→计数增加→关→无残留 hook（文档化检查方法）
+\- \[x\] 开关测试：开→计数增加→关→无残留 hook（WSL2 实机冒烟：附加→统计→清空→卸载；NGFW_EVOLUTION §8）
 
-\- \[ ] 内网地址写入 map 的负路径测试
+\- \[x\] 内网地址写入 map 的负路径测试（mirrorable_never_takes_protected_ips）
 
-\- \[ ] 与 0.4 syslog/webhook 只读总线约束未被破坏
+\- \[x\] 与 0.4 syslog/webhook 只读总线约束未被破坏
 
 
 

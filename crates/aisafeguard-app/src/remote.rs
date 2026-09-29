@@ -162,6 +162,11 @@ impl Console for RemoteConsole {
         Ok(self.get("/api/stats")?.json()?)
     }
 
+    fn clear_xdp_map(&self) -> anyhow::Result<()> {
+        self.post("/api/xdp/clear")?;
+        Ok(())
+    }
+
     fn scan_exposure(&self) -> anyhow::Result<Vec<aisafeguard_detect::exposure::Entry>> {
         let snap: crate::engine::ExposureSnapshot = self.post("/api/exposure/scan")?.json()?;
         Ok(snap.entries)

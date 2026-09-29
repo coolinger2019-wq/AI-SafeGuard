@@ -41,6 +41,7 @@ pub async fn serve(engine: Arc<EngineHandle>) {
         .route("/api/stats", get(stats))
         .route("/api/exposure", get(get_exposure))
         .route("/api/exposure/scan", post(scan_exposure))
+        .route("/api/xdp/clear", post(xdp_clear))
         .route("/api/intel", get(get_intel))
         .route("/api/intel/refresh", post(refresh_intel))
         .route("/api/config", get(get_config).post(put_config))
@@ -105,6 +106,14 @@ async fn events(State(s): State<AppState>, Query(q): Query<EventsQuery>) -> Resp
     let limit = q.limit.unwrap_or(100).min(1000);
     match s.engine.list_events(limit, q.ip.as_deref()) {
         Ok(rows) => Json(rows).into_response(),
+        Err(e) => err_resp(e),
+    }
+}
+
+/// 一键清空 XDP map（0.5.1 G3）：封禁镜像与内核流表全清，nftables 兜底不受影响
+async fn xdp_clear(State(s): State<AppState>) -> Response {
+    match s.engine.xdp_clear_map() {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
         Err(e) => err_resp(e),
     }
 }
