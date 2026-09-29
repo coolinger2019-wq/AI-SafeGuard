@@ -346,7 +346,6 @@ pub mod space {
     pub const S: f32 = 8.0;
     pub const M: f32 = 12.0;
     pub const L: f32 = 16.0;
-    pub const XL: f32 = 24.0;
 }
 
 /// 表格行高（egui_extras 表格与操作按钮共用，随 zoom 等比缩放）。
@@ -368,9 +367,6 @@ pub fn body_text(t: impl Into<String>) -> RichText {
 }
 pub fn caption(t: impl Into<String>) -> RichText {
     RichText::new(t).size(type_scale::CAPTION)
-}
-pub fn micro(t: impl Into<String>) -> RichText {
-    RichText::new(t).size(type_scale::MICRO)
 }
 pub fn mono_text(t: impl Into<String>) -> RichText {
     RichText::new(t).size(type_scale::MONO)

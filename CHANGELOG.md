@@ -10,7 +10,7 @@ GUI 重设计（frontend-ui-engineering 规范落地）：排版比例体系统�
 
 - **排版比例体系**：新增 `type_scale` 七级 token（DISPLAY 26 / TITLE 20 /
   SECTION 15.5 / BODY 14.5 / CAPTION 12.5 / MICRO 11.5 / MONO 13）与 8pt 间距
-  系统（`space`：4/8/12/16/24）；此前散落各页的 `.size(10~24)` 硬编码全部
+  系统（`space`：4/8/12/16）；此前散落各页的 `.size(10~24)` 硬编码全部
   收敛到 token（约 80 处），表格行高/表头统一 `ROW_H/HEADER_H`——字号缩放
   与层级比例全界面一致
 - **设置页分页**：单页长滚动（13 个小节）改为六个功能域子页（分段导航）——
