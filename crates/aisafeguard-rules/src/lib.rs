@@ -12,6 +12,7 @@
 
 pub mod ir;
 pub mod loader;
+pub mod matcher;
 pub mod parse;
 
 pub use ir::Rule;
