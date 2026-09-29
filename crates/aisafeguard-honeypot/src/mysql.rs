@@ -405,7 +405,7 @@ mod tests {
         assert_eq!(&p[..4], &[0x03, b'd', b'e', b'f']);
         assert_eq!(&p[4..5], &[0x00]); // 空 schema lenenc
         assert!(p.contains(&0x06), "name 应带长度前缀");
-        assert_eq!(&p[p.len() - 3..], &[0xfd, 0x00, 0x00]);
+        assert_eq!(&p[p.len() - 5..], &[0xfd, 0x00, 0x00, 0x00, 0x00]);
     }
 
     #[test]
