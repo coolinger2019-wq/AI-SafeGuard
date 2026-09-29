@@ -170,3 +170,29 @@
 其网络钩子窄于 Linux eBPF，且多数场景仍落在 WFP/XDP 扩展之上，并非与 WFP 平行的另一套完整过滤栈；与 Linux 程序亦非二进制兼容。生产路径常涉及运行时安装、系统版本门槛与签名/HVCI（含 bpf2c 原生驱动），部署成本高于「系统自带 BFE + 可选自有 callout」。实验仅限于早期过滤/计数类原型，命中后的封禁策略仍回现有 trait。
 
 **跨平台对齐方式：** Linux 0.5 可走 eBPF 流表 / XDP map；Windows 以 WFP 达到**能力对等**（采样、流元数据、情报驱动的封禁建议），不要求与 Linux 共用同一套 eBPF 程序。禁止为叙事一致而将 eBPF-for-windows 定为 Windows 唯一数据面。
+
+## 7. 0.5.0 感知层落地对账（Batch E/F/H，2026-09）
+
+**Batch E（解析与 L7 复用）**：`aisafeguard-l7` 独立 crate（蜜罐与采样 full 模式共用）——
+HttpHint（schema v1，只增不改义）+ JA3（冻结向量）+ JA4（对齐 FoxIO 官方实现）；事件统一字段
+`http_hint / tls_fingerprint / tls_ja4`，按 `[detect.l7]` 门控（默认关，热更）。
+
+**Batch F（规则子集引擎）**：`aisafeguard-rules` 独立 crate（**依赖图禁止链接 firewall**，
+命中只产事件）——规范 v1 见 [RULESET_SUBSET.md](RULESET_SUBSET.md)；整包拒绝、max_rules、
+SHA-256 留痕；`[detect.rules]` 默认关，`auto_block` 与快路径解耦（默认只告警）；
+自写示范包 `crates/aisafeguard-rules/demo.rules`（16 条，集成测试双平台同跑）。
+
+**H1（Windows 能力对等）：规则引擎与 L7 是纯用户态 Rust crate（`forbid(unsafe_code)`、
+无平台分支），Windows 与 Linux 跑同一 IR、同一匹配器、同一测试向量集**——行为一致是
+构造性的（同一份代码），不依赖平台对账；性能差异允许（full 模式逐帧扫描 8KB 重组前缀）。
+Windows 上完成 L7+规则演示**无需任何 eBPF 步骤**：装好 exe + WinDivert 驱动即可，
+蜜罐路径（payload 全窗匹配）甚至不需要采样捕获。Windows full 模式预期：需管理员/服务
+模式运行（0.3.1 口径不变），重组流前缀 ≤8KB，规则数上限 5000。
+
+**H2（采样策略）：维持 0.4 决策不变**——默认 WinDivert 采样（control/full），缺驱动/
+无提权/驱动哈希不符时优雅降级并留事件；WFP callout 感知仍归 0.5.2 stretch，
+eBPF-for-windows 维持实验轨（见上节决策）。
+
+**可观测（H6）**：`/api/status` 与 GUI 暴露 rules（enabled/loaded/条数/SHA-256 前 16 位/
+最近加载说明/命中数）与 fingerprint_24h（Detection 携带 JA3 占比）；capture.note 承载
+降级原因；XDP 计数随 Batch G（0.5.1）补齐。
