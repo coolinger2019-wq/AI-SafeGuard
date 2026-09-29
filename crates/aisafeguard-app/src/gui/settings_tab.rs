@@ -240,6 +240,90 @@ impl AisafeApp {
         );
 
         ui.add_space(14.0);
+        section(ui, "L7 解析与指纹（full 采样模式）");
+        egui::Grid::new("l7-settings")
+            .num_columns(2)
+            .spacing([14.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("HTTP 提示解析");
+                ui.checkbox(
+                    &mut draft.detect.l7.enabled,
+                    "（full 模式流前缀解析 method/path/UA，默认关闭）",
+                );
+                ui.end_row();
+                ui.label("JA3 客户端指纹");
+                ui.checkbox(&mut draft.detect.l7.ja3, "（TLS ClientHello，md5）");
+                ui.end_row();
+                ui.label("JA4 客户端指纹");
+                ui.checkbox(&mut draft.detect.l7.ja4, "（FoxIO JA4，默认关闭）");
+                ui.end_row();
+            });
+        ui.label(
+            RichText::new(
+                "开关热更即时生效；产出字段随 Detection 事件入库（http_hint / tls_fingerprint / tls_ja4）。",
+            )
+            .size(11.0)
+            .color(text_dim()),
+        );
+
+        ui.add_space(14.0);
+        section(ui, "规则子集引擎（Suricata/ET 风格）");
+        egui::Grid::new("rules-settings")
+            .num_columns(2)
+            .spacing([14.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("启用规则匹配");
+                ui.checkbox(&mut draft.detect.rules.enabled, "（默认关闭）");
+                ui.end_row();
+                ui.label("规则包路径");
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.detect.rules.path)
+                        .desired_width(440.0)
+                        .hint_text("本地单文件规则包，如 C:\\rules\\demo.rules"),
+                );
+                ui.end_row();
+                ui.label("命中自动封禁");
+                ui.checkbox(
+                    &mut draft.detect.rules.auto_block,
+                    "（默认只告警；开启后仍受内网保护与误报抑制约束）",
+                );
+                ui.end_row();
+            });
+        // 命中状态只读展示（0.5 不做规则编辑器——规则文件外置维护）
+        if let Some(st) = &self.cache.status {
+            ui.horizontal_wrapped(|ui| {
+                let r = &st.rules;
+                if !r.enabled {
+                    chip(ui, "未启用", text_dim());
+                } else if r.loaded {
+                    chip(
+                        ui,
+                        &format!("已加载 {} 条", r.rule_count),
+                        ok(),
+                    );
+                } else {
+                    chip(ui, "未加载", warn());
+                }
+                ui.label(
+                    RichText::new(format!("命中 {} 次", r.hits))
+                        .size(11.0)
+                        .color(text_dim()),
+                );
+                if !r.note.is_empty() {
+                    ui.label(RichText::new(&r.note).size(11.0).color(text_dim()));
+                }
+            });
+        }
+        ui.label(
+            RichText::new(
+                "规则包 = 本地文件（任何一条越界即整包拒绝）；文件变化自动整包热重载。\
+                 自写示范包见仓库 crates/aisafeguard-rules/demo.rules；范围见 docs/RULESET_SUBSET.md。",
+            )
+            .size(11.0)
+            .color(text_dim()),
+        );
+
+        ui.add_space(14.0);
         section(ui, "API 服务");
         egui::Grid::new("api-settings")
             .num_columns(2)
