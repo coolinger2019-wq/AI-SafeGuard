@@ -1,6 +1,8 @@
 # 构建产物
 /target
 /target-new
+# eBPF 子构建（ebpf/build.sh 产物 target-ebpf；objects/*.o 才入库）
+crates/aisafeguard-xdp/target-ebpf/
 *.exe
 *.pdb
 
