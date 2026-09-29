@@ -157,16 +157,16 @@ print("  REDIS PASS")
 PYEOF
 
 echo "═══ 5) 防守视角:事件流水(假 Shell 逐命令 interaction)═══"
-sleep 1
-curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:7420/api/events?limit=10" \
+sleep 2
+curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:7420/api/events?limit=20" \
   | python3 -c "
 import json,sys
-for e in json.load(sys.stdin)[:10]:
+for e in json.load(sys.stdin)[:20]:
     k = e.get('kind'); s = (e.get('summary') or '')[:80]
     if k == 'honeypot_hit':
         print('  [' + k + '] ' + s)"
 
 echo "═══ 6) 完整性:哈希链离线校验 ═══"
-"$BIN" --data-dir "$DEMO_DIR" verify-log
+"$BIN" --config "$DEMO_DIR/cfg.toml" --data-dir "$DEMO_DIR" verify-log
 
 echo "═══ 演示完成。事件与数据在 $DEMO_DIR(退出自动清理)═══"
