@@ -152,9 +152,17 @@ pub(crate) async fn ssh_shell_session(
     let Some(ssh_config) = shared.rt.ssh_config.clone() else {
         return empty_session_outcome("ssh 假 Shell 传输层不可用");
     };
-    let result = russh::server::run_stream(ssh_config, stream, handler).await;
-    if let Err(e) = &result {
-        // KEX 失败/畸形包/扫描器乱字节属常态：记录不报错
+    // run_stream().await 只等到 SSH-ID 交换并 spawn 会话任务;必须再 await
+    // RunningSession 等会话真正结束,否则读到的是空状态(0.5.9 WSL 实测踩坑)
+    let running = match russh::server::run_stream(ssh_config, stream, handler).await {
+        Ok(r) => r,
+        Err(e) => {
+            // SSH-ID 阶段就失败(扫描器乱字节等常态):记录不报错
+            tracing::debug!("ssh 假 Shell 握手失败: {e}");
+            return empty_session_outcome("SSH 握手未完成认证");
+        }
+    };
+    if let Err(e) = running.await {
         tracing::debug!("ssh 假 Shell 会话结束: {e}");
     }
     let session = shared.session.lock().await;

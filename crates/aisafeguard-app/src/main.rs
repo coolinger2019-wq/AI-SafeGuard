@@ -243,7 +243,7 @@ fn main() -> anyhow::Result<()> {
     // 子命令
     if let Some((cmd, arg)) = command {
         match cmd.as_str() {
-            "verify-log" => return cmd_verify_log(resolve_cfg(cfg_path, data_dir)?.1),
+            "verify-log" => return cmd_verify_log(resolve_cfg(cfg_path, data_dir)?),
             "export-events" => return cmd_export_events(resolve_cfg(cfg_path, data_dir)?, arg),
             "service-install"
             | "service-uninstall"
@@ -419,8 +419,7 @@ fn resolve_cfg(
     Ok((cfg, cfg_path))
 }
 
-fn cmd_verify_log(cfg_path: PathBuf) -> anyhow::Result<()> {
-    let (cfg, _) = AppConfig::load(&cfg_path)?;
+fn cmd_verify_log((cfg, _): (AppConfig, PathBuf)) -> anyhow::Result<()> {
     let store = Store::open(&cfg.db_path())?;
     let report = store.verify_chain()?;
     if report.ok {
