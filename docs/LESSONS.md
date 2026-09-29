@@ -192,3 +192,24 @@
 - **fork 上游 C 依赖的正确姿势**：`[patch.crates-io]` + 仓库内
   `third_party/` 副本 + 补丁处留 FORK PATCH 注释（原因、现象、上游 issue
   线索）；副本不追求最小 diff，保升级时可用 diff 重放。
+
+## 0.5 批次 · 平台专属测试与跨平台开发（2026-09-29）
+
+- **cfg 平台测试可能从未编译过**：`#[cfg(target_os = "linux")]` 的测试在
+  Windows 日常开发中被静默跳过，语法/借用错误要等真正在 Linux 上
+  `cargo check --all-targets` 才暴露（tests/embedded.rs 的借用错误从 0.3.7
+  带到 0.5.1）。带平台测试的功能，收口时必须在目标平台（WSL 即可）跑一次
+  全量 check/test，不能只看本机绿。
+- **WSL 里跑仓库内脚本**：Windows 侧 git checkout 会把 LF 转 CRLF，
+  `./build.sh` 报 `bad interpreter: bash\r`。用 `tr -d '\r' < build.sh | bash`
+  执行；或脚本统一 `bash build.sh` 调用。同理 wsl -e 传命令时 `$PATH` 会被
+  外层 shell 展开——复杂环境变量写进临时脚本文件再执行，别内联转义。
+- **WSL root 与用户态 rustup 不共享**：`wsl -u root` 下 rustup 找不到默认
+  toolchain，需显式 `RUSTUP_HOME`/`CARGO_HOME` 指向用户目录。
+- **aya-ebpf 语义**：`LruHashMap::get_ptr_mut` 返回 `*mut V`（值自增写
+  `*c = (*c).wrapping_add(1)`，不是指针算术）；两字节列表扩展（
+  supported_versions/signature_algorithms）wire 格式带 list_len 前缀，解析
+  时必须跳过——JA4 首版把长度字段当列表项，靠官方算法预计算的已知向量抓出。
+- **rustfmt 跨工具链漂移**：CI/不同人用不同 nightly/rustfmt 版本时，全仓
+  `cargo fmt` 会产生大块纯格式 diff。功能提交前先单独提一版
+  "fmt 对齐"提交，避免功能 diff 被格式噪声淹没。
