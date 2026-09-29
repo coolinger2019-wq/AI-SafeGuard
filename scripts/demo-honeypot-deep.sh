@@ -27,7 +27,28 @@ telnet_enabled = false
 username = "deploy"
 hostname = "debian-11"
 
-# 新协议蜜罐:显式配置监听即开启(默认监听表不含它们)
+# listeners 是整表语义:显式给出即全量替换,默认四协议也要写全;
+# mysql/redis 是 0.5.9 新协议,显式配置即开启
+[[honeypot.listeners]]
+name = "ssh"
+port = 2222
+kind = "ssh"
+
+[[honeypot.listeners]]
+name = "http"
+port = 8081
+kind = "http"
+
+[[honeypot.listeners]]
+name = "telnet"
+port = 2323
+kind = "telnet"
+
+[[honeypot.listeners]]
+name = "generic"
+port = 1337
+kind = "generic"
+
 [[honeypot.listeners]]
 name = "mysql"
 port = 3307
@@ -42,15 +63,20 @@ EOF
 echo "═══ 1) 启动引擎(假 Shell + MySQL 3307 + Redis 6380)═══"
 "$BIN" --headless --config "$DEMO_DIR/cfg.toml" --data-dir "$DEMO_DIR" &
 TOKEN=""
+PORT_OK=""
 for i in $(seq 1 40); do
     # 就绪 = 引擎已写出 token 且 ssh 蜜罐端口可连(冷启动可能 >2s)
     [ -z "$TOKEN" ] && [ -f "$DEMO_DIR/api-token" ] && TOKEN=$(cat "$DEMO_DIR/api-token")
     if [ -n "$TOKEN" ] && (timeout 1 bash -c "echo > /dev/tcp/127.0.0.1/2222") 2>/dev/null; then
+        PORT_OK=1
         break
     fi
     sleep 0.5
 done
-[ -n "$TOKEN" ] || { echo "引擎未就绪(无 api-token)"; exit 1; }
+{ [ -n "$TOKEN" ] && [ -n "$PORT_OK" ]; } || {
+    echo "引擎未就绪(ssh 蜜罐 20 秒内未监听,检查配置与端口占用)"
+    exit 1
+}
 
 echo "═══ 2) SSH 假 Shell:paramiko 实连回放 ═══"
 python3 "$(dirname "$0")/replay-ssh-shell.py" 127.0.0.1 2222
