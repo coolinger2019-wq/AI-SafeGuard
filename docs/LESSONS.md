@@ -249,3 +249,11 @@
 3. **默认值收口单一来源**：MySQL 版本号同时存在 `const MYSQL_VERSION` 与 `[honeypot.fingerprint]` 默认值时，改一处漏一处。参数化后常量降级为 `#[cfg(test)]` 测试断言，生产唯一来源是配置默认值。
 4. **「默认值=内置值逐字节一致」要写成测试**：H320 改造 ssh/telnet/mysql/http 四个协议的对外标识，靠基线断言 `assert_eq!(fingerprint.ssh_banner, "SSH-2.0-OpenSSH_9.6")` + 既有 banner 字节回归测试兜住"升级零行为变化"，比人工比对可靠。
 5. **egui 0.36 起没有 markdown 渲染模块**（egui_extras 早期版本的 markdown feature 已移除），第三方 egui markdown crate 与 0.36 的兼容不可考。自渲染一个受控子集（标题/列表/粗体/行内代码/代码块）约百行，并用测试钉住手册只用该子集——比引一个半维护的渲染依赖更稳。
+
+## 0.6 批次（多机协同完全体）
+
+- **sysinfo 0.37 的 `Uid`/`Gid` 是宏生成的私有字段新类型**（Linux 侧 `.0` 私有、无 `From<Uid> for u32`、`as_u32()` 是 Pid 专属）——跨平台 API 不定时，经 `Display` 解析回数值最稳。同款根因：**Windows 门禁编译不到 `cfg(unix)` 代码**，第三次踩（LESSONS 0.5.1 同款）——发版构建必须在目标平台各跑一次，交叉 `cargo check` 也算。
+- **Windows 保留端口段 netsh 列表不全**（telnet 13723 绑定 os error 10013，connect 探测探不出保留段）——需要"可用端口段"时对整段做**真实 bind 探测**（bind 成功才可用），固定步进早晚会撞段。
+- **测试框架实例启动失败必须先注册进清理列表再 start**：start 中途失败的实例若不在 finally 名单里就泄漏成僵尸进程，占住 API 端口级联污染后续运行；清理时按 CommandLine 过滤（`--headless`），不能无差别杀进程名——用户自己的服务/GUI 同名。
+- **rcgen 证书 CN 支持 UTF-8**（UTF8String），组织名校验不必自限 ASCII；但 JSON 线上协议的规范化仍应避免浮点与转义歧义（canonical_json 只支持整数/字符串/布尔/null）。
+- **外部规格库是免费的测试官**：python-stix2 首跑即抓到 valid_until 必须严格大于 valid_from 的规格约束（同秒相等也非法）——产出"标准格式"的代码，验收标准就是用官方库解析一遍。
