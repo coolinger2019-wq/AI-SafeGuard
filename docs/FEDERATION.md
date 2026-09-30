@@ -116,6 +116,27 @@ aisafeguard fed expect <节点名> <指纹>
 - **有界队列**：出站积压超 10k 按「丢新留旧」牺牲最新段（计数告警）——事件完整性
   以本地哈希链为准，外发本来就是副本。
 
+## 三点八、STIX 2.1 情报交换（F310，已落地）
+
+```bash
+# 导出（协调者或任意节点）：四类对象 + 节点证书签名
+aisafeguard fed audit stix包.json --format stix
+# 导入（须先取得签发方成员证书放入 <数据目录>/fed/certs/<节点>.pem）
+aisafeguard stix-import stix包.json
+```
+
+- **导出**：`identity`（节点）/ `indicator`（IP/域名/JA3/JA4，内网地址与
+  fed:/stix: 回灌源不导出）/ `observed-data`（蜜罐交互摘要含 SCO）/
+  `sighting`（印证命中，只挂能映射到的 indicator）。**凭证永不导出**（红线有
+  自动化断言）。包 = bundle + 节点证书 ECDSA 签名，篡改即拒收。
+- **导入**：验签失败/缺签名/超 5MB/超条数一律拒收；IOC 进情报表
+  （`stix:<节点>` 源），**默认只告警**——命中来源在事件流打 `ioc-hit` 标签
+  （约 1 分钟内生效），防火墙无自动动作；`valid_until` 到期自动失效（缺省 7 天）。
+- **外部验证**：`cargo test -p aisafeguard-app write_sample_for_external_validation
+  -- --nocapture` 生成 `target/stix-sample.json`，然后
+  `python -c "import json,stix2; stix2.parse(json.dumps(json.load(open('target/stix-sample.json'))['bundle']))"`
+  （python-stix2 3.0.2 实测通过）。
+
 ## 四、当前边界（诚实声明）
 
 - GUI 组织面板与证据链视图、事件行级组织提示归 F500（规则行级组织误报提示已在

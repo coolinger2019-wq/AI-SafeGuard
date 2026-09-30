@@ -998,6 +998,42 @@ fn handle_detection(
     }
 }
 
+/// F310 ioc-hit 标签：stix 导入的 IOC 命中本地事件流时打标（只告警，不改任何
+/// 检测/处置行为——自动封禁门控另有 confidence/kind 双保险排除 stix 源）。
+/// 缓存 60 秒：CLI 导入的清单最迟一个缓存周期对运行中引擎生效。
+pub fn tag_ioc_hit(
+    store: &Store,
+    cache: &mut (i64, std::collections::HashSet<String>),
+    ev: &mut SecurityEvent,
+) {
+    let (ip, text) = match ev {
+        SecurityEvent::HoneypotHit {
+            remote_ip, summary, ..
+        } => (remote_ip.clone(), summary),
+        SecurityEvent::Detection {
+            src_ip, evidence, ..
+        } => (src_ip.clone(), evidence),
+        _ => return,
+    };
+    if ip.is_empty() {
+        return;
+    }
+    let now = now_ts();
+    if now - cache.0 > 60 {
+        cache.0 = now;
+        cache.1.clear();
+        cache.1.extend(store
+            .active_intel(now)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.source.starts_with("stix:"))
+            .map(|r| r.value));
+    }
+    if cache.1.contains(&ip) && !text.contains("ioc-hit") {
+        text.push_str(" [ioc-hit]");
+    }
+}
+
 /// 快路径：消费蜜罐命中事件，产出 Detection 判定；
 /// auto_block 开启时自动封禁（TTL + 内网保护），全程留痕。
 /// 0.5.0 F4：规则子集引擎在蜜罐 payload 全窗上匹配（enabled 时）。

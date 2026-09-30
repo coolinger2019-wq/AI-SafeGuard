@@ -734,7 +734,7 @@ async fn fed_intel_get(State(state): State<FedState>) -> Response {
         .active_intel(now_ts())
         .unwrap_or_default()
         .into_iter()
-        .filter(|r| !r.source.starts_with("fed:"))
+        .filter(|r| !r.source.starts_with("fed:") && !r.source.starts_with("stix:"))
         .collect();
     Json(rows).into_response()
 }
@@ -1221,7 +1221,138 @@ pub fn expected_ok(
 
 /// `fed audit <out.json>`（0.4.0 C4）：协同审计导出——成员表、吊销表、
 /// 窗口内协同上报统计与最近协同事件样例。需读数据目录（含 DB）。
-pub fn cmd_audit(data_dir: &Path, out: &Path, window_secs: i64) -> anyhow::Result<()> {
+/// `fed audit <out> --format stix`（F310）：四类对象（identity/indicator/
+/// observed-data/sighting）导出 + 节点证书签名。回灌源（fed:*/stix:*）与内网
+/// 地址不导出；凭证永不导出（stix.rs 红线断言）。
+pub fn cmd_audit_stix(
+    data_dir: &Path,
+    node: &str,
+    version: &str,
+    out: &Path,
+    window_secs: i64,
+) -> anyhow::Result<()> {
+    let store = aisafeguard_store::Store::open(&data_dir.join("aisafeguard.db"))?;
+    let now = now_ts();
+    let intel: Vec<(String, String, String, i64)> = store
+        .active_intel(now)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| !r.source.starts_with("fed:") && !r.source.starts_with("stix:"))
+        .map(|r| (r.kind, r.value, r.confidence, r.expires_ts))
+        .collect();
+    // 蜜罐交互摘要：窗口内按攻击者 IP 聚合（次数/首次/末次）
+    let mut agg: std::collections::HashMap<String, (i64, i64, i64)> =
+        std::collections::HashMap::new();
+    for h in store.recent_honeypot_hits(2000).unwrap_or_default() {
+        if now - h.ts > window_secs {
+            continue;
+        }
+        let e = agg.entry(h.remote_ip.clone()).or_insert((0, h.ts, h.ts));
+        e.0 += 1;
+        e.1 = e.1.min(h.ts);
+        e.2 = e.2.max(h.ts);
+    }
+    let honeypot: Vec<(String, i64, i64, i64)> = agg
+        .into_iter()
+        .map(|(ip, (c, f, l))| (ip, c, f, l))
+        .collect();
+    // 印证命中 → sighting 供给（只挂 ip 维度）
+    let corr_hits: Vec<(String, String, i64, i64)> = store
+        .recent_org_events(200)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.kind == "corroboration" && r.detail == "hit")
+        .map(|r| (r.dim, r.key, r.nodes_count, r.ts))
+        .collect();
+    let bundle = crate::stix::build_bundle(
+        node,
+        version,
+        &crate::stix::ExportFeed {
+            intel,
+            honeypot,
+            corr_hits,
+        },
+        now,
+    );
+    // 签名：本节点证书钥（协调者自身也是组织成员，持证书与私钥）
+    let (_, key_path) = resolve_node_pair(data_dir, "", "", node);
+    let key_pem = std::fs::read_to_string(&key_path).map_err(|e| {
+        anyhow::anyhow!(
+            "本节点私钥不可读（{}）: {e} —— STIX 导出要求签名包，先 fed issue-cert",
+            key_path.display()
+        )
+    })?;
+    let key = crate::fedproto::load_signing_key(&key_pem).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let pkg = crate::stix::sign_package(node, &key, &bundle, now)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    std::fs::write(out, serde_json::to_string_pretty(&pkg)?)?;
+    let n_ind = bundle["objects"]
+        .as_array()
+        .map(|a| a.iter().filter(|o| o["type"] == "indicator").count())
+        .unwrap_or(0);
+    println!(
+        "✓ STIX 2.1 包已导出 {}（indicator {n_ind} · observed-data/sighting 含在内 · 已签名，凭证与内网拓扑不含）",
+        out.display()
+    );
+    Ok(())
+}
+
+/// `stix-import <签名包>`（F310）：验签 → 提取 indicator → 进 intel 表
+/// （confidence=fed + kind=imported_ioc，默认只告警不自动封；valid_until 到期
+/// 由既有 prune_intel 自动失效）。恶意清单投毒的兜底：条数/大小上限 + 签名 +
+/// 人工执行导入入口。
+pub fn cmd_stix_import(data_dir: &Path, path: &Path) -> anyhow::Result<()> {
+    let raw = std::fs::read(path)?;
+    let (node, pkg) = crate::stix::parse_package(&raw).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let cert_path = certs_dir(data_dir).join(format!("{node}.pem"));
+    let der = read_pem_certs(&cert_path)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "签发方证书不可读（{cert_path:?}）: {e} —— 导入要求先取得该成员证书"
+            )
+        })?
+        .remove(0);
+    crate::stix::verify_package(&pkg, der.as_ref())
+        .map_err(|e| anyhow::anyhow!("验签失败，拒收: {e}"))?;
+    let iocs = crate::stix::parse_indicators(&pkg["bundle"], now_ts())
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let now = now_ts();
+    let store = aisafeguard_store::Store::open(&data_dir.join("aisafeguard.db"))?;
+    let upserts: Vec<(String, String, String, String, i64, i64)> = iocs
+        .iter()
+        .map(|i| {
+            (
+                format!("stix:{node}"),
+                "imported_ioc".into(),
+                i.value.clone(),
+                "fed".into(),
+                now,
+                i.expires_ts,
+            )
+        })
+        .collect();
+    let n = store.upsert_intel(&upserts).unwrap_or(0);
+    let _ = store.insert_event(&SecurityEvent::engine(
+        "info",
+        format!("STIX 清单导入：{n} 条 IOC（来源 {node}，签名验证通过；默认仅标注打 ioc-hit 标签，不自动封禁）"),
+    ));
+    println!(
+        "✓ 已导入 {n} 条 IOC（来源 {node}，验签通过）。默认只告警：命中来源打 ioc-hit 标签，防火墙无自动动作；valid_until 到期自动失效"
+    );
+    Ok(())
+}
+
+pub fn cmd_audit(
+    data_dir: &Path,
+    node: &str,
+    version: &str,
+    out: &Path,
+    window_secs: i64,
+    format: &str,
+) -> anyhow::Result<()> {
+    if format == "stix" {
+        return cmd_audit_stix(data_dir, node, version, out, window_secs);
+    }
     let db = data_dir.join("aisafeguard.db");
     let store = aisafeguard_store::Store::open(&db)?;
     let now = now_ts();

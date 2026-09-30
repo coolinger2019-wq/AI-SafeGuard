@@ -5,6 +5,7 @@ mod explain;
 mod corroboration;
 mod fed;
 mod fedproto;
+mod stix;
 mod forward;
 mod gui;
 #[cfg(windows)]
@@ -106,6 +107,7 @@ fn main() -> anyhow::Result<()> {
     let mut data_dir: Option<PathBuf> = None;
     let mut command: Option<(String, Option<String>)> = None;
     let mut fed_sans: Vec<String> = Vec::new();
+    let mut audit_format = String::from("json");
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -245,6 +247,26 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
             }
+            "--format" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) if v == "json" || v == "stix" => audit_format = v.clone(),
+                    _ => {
+                        eprintln!("--format 需要一个值（json | stix）");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "stix-import" => {
+                i += 1;
+                match args.get(i) {
+                    Some(p) => command = Some(("stix-import".into(), Some(p.clone()))),
+                    None => {
+                        eprintln!("用法: aisafeguard fed stix-import <签名包.json>");
+                        std::process::exit(2);
+                    }
+                }
+            }
             "--san" => {
                 i += 1;
                 match args.get(i) {
@@ -376,11 +398,27 @@ fn main() -> anyhow::Result<()> {
             }
             "fed-audit" => {
                 let Some(out) = arg else {
-                    eprintln!("用法: aisafeguard fed audit <out.json>");
+                    eprintln!("用法: aisafeguard fed audit <out.json> [--format json|stix]");
+                    std::process::exit(2);
+                };
+                let (cfg, _) = resolve_cfg(cfg_path, data_dir)?;
+                return fed::cmd_audit(
+                    &cfg.data_dir(),
+                    &cfg.fed.node,
+                    env!("CARGO_PKG_VERSION"),
+                    Path::new(&out),
+                    604_800,
+                    &audit_format,
+                )
+                .map_err(|e| anyhow::anyhow!("{e}"));
+            }
+            "stix-import" => {
+                let Some(p) = arg else {
+                    eprintln!("用法: aisafeguard stix-import <签名包.json>");
                     std::process::exit(2);
                 };
                 let data_dir = resolve_cfg(cfg_path, data_dir)?.0.data_dir();
-                return fed::cmd_audit(&data_dir, Path::new(&out), 604_800)
+                return fed::cmd_stix_import(&data_dir, Path::new(&p))
                     .map_err(|e| anyhow::anyhow!("{e}"));
             }
             "fed-quarantine" => {
@@ -710,15 +748,18 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
     };
     let token = load_or_create_token(&data_dir)?;
 
-    // 事件流水 → SQLite（含哈希链计算，失败只记日志不拖垮总线）
+    // 事件流水 → SQLite（含哈希链计算，失败只记日志不拖垮总线）。
+    // F310：stix 导入的 IOC 命中本地事件流时打 ioc-hit 标签（只告警不改行为）
     {
         let bus = bus.clone();
         let store = store.clone();
         rt.spawn(async move {
             let mut rx = bus.subscribe();
+            let mut ioc_cache: (i64, std::collections::HashSet<String>) = (0, Default::default());
             loop {
                 match rx.recv().await {
-                    Ok(ev) => {
+                    Ok(mut ev) => {
+                        engine::tag_ioc_hit(&store, &mut ioc_cache, &mut ev);
                         if let Err(e) = store.insert_event(&ev) {
                             tracing::error!("事件入库失败: {e}");
                         }

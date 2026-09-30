@@ -180,9 +180,11 @@
 - 导出包签名(HMAC + 可选节点证书),接收方验签失败拒收;内容脱敏检查自动化断言(无明文口令、无内网拓扑细节如节点内网 IP 以外的信息)。
 
 **验收**
-- [ ] `fed audit --format stix` 产出可被现成 STIX 解析库(如 python-stix2)验证的包。
-- [ ] 导入含已知扫描源清单 → 该源来访打 `ioc-hit` 标签,防火墙无自动动作(默认)。
-- [ ] 到期 IOC 自动失效实测;伪造签名包拒收实测。
+- [x] `fed audit --format stix` 产出可被现成 STIX 解析库验证的包。(**python-stix2 3.0.2 实测解析通过**:identity/indicator/ipv4-addr SCO/observed-data/sighting 全部合法,三种 pattern 形态被接受;实测抓到 valid_until 须严格大于 valid_from 的规格约束,已修并加保底)
+- [x] 导入含已知扫描源清单 → 该源来访打 `ioc-hit` 标签,防火墙无自动动作(默认)。(imported_ioc 落 intel 表 confidence=fed——自动封禁门控要求 confidence=high && kind=c2 双保险排除;事件入库任务 60s 缓存命中打 [ioc-hit] 标签;单元级覆盖)
+- [x] 到期 IOC 自动失效实测;伪造签名包拒收实测。(valid_until → intel expires_ts,既有 prune_intel 按时失效;篡改 bundle/他人证书/缺签名/超大小/超条数五路拒收单测覆盖)
+
+> **F310 状态(0.5.12)**:已实现——新模块 stix.rs(四类对象冻结导出 + 包信封签名验签 + 冻结 pattern 子集解析);`fed audit --format stix`(回灌源与内网地址不导出,凭证永不导出红线有自动化断言);`stix-import <签名包>`(验签 → indicator → intel 表 stix:<node> 源;文件 5MB/对象 2 万/indicator 5 千三重上限;valid_until 缺省 7 天);事件流 ioc-hit 打标(只告警);fed intel 下发排除 stix:* 防回灌。样例生成:target/stix-sample.json(write_sample_for_external_validation 测试),外部验证命令见 FEDERATION.md。净增依赖无(chrono/uuid 已在树内)。
 
 ---
 
