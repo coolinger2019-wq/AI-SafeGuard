@@ -4,7 +4,7 @@
 
 > **这不是 LLM 内容审核/Guardrail 产品**。AI 在这里只做一件事:把蜜罐与真实流量观测到的攻击证据读给 LLM,产出**严格校验的封禁建议**(默认人工确认)。检测与处置不依赖 AI——关掉 AI,快路径全功能照常。
 >
-> 当前版本 **0.5.12**。架构与设计:[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · 路线图:[docs/ROADMAP.md](docs/ROADMAP.md) + [ROADMAP-0.5.md](docs/ROADMAP-0.5.md) + [ROADMAP-0.5.3.md](docs/ROADMAP-0.5.3.md) + [ROADMAP-0.6.md](docs/ROADMAP-0.6.md) · 威胁模型:[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) · ISO 27001 对照:[docs/COMPLIANCE.md](docs/COMPLIANCE.md) · NGFW/协同演进:[docs/NGFW_EVOLUTION.md](docs/NGFW_EVOLUTION.md)
+> 当前版本 **0.6.0**。架构与设计:[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · 路线图:[docs/ROADMAP.md](docs/ROADMAP.md) + [ROADMAP-0.5.md](docs/ROADMAP-0.5.md) + [ROADMAP-0.5.3.md](docs/ROADMAP-0.5.3.md) + [ROADMAP-0.6.md](docs/ROADMAP-0.6.md) · 威胁模型:[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) · ISO 27001 对照:[docs/COMPLIANCE.md](docs/COMPLIANCE.md) · NGFW/协同演进:[docs/NGFW_EVOLUTION.md](docs/NGFW_EVOLUTION.md)
 
 ```
  蜜罐(诱捕) ────────┐
@@ -152,3 +152,25 @@ aisafeguard fed audit <out.json>                   # 审计导出
 ## 安全披露
 
 [SECURITY.md](SECURITY.md):披露渠道、响应时限、支持版本、发布完整性说明(SHA-256 清单见发布页)。MIT License,© 2026 coolinger · vibe coding。
+
+## 组织协同运维（0.6）
+
+多台机器组成一个防御组织：**多机印证**（同一攻击者被 ≥2 节点独立观测 → 组织级确信度）、
+组织建议闭环（全组织复验、采纳率升级「组织推荐」）、STIX 2.1 情报交换、软隔离与吊销。
+跨节点只同步**建议与证据**，永不直接下发处置命令——节点自治是架构红线。
+
+```bash
+# 协调者：创建组织（组织身份 = CA 证书，不是组织名）
+aisafeguard fed init-ca [组织名]
+# 给成员机器发证（拷贝到目标机 <数据目录>/fed/），预登记指纹后成员改 [fed] 配置入伙
+aisafeguard fed issue-cert <节点名>
+aisafeguard fed expect <节点名> <指纹>
+# 运维：软隔离（保留心跳审计）/吊销（驱离）/审计导出/STIX 导出导入
+aisafeguard fed quarantine <节点> [原因]      # 解除: --lift <指纹前缀>
+aisafeguard fed audit <out.json> [--format stix]
+aisafeguard stix-import <签名包.json>
+```
+
+GUI 侧栏「⇄ 组织」页：成员表（在线/隔离/指纹）、协议异常计数、组织事件流。
+手册：[docs/FEDERATION.md](docs/FEDERATION.md)（加入流程、协议 v1、升级顺序：先协调者后成员、
+威胁模型与降级预案）。

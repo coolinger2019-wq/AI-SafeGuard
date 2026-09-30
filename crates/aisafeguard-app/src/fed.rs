@@ -1028,17 +1028,13 @@ pub fn cmd_init_ca(data_dir: &Path, org_name: &str) -> anyhow::Result<()> {
             ca_pem.display()
         );
     }
-    // 组织名进证书 CN：限可见 ASCII 可打印、≤64 字符，缺省沿用内置名
+    // 组织名进证书 CN（X.509 UTF8String）：≤64 字符、禁控制字符；缺省沿用内置名
     let org_name = org_name.trim();
     let org_name = if org_name.is_empty() {
         "AI-SafeGuard Organization CA"
     } else {
-        if org_name.len() > 64
-            || !org_name
-                .chars()
-                .all(|c| c.is_ascii_graphic())
-        {
-            anyhow::bail!("组织名限 ≤64 个可见 ASCII 字符（证书 CN 字段约束）");
+        if org_name.chars().count() > 64 || org_name.chars().any(|c| c.is_control()) {
+            anyhow::bail!("组织名限 ≤64 字符且不含控制字符（证书 CN 字段约束）");
         }
         org_name
     };

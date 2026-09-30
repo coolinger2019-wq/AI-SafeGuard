@@ -51,7 +51,8 @@ class SuiteError(Exception):
 class Suite:
     def __init__(self, binary, api_port, keep, port_base=0,
                  attach=None, token=None, host="127.0.0.1",
-                 data_dir=None, config_path=None, spray_user=None):
+                 data_dir=None, config_path=None, spray_user=None,
+                 extra_config=""):
         self.binary = binary
         self.api_port = api_port
         self.keep = keep
@@ -67,6 +68,7 @@ class Suite:
         self.cfg_path = None
         self.proc = None
         self.log_path = None
+        self.extra_config = extra_config  # 集群模式注入的 [fed] 段等
         self.results = []  # (phase_title, status, detail)
 
     def port(self, kind: str) -> int:
@@ -126,6 +128,8 @@ kind = "redis"
 [honeypot.canary]
 enabled = true
 """
+        if self.extra_config:
+            cfg += "\n" + self.extra_config.strip() + "\n"
         self.cfg_path = os.path.join(data, "cfg.toml")
         with open(self.cfg_path, "w", encoding="utf-8") as f:
             f.write(cfg)
@@ -230,14 +234,18 @@ enabled = true
                 "或确认目标实例仍在运行"
             )
 
-    def try_api(self, path, method="GET"):
+    def try_api(self, path, method="GET", body=None):
         """期望失败的调用：返回 (status_code, body_text)。"""
         req = urllib.request.Request(
             f"{self.base_url}{path}", method=method,
             headers={"Authorization": f"Bearer {self.token}"},
         )
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode()
+            req.add_header("Content-Type", "application/json")
         try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=10, data=data) as resp:
                 return resp.status, resp.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as e:
             return e.code, e.read().decode("utf-8", errors="replace")
@@ -764,6 +772,9 @@ def main():
     ap.add_argument("--data-dir", default=None, help="目标实例数据目录（本机附加时提供，启用 canary-decode/export/verify-log 阶段）")
     ap.add_argument("--config-path", default=None, help="目标实例 config.toml 路径（CLI 阶段用，可选）")
     ap.add_argument("--spray-user", default=None, help="喷洒检测强断言用的目标机真实账号名（默认取本机用户名）")
+    ap.add_argument("--cluster", type=int, default=0, metavar="N",
+                    help="集群模式：本地起 1 协调者 + N-1 成员（编排证书/预登记/配置），"
+                         "实测入伙/多机印证/软隔离/分区降级/STIX 往返（0.6 F600）")
     args = ap.parse_args()
 
     try:
@@ -784,6 +795,9 @@ def main():
     if args.attach and not args.token:
         print("attach 模式需要 --token（在目标机上执行 aisafeguard --print-token 获取）")
         return 2
+
+    if args.cluster:
+        return run_cluster(args, exe)
 
     suite = Suite(exe, args.api_port, args.keep, args.port_base,
                   attach=args.attach, token=args.token, host=args.host,
@@ -848,6 +862,307 @@ def main():
     print(f"结果: {ok}/{total} 通过" + (f"，{len(skipped)} 跳过" if skipped else "")
           + (f"，失败 {len(failed)}: {failed}" if failed else ""))
     return 1 if failed else 0
+
+
+# ---------- 集群模式（0.6 F600）：1 协调者 + N-1 成员 ----------
+
+def _cli(exe, data_dir, *args, cfg=None):
+    """集群编排用 CLI：只需 data_dir（cfg 未生成前也要能跑 fed init-ca 等）。
+    cfg = 实例生成后的 config 路径（fed audit/stix-import 需要 [fed].node 等）。"""
+    cmd = [exe, *args, "--data-dir", data_dir]
+    if cfg:
+        cmd += ["--config", cfg]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+
+
+def _cluster_cfg(role, node, fed_port):
+    return f"""[fed]
+enabled = true
+role = "{role}"
+node = "{node}"
+coordinator = "https://127.0.0.1:{fed_port}"
+listen_addr = "127.0.0.1:{fed_port}"
+interval_secs = 5
+"""
+
+
+def _coord_event_count(coord, prefix):
+    rows = coord.events(500)
+    return sum(1 for r in rows if r.get("listener", "").startswith(prefix))
+
+
+def _wait(fn, timeout, poll=1.0, what="条件"):
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        last = fn()
+        if last:
+            return last
+        time.sleep(poll)
+    raise SuiteError(f"{timeout}s 内未满足: {what}（最后状态 {last}）")
+
+
+def phase_c1_join(coord, members):
+    def joined():
+        panel = coord.api("/api/fed/panel")
+        ms = {m["node"]: m["status"] for m in panel.get("members", [])}
+        want = {f"member-{i}" for i in range(1, len(members) + 1)}
+        if want.issubset(ms.keys()) and all(v == "active" for v in ms.values()):
+            return ms
+        return None
+    ms = _wait(joined, 90, what="成员全部入伙且 active")
+    return f"{len(members)} 成员入伙：{sorted(ms)}"
+
+
+def phase_c2_corroboration(coord, members):
+    # 两个成员各触发一次蜜罐命中（本机探针源恒为 127.0.0.1——机制验证对象是
+    # 跨节点聚合与独立节点计数，不是源多样性）
+    for m in members[:2]:
+        if not m.can_connect(m.port("generic")):
+            raise SuiteError(f"{m.node} 蜜罐端口不可连")
+    def corroborated():
+        rows = coord.events(500)
+        hits = [r for r in rows if "组织印证" in r.get("summary", "")]
+        return hits if hits else None
+    hits = _wait(corroborated, 90, what="协调者产出组织印证事件")
+    # 内网保护负路径：印证驱动的 org-suggestion（127.0.0.1）必须被成员四关复验拒绝
+    time.sleep(20)  # 留一个成员拉取周期，确认 suggestion 未被采纳
+    for m in members[:2]:
+        panel = m.api("/api/fed/panel")
+        kinds = [e["kind"] for e in panel.get("org_events", [])]
+        if "suggestion" in kinds:
+            raise SuiteError(f"{m.node} 采纳了内网地址建议（保护失败）：{kinds}")
+    return f"印证事件 {len(hits)} 条；内网建议被成员复验拒绝（保护生效）"
+
+
+def phase_c3_quarantine(coord, members):
+    m1 = members[0]
+    coord.api("/api/fed/members/member-1/quarantine", "POST", {"reason": "e2e 软隔离"})
+    def quarantined():
+        panel = coord.api("/api/fed/panel")
+        st = {m["node"]: m["status"] for m in panel["members"]}
+        return st if st.get("member-1") == "quarantined" else None
+    _wait(quarantined, 30, what="member-1 进入隔离态")
+
+    # 隔离生效：member-1 的上报停摆（触发新命中也不再有新事件到达协调者）
+    before = _coord_event_count(coord, "fed:member-1")
+    if not m1.can_connect(m1.port("generic")):
+        raise SuiteError("member-1 蜜罐不可连")
+    time.sleep(25)
+    after = _coord_event_count(coord, "fed:member-1")
+    if after != before:
+        raise SuiteError(f"隔离中成员事件仍到达协调者（{before} → {after}）")
+    # 隔离中成员本地检测照常（红线：本地自治优先）
+    if not m1.can_connect(m1.port("generic")):
+        raise SuiteError("隔离中成员本地蜜罐停摆（不应发生）")
+
+    # 解除：指纹不符拒绝（宁停勿乱），正确指纹放行
+    code, _ = coord.try_api("/api/fed/members/member-1/lift", "POST", {"fp": "0" * 16})
+    if code < 400:
+        raise SuiteError(f"错误指纹竟解除成功: HTTP {code}")
+    panel = coord.api("/api/fed/panel")
+    fp = next(m["cert_fp"] for m in panel["members"] if m["node"] == "member-1")
+    coord.api("/api/fed/members/member-1/lift", "POST", {"fp": fp})
+    def lifted():
+        p = coord.api("/api/fed/panel")
+        st = {m["node"]: m["status"] for m in p["members"]}
+        return st if st.get("member-1") == "active" else None
+    _wait(lifted, 30, what="member-1 恢复 active")
+    return "隔离 → 事件停摆且本地照常 → 错误指纹拒 → 正确指纹解除"
+
+
+def phase_c4_partition(coord, members):
+    # 杀协调者：成员纯本地模式（检测/蜜罐不停摆）
+    coord.stop_engine()
+    time.sleep(2)
+    m = members[0]
+    if not m.can_connect(m.port("generic")):
+        raise SuiteError("协调者失联后成员蜜罐不可连（本地自治被破坏）")
+    local_before = len(m.events(500))
+    m.can_connect(m.port("generic"))
+    time.sleep(3)
+    if len(m.events(500)) <= local_before - 1:
+        raise SuiteError("成员本地事件入库异常")
+    # 重启协调者：成员自动重连（seq 持久化续传——不回退、不重放）
+    coord.start_engine()
+    def rejoined():
+        panel = coord.api("/api/fed/panel")
+        ms = {m2["node"]: m2["status"] for m2 in panel.get("members", [])}
+        want = {f"member-{i}" for i in range(1, len(members) + 1)}
+        if want.issubset(ms.keys()):
+            return ms
+        return None
+    ms = _wait(rejoined, 120, what="协调者恢复后成员全部重连")
+    return f"分区期成员本地照常；协调者恢复后重连：{sorted(ms)}"
+
+
+def phase_c5_stix(exe, coord, members, coord_dir, member_dirs):
+    # 成员导出（member-1 有蜜罐命中 → observed-data/SCO；集群不开 intel 任务，
+    # indicator 维度由单元测试 + python-stix2 样例覆盖）
+    out = os.path.join(member_dirs["member-1"], "stix.json")
+    r = _cli(exe, member_dirs["member-1"], "fed", "audit", out, "--format", "stix",
+             cfg=members[0].cfg_path)
+    if r.returncode != 0 or not os.path.exists(out):
+        raise SuiteError(f"STIX 导出失败: {r.stdout} {r.stderr}")
+    raw = open(out, encoding="utf-8").read()
+    if "asg-stix-bundle" not in raw:
+        raise SuiteError("STIX 包内容异常（缺 bundle 信封）")
+    # 脱敏红线实测：集群里唯一攻击源是回环地址——它必须不出现在包里
+    if "127.0.0.1" in raw:
+        raise SuiteError("回环/内网地址泄漏进 STIX 包（脱敏红线失守）")
+    # 成员间导入：先取得签发方（member-1）成员证书——组织内交换前提
+    src = os.path.join(member_dirs["member-1"], "fed", "certs", "member-1.pem")
+    dst_dir = os.path.join(member_dirs["member-2"], "fed", "certs")
+    os.makedirs(dst_dir, exist_ok=True)
+    shutil.copy(src, os.path.join(dst_dir, "member-1.pem"))
+    r = _cli(exe, member_dirs["member-2"], "stix-import", out, cfg=members[1].cfg_path)
+    if r.returncode != 0 or "验签通过" not in (r.stdout or ""):
+        raise SuiteError(f"STIX 导入失败: {r.stdout} {r.stderr}")
+    # 篡改包拒收
+    doc = json.loads(raw)
+    for o in doc["bundle"]["objects"]:
+        if o["type"] == "identity":
+            o["name"] = "attacker"
+            break
+    bad = os.path.join(member_dirs["member-2"], "stix-bad.json")
+    with open(bad, "w", encoding="utf-8") as f:
+        json.dump(doc, f)
+    r = _cli(exe, member_dirs["member-2"], "stix-import", bad, cfg=members[1].cfg_path)
+    if r.returncode == 0:
+        raise SuiteError("篡改包竟导入成功（验签失效！）")
+    return "成员导出（含签名）→ 回环地址脱敏实测 → 他节点验签导入 → 篡改包拒收"
+
+
+def _port_bindable(port: int) -> bool:
+    """真实绑定测试：Windows 保留端口段（os error 10013）在 netsh 列表里不全，
+    connect 探测也探不出来——只有真 bind 一次才知道。"""
+    try:
+        s = socket.socket()
+        s.bind(("127.0.0.1", port))
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+def _pick_base(start: int) -> int:
+    """为蜜罐端口段选一个全段可绑定的基座（六协议逐个真绑定验证）。"""
+    b = max(start, 0)
+    while b < start + 60000:
+        if all(_port_bindable(p + b) and not _port_in_use(p + b) for p in PORTS.values()):
+            return b
+        b += 100
+    raise SuiteError(f"{start} 起找不到可绑定的蜜罐端口段")
+
+
+def run_cluster(args, exe):
+    n = args.cluster
+    if n < 2:
+        print("--cluster N 需要 N ≥ 2（1 协调者 + 1 成员）")
+        return 2
+    if args.attach:
+        print("集群模式不支持 --attach（自行编排远端实例）")
+        return 2
+    # fed 端口：从 api+100 起找第一个可绑定且空闲的
+    fed_port = args.api_port + 100
+    while _port_in_use(fed_port) or not _port_bindable(fed_port):
+        fed_port += 1
+    coord_base = _pick_base(args.port_base)
+    root = tempfile.mkdtemp(prefix="aisafeguard-cluster-")
+    coord_dir = os.path.join(root, "coord")
+    member_names = [f"member-{i}" for i in range(1, n)]
+    member_dirs = {name: os.path.join(root, name) for name in member_names}
+    for d in [coord_dir, *member_dirs.values()]:
+        os.makedirs(d)
+
+    print(f"═ 集群模式：1 协调者 + {n - 1} 成员 ═")
+    print(f"根目录: {root}")
+    print(f"端口: API {args.api_port}+i · fed {fed_port} · 蜜罐基座 {args.port_base}+1000+200i\n")
+
+    # 编排：CA → 协调者证书（SAN 127.0.0.1）→ 成员证书 + 预登记
+    r = _cli(exe, coord_dir, "fed", "init-ca", "E2E 集群")
+    if r.returncode != 0:
+        print(f"init-ca 失败: {r.stderr}")
+        return 2
+    r = _cli(exe, coord_dir, "fed", "issue-cert", "coord", "--san", "127.0.0.1")
+    if r.returncode != 0:
+        print(f"协调者证书签发失败: {r.stderr}")
+        return 2
+    for name in member_names:
+        r = _cli(exe, coord_dir, "fed", "issue-cert", name)
+        if r.returncode != 0:
+            print(f"{name} 证书签发失败: {r.stderr}")
+            return 2
+        fp = ""
+        for line in (r.stdout or "").splitlines():
+            if "指纹（SHA-256）" in line:
+                fp = line.split(":")[-1].strip()
+        r = _cli(exe, coord_dir, "fed", "expect", name, fp)
+        if r.returncode != 0:
+            print(f"{name} 预登记失败: {r.stderr}")
+            return 2
+        # 证书分发到成员默认位置（ca + 本节点证书对）
+        os.makedirs(os.path.join(member_dirs[name], "fed", "certs"), exist_ok=True)
+        shutil.copy(os.path.join(coord_dir, "fed", "ca.pem"),
+                    os.path.join(member_dirs[name], "fed", "ca.pem"))
+        for suffix in (".pem", "-key.pem"):
+            shutil.copy(os.path.join(coord_dir, "fed", "certs", f"{name}{suffix}"),
+                        os.path.join(member_dirs[name], "fed", "certs", f"{name}{suffix}"))
+    print("证书编排完成（CA / 协调者 SAN / 成员证书 + 预登记 + 分发）\n")
+
+    suites = []
+    coord = Suite(exe, args.api_port, args.keep,
+                  port_base=coord_base, extra_config=_cluster_cfg("coordinator", "coord", fed_port))
+    coord.workdir = coord_dir
+    members = []
+    try:
+        coord.start_engine()
+        suites.append(coord)
+        print(f"协调者已就绪（API {coord.base_url}，fed 127.0.0.1:{fed_port}）")
+        for i, name in enumerate(member_names, 1):
+            m = Suite(exe, args.api_port + i, args.keep,
+                      port_base=_pick_base(10_000 + 200 * i),
+                      extra_config=_cluster_cfg("agent", name, fed_port))
+            m.workdir = member_dirs[name]
+            suites.append(m)  # 先注册：start 失败也要被 finally 停掉（防僵尸占端口）
+            m.start_engine()
+            members.append(m)
+            print(f"{name} 已就绪（API {m.base_url}）")
+
+        phases = [
+            ("C1 成员入伙与预登记", lambda: phase_c1_join(coord, members)),
+            ("C2 多机印证与内网建议拒收", lambda: phase_c2_corroboration(coord, members)),
+            ("C3 软隔离与解除", lambda: phase_c3_quarantine(coord, members)),
+            ("C4 分区降级与重连续传", lambda: phase_c4_partition(coord, members)),
+            ("C5 STIX 导出导入与篡改拒收", lambda: phase_c5_stix(exe, coord, members, coord_dir, member_dirs)),
+        ]
+        failed = []
+        results = []
+        for i, (title, fn) in enumerate(phases, 1):
+            header = f"── C{i}) {title} "
+            print(header + "─" * max(4, 60 - len(header)))
+            try:
+                detail = fn()
+                results.append((title, PASS, ""))
+                print(f"{PASS} {title} — {detail}\n")
+            except SuiteError as e:
+                results.append((title, FAIL, str(e)))
+                failed.append(title)
+                print(f"{FAIL} {title}: {e}\n")
+            except Exception as e:
+                results.append((title, FAIL, f"意外异常: {e!r}"))
+                failed.append(title)
+                print(f"{FAIL} {title}: 意外异常 {e!r}\n")
+        print("═" * 64)
+        for title, status, detail in results:
+            print(f"{status} {title}" + (f" — {detail[:90]}" if detail and status == FAIL else ""))
+        print("═" * 64)
+        ok = sum(1 for _, st, _ in results if st == PASS)
+        print(f"集群结果: {ok}/{len(results)} 通过" + (f"，失败: {failed}" if failed else ""))
+        return 1 if failed else 0
+    finally:
+        for s in suites:
+            s.cleanup()
 
 
 def _port_in_use(port: int) -> bool:

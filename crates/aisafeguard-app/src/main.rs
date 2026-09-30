@@ -155,7 +155,13 @@ fn main() -> anyhow::Result<()> {
             "fed" => {
                 i += 1;
                 match args.get(i).map(|s| s.as_str()) {
-                    Some("init-ca") => command = Some(("fed-init-ca".into(), None)),
+                    Some("init-ca") => {
+                        // 可选位置参数：组织名（fed init-ca [组织名]）。
+                        // 读 i+1 不再手动推进——循环尾部的 i += 1 负责越过它
+                        i += 1;
+                        let org = args.get(i).cloned();
+                        command = Some(("fed-init-ca".into(), org));
+                    }
                     Some("issue-cert") => {
                         i += 1;
                         match args.get(i) {
@@ -361,7 +367,7 @@ fn main() -> anyhow::Result<()> {
             }
             "fed-init-ca" => {
                 // 可选组织名（公章上刻的字，展示用）：fed init-ca [组织名]
-                let org_name = fed_sans.iter().find(|a| !a.starts_with("--")).cloned().unwrap_or_default();
+                let org_name = arg.unwrap_or_default();
                 return fed::cmd_init_ca(&resolve_cfg(cfg_path, data_dir)?.0.data_dir(), &org_name);
             }
             "fed-issue-cert" => {
