@@ -3,6 +3,7 @@ mod console;
 mod engine;
 mod explain;
 mod fed;
+mod fedproto;
 mod forward;
 mod gui;
 #[cfg(windows)]
@@ -303,7 +304,9 @@ fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
             "fed-init-ca" => {
-                return fed::cmd_init_ca(&resolve_cfg(cfg_path, data_dir)?.0.data_dir());
+                // 可选组织名（公章上刻的字，展示用）：fed init-ca [组织名]
+                let org_name = fed_sans.iter().find(|a| !a.starts_with("--")).cloned().unwrap_or_default();
+                return fed::cmd_init_ca(&resolve_cfg(cfg_path, data_dir)?.0.data_dir(), &org_name);
             }
             "fed-issue-cert" => {
                 let Some(node) = arg else {

@@ -14,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.11"
+version = "0.5.12"
 edition = "2024"
 license = "MIT"
 authors = ["coolinger (vibe coding)"]
@@ -25,15 +25,16 @@ authors = ["coolinger (vibe coding)"]
 windivert-sys = { path = "third_party/windivert-sys" }
 
 [workspace.dependencies]
-aisafeguard-core = { path = "crates/aisafeguard-core", version = "0.5.9" }
-aisafeguard-store = { path = "crates/aisafeguard-store", version = "0.5.9" }
-aisafeguard-firewall = { path = "crates/aisafeguard-firewall", version = "0.5.9" }
-aisafeguard-l7 = { path = "crates/aisafeguard-l7", version = "0.5.9" }
-aisafeguard-rules = { path = "crates/aisafeguard-rules", version = "0.5.9" }
-aisafeguard-xdp = { path = "crates/aisafeguard-xdp", version = "0.5.9" }
-aisafeguard-honeypot = { path = "crates/aisafeguard-honeypot", version = "0.5.9" }
-aisafeguard-ai = { path = "crates/aisafeguard-ai", version = "0.5.9" }
-aisafeguard-detect = { path = "crates/aisafeguard-detect", version = "0.5.9" }
+# 内部 crate 只用 path 引用：workspace 内同仓同版，钉 version 只会每次发版多改十行且必然漂移
+aisafeguard-core = { path = "crates/aisafeguard-core" }
+aisafeguard-store = { path = "crates/aisafeguard-store" }
+aisafeguard-firewall = { path = "crates/aisafeguard-firewall" }
+aisafeguard-l7 = { path = "crates/aisafeguard-l7" }
+aisafeguard-rules = { path = "crates/aisafeguard-rules" }
+aisafeguard-xdp = { path = "crates/aisafeguard-xdp" }
+aisafeguard-honeypot = { path = "crates/aisafeguard-honeypot" }
+aisafeguard-ai = { path = "crates/aisafeguard-ai" }
+aisafeguard-detect = { path = "crates/aisafeguard-detect" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "time", "io-util", "signal"] }
@@ -85,6 +86,10 @@ argon2 = "0.6"
 sysinfo = { version = "0.37", default-features = false, features = ["user"] }
 # H210 文件系统蜜饵（0.5.10，仅 Linux 目标编译）：inotify 只读监听「文件被读取」
 notify = "8"
+# F100 fed 消息级签名：ring 直接签名/验签（ECDSA P-256，与节点证书同栈同钥）；
+# x509-parser 从证书 DER 提取 SPKI 公钥（rcgen 的 x509-parser 特性早已引入，零新增树）
+ring = "0.17"
+x509-parser = "0.16"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

@@ -1,4 +1,4 @@
-//! 组织协同（0.3，设计见 docs/NGFW_EVOLUTION.md §6）。
+//! 组织协同（0.3，设计见 docs/NGFW_EVOLUTION.md §6；0.6 协议见 fedproto.rs）。
 //!
 //! 三条链路：事件上报（agent→协调者）、情报同步（双向）、AI 建议推送（仅慢路径）。
 //! 0.3.6 起鉴权 = mTLS：协调者在**独立监听面**（`[fed].listen_addr`，默认 0.0.0.0:7421）
@@ -8,14 +8,19 @@
 //! PKI 文件布局（数据目录 /fed/）：`ca.pem` + `ca-key.pem`（`fed init-ca` 生成，
 //! 仅协调者侧持有私钥）；`certs/<node>.pem` + `certs/<node>-key.pem`
 //! （`fed issue-cert <node>` 签发，人工分发到节点）。
+//! 0.6 F100 起所有请求走统一信封（fedproto::Envelope）：版本协商（major 拒连）、
+//! 消息级签名（节点证书钥，防抵赖）、node+seq 幂等去重与回退拒收、24h 补传窗。
 //! 防投毒基线不变：远端情报 confidence="fed" 永不自动封禁；远端建议过本地 allowlist
-//! 复验后仅进慢路径；内网保护前置拒收；时钟窗校验防重放。
+//! 复验后仅进慢路径；内网保护前置拒收。
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -27,6 +32,9 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::engine::EngineHandle;
+use crate::fedproto::{
+    self, DedupSet, Envelope,
+};
 use aisafeguard_core::event::SecurityEvent;
 use aisafeguard_core::now_ts;
 use aisafeguard_store::IntelRow;
@@ -47,21 +55,69 @@ pub fn cert_fp_of(der: &[u8]) -> String {
 }
 
 /// TLS 层解析出的对端身份（中间件从 axum_server 的 TlsInfo 提取后插入）。
+/// cert_der 供消息级验签（fedproto）提取 SPKI 公钥。
 #[derive(Clone)]
 pub struct FedPeer {
     pub cert_fp: String,
+    pub cert_der: Vec<u8>,
+}
+
+/// 协议层计数（F100：畸形/签名失败/回退必须可见）。hello 响应带出，
+/// GUI 告警只发「首次」，风暴计数在这里累计（F400 限频另行统一实现）。
+#[derive(Default)]
+pub struct FedStats {
+    pub malformed: AtomicU64,
+    pub sig_fail: AtomicU64,
+    pub seq_reject: AtomicU64,
+    pub duplicates: AtomicU64,
+    pub archived_events: AtomicU64,
+}
+
+impl FedStats {
+    fn to_json(&self) -> serde_json::Value {
+        json!({
+            "malformed": self.malformed.load(Ordering::Relaxed),
+            "sig_fail": self.sig_fail.load(Ordering::Relaxed),
+            "seq_reject": self.seq_reject.load(Ordering::Relaxed),
+            "duplicates": self.duplicates.load(Ordering::Relaxed),
+            "archived_events": self.archived_events.load(Ordering::Relaxed),
+        })
+    }
+}
+
+/// 接收侧进程内小状态：seen 去重集合 + 已告警节点（避免同因重复刷 GUI 事件）。
+#[derive(Default)]
+struct GateState {
+    dedup: Option<DedupSet>,
+    version_warned: HashSet<String>,
+    sig_warned: HashSet<String>,
+}
+
+impl GateState {
+    fn dedup(&mut self) -> &mut DedupSet {
+        self.dedup.get_or_insert_with(|| DedupSet::new(50_000))
+    }
 }
 
 #[derive(Clone)]
 pub struct FedState {
     engine: Arc<EngineHandle>,
+    gate: Arc<Mutex<GateState>>,
+    stats: Arc<FedStats>,
 }
 
 /// /fed 路由面。只挂在 mTLS 监听上：rustls 已验证客户端证书链到组织 CA，
-/// accept 循环把对端叶子指纹以 Extension 注入，handlers 经 FedPeer 取用。
+/// accept 循环把对端叶子指纹与 DER 以 Extension 注入，handlers 经 FedPeer 取用。
+/// 所有端点（含 hello）吃同一信封：Bytes 手工解析——畸形消息要计数告警，
+/// 不能交给 axum Json 提取器的默认 422。
 pub fn fed_router(engine: Arc<EngineHandle>) -> Router {
-    let state = FedState { engine };
+    let state = FedState {
+        engine,
+        gate: Arc::new(Mutex::new(GateState::default())),
+        stats: Arc::new(FedStats::default()),
+    };
     Router::new()
+        .route("/fed/hello", post(fed_hello))
         .route("/fed/events", post(fed_events))
         .route("/fed/intel", get(fed_intel_get).post(fed_intel_post))
         .route("/fed/proposals", post(fed_proposals))
@@ -72,7 +128,15 @@ pub fn fed_router(engine: Arc<EngineHandle>) -> Router {
 fn err(e: impl std::fmt::Display) -> Response {
     (
         StatusCode::BAD_REQUEST,
-        Json(json!({ "error": e.to_string() })),
+        Json(json!({ "error": e.to_string(), "server_proto": fedproto::PROTO })),
+    )
+        .into_response()
+}
+
+fn err_status(status: StatusCode, e: impl std::fmt::Display) -> Response {
+    (
+        status,
+        Json(json!({ "error": e.to_string(), "server_proto": fedproto::PROTO })),
     )
         .into_response()
 }
@@ -110,13 +174,143 @@ fn check_member(state: &FedState, node: &str, fp: &str) -> Result<(), Response> 
     }
 }
 
-// ---------- agent → 协调者：事件上报 ----------
+// ---------- 信封闸门：所有 /fed 端点的统一入校验 ----------
 
-#[derive(Deserialize)]
-struct FedEventBody {
-    node: String,
-    events: Vec<FedEvent>,
+enum Gate {
+    /// 首见合法消息，照常处理
+    Fresh(Box<Envelope>),
+    /// 窗口内重复（补传重发），幂等跳过但按成功应答
+    Duplicate(Box<Envelope>),
 }
+
+/// 解析信封并过五道闸：解析 → 版本协商 → 时间窗 → 消息验签 → 成员绑定 → 幂等/序列号。
+/// 任何一道失败都是「单条拒绝 + 计数」，不断连不 panic（畸形消息不刷 GUI 事件，
+/// 版本/签名失败只对每节点首次发告警事件）。
+#[allow(clippy::result_large_err)] // Response 是该模块统一的错误载体（同 check_member）
+fn gate_envelope(state: &FedState, peer: &FedPeer, body: &Bytes) -> Result<Gate, Response> {
+    let now = now_ts();
+    // 1) 解析：畸形单条丢弃 + 计数（不 publish——fuzz/扫描风暴不能灌爆事件总线）
+    let env: Envelope = match serde_json::from_slice(body) {
+        Ok(e) => e,
+        Err(e) => {
+            state.stats.malformed.fetch_add(1, Ordering::Relaxed);
+            tracing::debug!("fed 信封解析失败（已计数）: {e}");
+            return Err(err_status(
+                StatusCode::BAD_REQUEST,
+                format!("信封解析失败（server_proto {}）: {e}", fedproto::PROTO),
+            ));
+        }
+    };
+    // 2) 版本协商：major 不同拒连，GUI 可见双方版本号（每节点只告警一次）
+    if let Err(reason) = fedproto::version_compatible(&env.proto) {
+        let mut gate = state.gate.lock().unwrap();
+        if gate.version_warned.insert(env.node.clone()) {
+            state.engine.bus.publish(SecurityEvent::engine(
+                "warn",
+                format!("协同协议版本失配（{}）：{reason}", env.node),
+            ));
+        }
+        return Err(err_status(StatusCode::UPGRADE_REQUIRED, reason));
+    }
+    // 3) 信封时间窗：偏移超 24h 按重放拒收（这也是补传窗口的硬上限）
+    if (env.ts - now).abs() > fedproto::REPLAY_WINDOW_SECS {
+        state.stats.malformed.fetch_add(1, Ordering::Relaxed);
+        return Err(err_status(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "信封时间戳超出 ±{}s 窗口（疑似重放/时钟失同步）",
+                fedproto::REPLAY_WINDOW_SECS
+            ),
+        ));
+    }
+    // 3b) 节点名合法性（旧 handler 校验迁移至此，信封是唯一的 node 来源）
+    if !valid_node_name(&env.node) {
+        state.stats.malformed.fetch_add(1, Ordering::Relaxed);
+        return Err(err("node 名不合法（限字母数字_-，≤32 字符）"));
+    }
+    // 4) 消息级验签：对端证书钥签名，防抵赖（mTLS 只保连接，签名跟着消息走）
+    let pubkey = match fedproto::public_point_from_cert_der(&peer.cert_der) {
+        Ok(p) => p,
+        Err(e) => {
+            state.stats.sig_fail.fetch_add(1, Ordering::Relaxed);
+            return Err(err_status(StatusCode::UNAUTHORIZED, e));
+        }
+    };
+    if !fedproto::verify_signature(&pubkey, &fedproto::signing_bytes(&env), &env.sig) {
+        state.stats.sig_fail.fetch_add(1, Ordering::Relaxed);
+        let mut gate = state.gate.lock().unwrap();
+        if gate.sig_warned.insert(env.node.clone()) {
+            state.engine.bus.publish(SecurityEvent::engine(
+                "warn",
+                format!(
+                    "协同消息签名校验失败（{}，指纹 {}）：消息被篡改或私钥与证书不符",
+                    env.node, peer.cert_fp
+                ),
+            ));
+        }
+        return Err(err_status(
+            StatusCode::UNAUTHORIZED,
+            "消息签名校验失败（须以本节点证书私钥签名）",
+        ));
+    }
+    // 5) 成员绑定（TOFU/预登记 + last_seen 刷新）
+    check_member(state, &env.node, &peer.cert_fp)?;
+    let mut gate = state.gate.lock().unwrap();
+    // 6a) 幂等：24h 窗内 (node, seq) 已见 = 补传重发，跳过但按成功应答
+    if !gate.dedup().first_time(&env.node, env.seq, now, fedproto::REPLAY_WINDOW_SECS) {
+        state.stats.duplicates.fetch_add(1, Ordering::Relaxed);
+        return Ok(Gate::Duplicate(Box::new(env)));
+    }
+    // 6b) 序列号高水位：低于已见最大值 = 备份恢复/伪造重放，拒收留痕
+    match state.engine.store.check_fed_seq(&env.node, env.seq) {
+        Ok(true) => Ok(Gate::Fresh(Box::new(env))),
+        Ok(false) => {
+            state.stats.seq_reject.fetch_add(1, Ordering::Relaxed);
+            let node = env.node.clone();
+            drop(gate);
+            state.engine.bus.publish(SecurityEvent::engine(
+                "warn",
+                format!(
+                    "协同消息序列号回退（{node} seq {}）：疑似从备份恢复或伪造重放，已拒收",
+                    env.seq
+                ),
+            ));
+            Err(err_status(
+                StatusCode::CONFLICT,
+                format!(
+                    "序列号 {} 不大于该节点已见最大值（疑似备份恢复/重放），拒收",
+                    env.seq
+                ),
+            ))
+        }
+        Err(e) => Err(err(format!("序列号校验失败: {e}"))),
+    }
+}
+
+/// hello：心跳 + 版本协商 + 组织状态问询，兼职 last_seen 刷新（F110 租约检测的地基）。
+async fn fed_hello(
+    State(state): State<FedState>,
+    peer: axum::Extension<FedPeer>,
+    body: Bytes,
+) -> Response {
+    let env = match gate_envelope(&state, &peer, &body) {
+        Ok(Gate::Duplicate(e)) | Ok(Gate::Fresh(e)) => e,
+        Err(resp) => return resp,
+    };
+    let members = state.engine.store.list_fed_members().unwrap_or_default().len();
+    Json(json!({
+        "ok": true,
+        "proto": fedproto::PROTO,
+        "version": env!("CARGO_PKG_VERSION"),
+        "server_ts": now_ts(),
+        "members": members,
+        "stats": state.stats.to_json(),
+        "echo": { "node": env.node, "seq": env.seq },
+    }))
+    .into_response()
+}
+
+// ---------- agent → 协调者：事件上报 ----------
 
 #[derive(Deserialize)]
 struct FedEvent {
@@ -131,28 +325,42 @@ struct FedEvent {
 async fn fed_events(
     State(state): State<FedState>,
     peer: axum::Extension<FedPeer>,
-    Json(body): Json<FedEventBody>,
+    body: Bytes,
 ) -> Response {
-    if !valid_node_name(&body.node) {
-        return err("node 名不合法（限字母数字_-，≤32 字符）");
-    }
-    if body.events.len() > 100 {
+    let env = match gate_envelope(&state, &peer, &body) {
+        Ok(Gate::Duplicate(_)) => {
+            return Json(json!({ "ok": true, "duplicate": true })).into_response();
+        }
+        Ok(Gate::Fresh(e)) => e,
+        Err(resp) => return resp,
+    };
+    let events: Vec<FedEvent> = match serde_json::from_value(env.payload.clone()) {
+        Ok(v) => v,
+        Err(e) => {
+            state.stats.malformed.fetch_add(1, Ordering::Relaxed);
+            return err(format!("events payload 非法: {e}"));
+        }
+    };
+    if events.len() > 100 {
         return err("单次上报最多 100 条事件");
-    }
-    if let Err(resp) = check_member(&state, &body.node, &peer.cert_fp) {
-        return resp;
     }
     let now = now_ts();
     let mut stored = 0usize;
-    for ev in &body.events {
-        // 时钟窗校验：±1 小时外的记录拒收（防重放/时钟漂移污染）
-        if (ev.ts - now).abs() > 3600 {
+    let mut archived = 0usize;
+    for ev in &events {
+        // 补传窗（0.6 拍板）：24h 内的收下；更旧的只计数归档不落库（本地哈希链
+        // 是事件完整性的真源，外发本来就是副本）；未来 1h 内容忍时钟漂移
+        if now - ev.ts > fedproto::REPLAY_WINDOW_SECS {
+            archived += 1;
+            continue;
+        }
+        if ev.ts - now > 3600 {
             continue;
         }
         let se = if ev.kind == "honeypot_hit" {
             SecurityEvent::HoneypotHit {
                 ts: ev.ts,
-                listener: format!("fed:{}:{}", body.node, ev.listener),
+                listener: format!("fed:{}:{}", env.node, ev.listener),
                 kind: ev.kind.clone(),
                 port: 0,
                 remote_ip: ev.remote_ip.clone(),
@@ -166,14 +374,20 @@ async fn fed_events(
             SecurityEvent::Engine {
                 ts: ev.ts,
                 level: "fed".into(),
-                message: format!("[{}] {}", body.node, ev.summary),
+                message: format!("[{}] {}", env.node, ev.summary),
             }
         };
         if state.engine.store.insert_event(&se).is_ok() {
             stored += 1;
         }
     }
-    Json(json!({ "ok": true, "stored": stored })).into_response()
+    if archived > 0 {
+        state
+            .stats
+            .archived_events
+            .fetch_add(archived as u64, Ordering::Relaxed);
+    }
+    Json(json!({ "ok": true, "stored": stored, "archived": archived })).into_response()
 }
 
 // ---------- 情报同步（双向） ----------
@@ -192,12 +406,6 @@ async fn fed_intel_get(State(state): State<FedState>) -> Response {
 }
 
 #[derive(Deserialize)]
-struct FedIntelBody {
-    node: String,
-    entries: Vec<FedIntelEntry>,
-}
-
-#[derive(Deserialize)]
 struct FedIntelEntry {
     value: String,
     kind: String,
@@ -206,20 +414,27 @@ struct FedIntelEntry {
 async fn fed_intel_post(
     State(state): State<FedState>,
     peer: axum::Extension<FedPeer>,
-    Json(body): Json<FedIntelBody>,
+    body: Bytes,
 ) -> Response {
-    if !valid_node_name(&body.node) {
-        return err("node 名不合法");
-    }
-    if body.entries.len() > 500 {
+    let env = match gate_envelope(&state, &peer, &body) {
+        Ok(Gate::Duplicate(_)) => {
+            return Json(json!({ "ok": true, "duplicate": true })).into_response();
+        }
+        Ok(Gate::Fresh(e)) => e,
+        Err(resp) => return resp,
+    };
+    let entries: Vec<FedIntelEntry> = match serde_json::from_value(env.payload.clone()) {
+        Ok(v) => v,
+        Err(e) => {
+            state.stats.malformed.fetch_add(1, Ordering::Relaxed);
+            return err(format!("intel payload 非法: {e}"));
+        }
+    };
+    if entries.len() > 500 {
         return err("单次同步最多 500 条情报");
     }
-    if let Err(resp) = check_member(&state, &body.node, &peer.cert_fp) {
-        return resp;
-    }
     let now = now_ts();
-    let upserts: Vec<(String, String, String, String, i64, i64)> = body
-        .entries
+    let upserts: Vec<(String, String, String, String, i64, i64)> = entries
         .iter()
         // 来源 IP 的内网保护在 upsert 前置拒绝（防投毒锁网）
         .filter(|e| {
@@ -230,7 +445,7 @@ async fn fed_intel_post(
         })
         .map(|e| {
             (
-                format!("fed:{}", body.node),
+                format!("fed:{}", env.node),
                 e.kind.clone(),
                 e.value.clone(),
                 "fed".into(),
@@ -244,7 +459,7 @@ async fn fed_intel_post(
         "info",
         format!(
             "组织情报同步：来自 {} 的 {} 条（仅标注，不自动封禁）",
-            body.node, n
+            env.node, n
         ),
     ));
     Json(json!({ "ok": true, "accepted": n })).into_response()
@@ -252,28 +467,30 @@ async fn fed_intel_post(
 
 // ---------- 协调者 → agent：情报下发（agent 拉取同上）；AI 建议推送 ----------
 
-#[derive(Deserialize)]
-struct FedProposalBody {
-    node: String,
-    proposals: Vec<serde_json::Value>,
-}
-
 async fn fed_proposals(
     State(state): State<FedState>,
     peer: axum::Extension<FedPeer>,
-    Json(body): Json<FedProposalBody>,
+    body: Bytes,
 ) -> Response {
-    if !valid_node_name(&body.node) {
-        return err("node 名不合法");
-    }
-    if body.proposals.len() > 10 {
+    let env = match gate_envelope(&state, &peer, &body) {
+        Ok(Gate::Duplicate(_)) => {
+            return Json(json!({ "ok": true, "duplicate": true })).into_response();
+        }
+        Ok(Gate::Fresh(e)) => e,
+        Err(resp) => return resp,
+    };
+    let proposals: Vec<serde_json::Value> = match serde_json::from_value(env.payload.clone()) {
+        Ok(v) => v,
+        Err(e) => {
+            state.stats.malformed.fetch_add(1, Ordering::Relaxed);
+            return err(format!("proposals payload 非法: {e}"));
+        }
+    };
+    if proposals.len() > 10 {
         return err("单次推送最多 10 条建议");
     }
-    if let Err(resp) = check_member(&state, &body.node, &peer.cert_fp) {
-        return resp;
-    }
     let mut accepted = 0usize;
-    for p in &body.proposals {
+    for p in &proposals {
         // 本地复验：与 LLM 输出同一套 allowlist（字段非法即作废）
         let Some(valid) = aisafeguard_ai::validate_fed_proposal(p) else {
             continue;
@@ -288,7 +505,7 @@ async fn fed_proposals(
             continue;
         }
         if let Ok(pid) = state.engine.store.insert_proposal(
-            &format!("fed:{}", body.node),
+            &format!("fed:{}", env.node),
             "block",
             &valid.severity,
             &valid.direction,
@@ -335,9 +552,11 @@ fn certs_dir(data_dir: &Path) -> PathBuf {
     fed_dir(data_dir).join("certs")
 }
 
-/// `fed init-ca`：生成组织 CA（自签 10 年）写入 <数据目录>/fed/。
-/// 已存在时明确拒绝（覆盖 CA = 全网信任重置，绝不能静默发生）。
-pub fn cmd_init_ca(data_dir: &Path) -> anyhow::Result<()> {
+/// `fed init-ca [组织名]`：生成组织 CA（自签 10 年）写入 <数据目录>/fed/。
+/// 组织名只是「公章上刻的字」（展示用，成员面板/证书 CN 可见），不是加入凭据——
+/// 加入凭据是本 CA 签发的节点证书。已存在时明确拒绝（覆盖 CA = 全网信任重置，
+/// 绝不能静默发生）。
+pub fn cmd_init_ca(data_dir: &Path, org_name: &str) -> anyhow::Result<()> {
     let dir = fed_dir(data_dir);
     std::fs::create_dir_all(certs_dir(data_dir))?;
     let ca_pem = dir.join("ca.pem");
@@ -348,10 +567,24 @@ pub fn cmd_init_ca(data_dir: &Path) -> anyhow::Result<()> {
             ca_pem.display()
         );
     }
+    // 组织名进证书 CN：限可见 ASCII 可打印、≤64 字符，缺省沿用内置名
+    let org_name = org_name.trim();
+    let org_name = if org_name.is_empty() {
+        "AI-SafeGuard Organization CA"
+    } else {
+        if org_name.len() > 64
+            || !org_name
+                .chars()
+                .all(|c| c.is_ascii_graphic())
+        {
+            anyhow::bail!("组织名限 ≤64 个可见 ASCII 字符（证书 CN 字段约束）");
+        }
+        org_name
+    };
     let mut params = rcgen::CertificateParams::new(vec![])?;
     params
         .distinguished_name
-        .push(rcgen::DnType::CommonName, "AI-SafeGuard Organization CA");
+        .push(rcgen::DnType::CommonName, org_name);
     params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
     params.key_usages = vec![
         rcgen::KeyUsagePurpose::DigitalSignature,
@@ -717,13 +950,16 @@ pub async fn serve_coordinator(engine: Arc<EngineHandle>) -> Result<(), String> 
             let Ok(stream) = acceptor.accept(tcp).await else {
                 return; // 握手失败（无证书/链不可信/协议错误）：连接层拒绝即可
             };
-            // 客户端证书已验证；叶子指纹注入请求扩展供 node 绑定用
-            let cert_fp = stream
+            // 客户端证书已验证；叶子指纹 + DER 注入请求扩展（DER 供消息级验签取公钥）
+            let leaf_der = stream
                 .get_ref()
                 .1
                 .peer_certificates()
                 .and_then(|c| c.first())
-                .map(|c| cert_fp_of(c.as_ref()))
+                .map(|c| c.as_ref().to_vec());
+            let cert_fp = leaf_der
+                .as_ref()
+                .map(|d| cert_fp_of(d))
                 .unwrap_or_default();
             // 吊销检查（0.4.0 C1）：立即生效（每次连接读文件），命中拒连并留审计事件
             if let Some(reason) = check_not_revoked(&data_dir, &cert_fp) {
@@ -734,9 +970,12 @@ pub async fn serve_coordinator(engine: Arc<EngineHandle>) -> Result<(), String> 
                 return;
             }
             // Router 直接实现 tower Service<Request<Incoming>>，TowerToHyperService 适配
-            let svc = hyper_util::service::TowerToHyperService::new(
-                app.layer(axum::Extension(FedPeer { cert_fp })),
-            );
+            let svc = hyper_util::service::TowerToHyperService::new(app.layer(axum::Extension(
+                FedPeer {
+                    cert_fp,
+                    cert_der: leaf_der.unwrap_or_default(),
+                },
+            )));
             let _ =
                 hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
                     .serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(stream), svc)
@@ -794,7 +1033,68 @@ fn build_agent_client(eng: &EngineHandle) -> Result<reqwest::Client, String> {
 }
 
 /// agent 角色：周期性向协调者上报本地事件、拉取组织情报、推送待确认建议。
-/// 协调者失联或证书材料缺失只记警告，本节点一切功能照常（独立运行优先）。
+/// 0.6 F100：每条消息走统一信封（版本协商 / 消息签名 / node+seq 幂等）；
+/// hello 兼职心跳与版本探测。发送失败同信封重发（接收方去重，语义幂等）；
+/// 收到 4xx 丢弃信封下轮重建（游标未推进，不会丢数据）。协调者失联或
+/// 证书材料缺失只记警告，本节点一切功能照常（独立运行优先）。
+enum SendOutcome {
+    Ok(serde_json::Value),
+    Network(String),
+    Rejected(u16, String),
+}
+
+async fn post_envelope(
+    http: &reqwest::Client,
+    base: &str,
+    path: &str,
+    bytes: &[u8],
+) -> SendOutcome {
+    match http
+        .post(format!("{base}{path}"))
+        .header("content-type", "application/json")
+        .body(bytes.to_vec())
+        .send()
+        .await
+    {
+        Ok(r) => {
+            let status = r.status().as_u16();
+            let body = r.text().await.unwrap_or_default();
+            if (200..300).contains(&status) {
+                serde_json::from_str(&body).map(SendOutcome::Ok).unwrap_or(SendOutcome::Ok(json!({})))
+            } else {
+                SendOutcome::Rejected(status, body)
+            }
+        }
+        Err(e) => SendOutcome::Network(e.to_string()),
+    }
+}
+
+/// 组装并签名一条信封。seq 先落盘后发送：崩溃可容忍间隙（单调 ≠ 连续），
+/// 不可容忍回退（接收方按高水位拒收）。
+fn seal_envelope(
+    eng: &EngineHandle,
+    node: &str,
+    key: &ring::signature::EcdsaKeyPair,
+    seq: &mut u64,
+    ty: &str,
+    payload: serde_json::Value,
+) -> Option<(Envelope, Vec<u8>)> {
+    *seq += 1;
+    let mut env = Envelope {
+        proto: fedproto::PROTO.to_string(),
+        node: node.to_string(),
+        seq: *seq,
+        ts: now_ts(),
+        ty: ty.to_string(),
+        payload,
+        sig: String::new(),
+    };
+    env.sig = fedproto::sign_with_key(key, &fedproto::signing_bytes(&env)).ok()?;
+    let _ = eng.store.set_meta("fed_seq", &seq.to_string());
+    let bytes = serde_json::to_vec(&env).ok()?;
+    Some((env, bytes))
+}
+
 pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
     let eng = Arc::clone(eng);
     let rt = eng.rt.clone();
@@ -809,9 +1109,26 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
             .list_proposals(None, 1)
             .map(|v| v.first().map(|p| p.id).unwrap_or(0))
             .unwrap_or(0);
+        // 发送序列号：跨重启从 meta 恢复（不清零——清零会被协调者按回退拒收）
+        let mut seq: u64 = eng
+            .store
+            .get_meta("fed_seq")
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
 
         let mut http: Option<reqwest::Client> = None;
+        let mut key: Option<ring::signature::EcdsaKeyPair> = None;
         let mut warned_material = false;
+        // 未确认信封（按类型各一槽）：网络失败保留重发，被 4xx 拒收丢弃重建
+        let mut pending_events: Option<Vec<u8>> = None;
+        let mut pending_proposals: Option<Vec<u8>> = None;
+        // 版本失配阻断：只发 hello 探测，直到协调者侧接受（节点需升级）
+        let mut version_blocked: Option<String> = None;
+        // 已告警过的失配版本（避免每周期刷同一条告警）
+        let mut warned_version = String::new();
+
         loop {
             let interval = eng.config().fed.interval_secs.clamp(15, 3600);
             tokio::time::sleep(Duration::from_secs(interval)).await;
@@ -820,11 +1137,35 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
                 continue;
             }
             // 证书材料惰性构建：失败下轮重试（管理员补齐文件后自动恢复）
-            if http.is_none() {
+            if http.is_none() || key.is_none() {
                 match build_agent_client(&eng) {
                     Ok(c) => {
-                        http = Some(c);
-                        warned_material = false;
+                        let key_path = {
+                            let data_dir = eng.config().general.data_dir.clone();
+                            let (_, key_path) =
+                                resolve_node_pair(&data_dir, &cfg.cert_path, &cfg.key_path, &cfg.node);
+                            key_path
+                        };
+                        match std::fs::read_to_string(&key_path)
+                            .map_err(|e| e.to_string())
+                            .and_then(|p| fedproto::load_signing_key(&p))
+                        {
+                            Ok(k) => {
+                                http = Some(c);
+                                key = Some(k);
+                                warned_material = false;
+                            }
+                            Err(e) => {
+                                if !warned_material {
+                                    eng.bus.publish(SecurityEvent::engine(
+                                        "error",
+                                        format!("组织协同未启用：{e}"),
+                                    ));
+                                    warned_material = true;
+                                }
+                                continue;
+                            }
+                        }
                     }
                     Err(e) => {
                         if !warned_material {
@@ -838,44 +1179,121 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
                     }
                 }
             }
-            let http = http.as_ref().expect("client 已构建");
+            let http_ref = http.as_ref().expect("client 已构建");
+            let key_ref = key.as_ref().expect("签名钥已构建");
             let base = cfg.coordinator.trim_end_matches('/').to_string();
+            let mut material_stale = false;
 
-            // 1) 上报本地事件（蜜罐命中 + 检测判定）
-            if let Ok(rows) = eng.store.recent_events(100, None) {
-                let new_events: Vec<PushEvent> = rows
-                    .iter()
-                    .filter(|e| e.id > last_event_id)
-                    .filter(|e| matches!(e.kind.as_str(), "honeypot_hit" | "detection"))
-                    .map(|e| PushEvent {
-                        ts: e.ts,
-                        kind: e.kind.clone(),
-                        listener: e.listener.clone(),
-                        remote_ip: e.remote_ip.clone(),
-                        remote_port: e.remote_port,
-                        summary: e.summary.clone(),
-                    })
-                    .collect();
-                if !new_events.is_empty() {
-                    match http
-                        .post(format!("{base}/fed/events"))
-                        .json(&json!({ "node": cfg.node, "events": new_events }))
-                        .send()
-                        .await
-                    {
-                        Ok(r) if r.status().is_success() => {
-                            if let Some(max) = rows.iter().map(|e| e.id).max() {
-                                last_event_id = last_event_id.max(max);
-                            }
+            // 0) hello：心跳 + 版本探测 + last_seen。版本失配时这是唯一发出的消息。
+            if let Some((_, bytes)) =
+                seal_envelope(&eng, &cfg.node, key_ref, &mut seq, fedproto::types::HELLO, json!({}))
+            {
+                match post_envelope(http_ref, &base, "/fed/hello", &bytes).await {
+                    SendOutcome::Ok(v) => {
+                        if version_blocked.is_some() {
+                            eng.bus.publish(SecurityEvent::engine(
+                                "info",
+                                format!(
+                                    "协同协议协商通过：协调者 {} 已接受本节点（版本失配解除）",
+                                    v["proto"].as_str().unwrap_or("?")
+                                ),
+                            ));
                         }
-                        Ok(r) => tracing::warn!("组织事件上报被拒: HTTP {}", r.status()),
-                        Err(e) => tracing::warn!("协调者失联（本节点独立运行）: {e}"),
+                        version_blocked = None;
+                        warned_version.clear();
+                    }
+                    SendOutcome::Rejected(426, body) => {
+                        let server = serde_json::from_str::<serde_json::Value>(&body)
+                            .ok()
+                            .and_then(|b| {
+                                b["server_proto"].as_str().map(str::to_string)
+                            })
+                            .unwrap_or_else(|| "未知".into());
+                        version_blocked = Some(server.clone());
+                        if warned_version != server {
+                            warned_version = server.clone();
+                            eng.bus.publish(SecurityEvent::engine(
+                                "warn",
+                                format!(
+                                    "协同协议版本失配：协调者 {server}，本节点 {}（major 不同拒绝连接，请升级节点或协调者）",
+                                    fedproto::PROTO
+                                ),
+                            ));
+                        }
+                        continue;
+                    }
+                    SendOutcome::Rejected(code, _) => {
+                        tracing::debug!("fed hello 被拒: HTTP {code}");
+                    }
+                    SendOutcome::Network(e) => {
+                        tracing::debug!("协调者失联（本节点独立运行）: {e}");
+                    }
+                }
+            }
+            if version_blocked.is_some() {
+                continue;
+            }
+
+            // 1) 上报本地事件（蜜罐命中 + 检测判定；超 24h 的旧事件不再外发，
+            //    本地哈希链是归档真源）。未确认信封原样重发，不重建。
+            let bytes = match pending_events.take() {
+                Some(b) => Some(b),
+                None => eng.store.recent_events(100, None).ok().and_then(|rows| {
+                    let new_events: Vec<PushEvent> = rows
+                        .iter()
+                        .filter(|e| e.id > last_event_id)
+                        .filter(|e| matches!(e.kind.as_str(), "honeypot_hit" | "detection"))
+                        .filter(|e| now_ts() - e.ts <= fedproto::REPLAY_WINDOW_SECS)
+                        .map(|e| PushEvent {
+                            ts: e.ts,
+                            kind: e.kind.clone(),
+                            listener: e.listener.clone(),
+                            remote_ip: e.remote_ip.clone(),
+                            remote_port: e.remote_port,
+                            summary: e.summary.clone(),
+                        })
+                        .collect();
+                    if new_events.is_empty() {
+                        None
+                    } else {
+                        seal_envelope(
+                            &eng,
+                            &cfg.node,
+                            key_ref,
+                            &mut seq,
+                            fedproto::types::EVENTS,
+                            serde_json::to_value(&new_events).unwrap_or_default(),
+                        )
+                        .map(|(_, b)| b)
+                    }
+                }),
+            };
+            if let Some(bytes) = bytes {
+                match post_envelope(http_ref, &base, "/fed/events", &bytes).await {
+                    SendOutcome::Ok(_) => {
+                        pending_events = None;
+                        if let Ok(rows) = eng.store.recent_events(1, None)
+                            && let Some(max) = rows.first().map(|e| e.id)
+                        {
+                            last_event_id = last_event_id.max(max);
+                        }
+                    }
+                    SendOutcome::Rejected(code, body) => {
+                        // 4xx = 这份信封本身有问题（重发无意义），丢弃下轮重建；
+                        // 游标未推进，事件仍在队列。401 = 证书/签名材料过期，重建。
+                        pending_events = None;
+                        material_stale |= code == 401;
+                        tracing::warn!("组织事件上报被拒: HTTP {code} {body}");
+                    }
+                    SendOutcome::Network(_) => {
+                        pending_events = Some(bytes);
+                        tracing::debug!("协调者失联，事件信封留待重发");
                     }
                 }
             }
 
             // 2) 拉取组织情报（来源标 fed:coordinator，仅标注）
-            if let Ok(resp) = http.get(format!("{base}/fed/intel")).send().await
+            if let Ok(resp) = http_ref.get(format!("{base}/fed/intel")).send().await
                 && resp.status().is_success()
                 && let Ok(list) = resp.json::<Vec<serde_json::Value>>().await
             {
@@ -900,34 +1318,70 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
                 }
             }
 
-            // 3) 推送待确认建议（仅慢路径，接收方复验）
-            if let Ok(rows) = eng.store.list_proposals(None, 100) {
-                let new_proposals: Vec<serde_json::Value> = rows
-                    .iter()
-                    .filter(|p| p.id > last_proposal_id && p.status == "pending")
-                    .map(|p| {
-                        json!({
-                            "action": "block",
-                            "direction": p.direction,
-                            "protocol": p.protocol,
-                            "remote_ip": p.remote_ip,
-                            "local_port": p.local_port,
-                            "severity": p.severity,
-                            "reason": p.reason,
+            // 3) 推送待确认建议（仅慢路径，接收方复验）。最旧优先、单封 ≤10 条
+            //    （协调者硬上限），未确认信封原样重发。
+            let bytes: Option<(Vec<u8>, i64)> = match pending_proposals.take() {
+                Some(b) => Some((b, 0)),
+                None => eng.store.list_proposals(None, 100).ok().and_then(|rows| {
+                    let mut new_proposals: Vec<(i64, serde_json::Value)> = rows
+                        .iter()
+                        .filter(|p| p.id > last_proposal_id && p.status == "pending")
+                        .map(|p| {
+                            (
+                                p.id,
+                                json!({
+                                    "action": "block",
+                                    "direction": p.direction,
+                                    "protocol": p.protocol,
+                                    "remote_ip": p.remote_ip,
+                                    "local_port": p.local_port,
+                                    "severity": p.severity,
+                                    "reason": p.reason,
+                                }),
+                            )
                         })
-                    })
-                    .collect();
-                if !new_proposals.is_empty()
-                    && let Ok(r) = http
-                        .post(format!("{base}/fed/proposals"))
-                        .json(&json!({ "node": cfg.node, "proposals": new_proposals }))
-                        .send()
-                        .await
-                    && r.status().is_success()
-                    && let Some(max) = rows.iter().map(|p| p.id).max()
-                {
-                    last_proposal_id = last_proposal_id.max(max);
+                        .collect();
+                    new_proposals.sort_by_key(|(id, _)| *id);
+                    new_proposals.truncate(10);
+                    if new_proposals.is_empty() {
+                        return None;
+                    }
+                    let batch_max = new_proposals.last().map(|(id, _)| *id).unwrap_or(0);
+                    seal_envelope(
+                        &eng,
+                        &cfg.node,
+                        key_ref,
+                        &mut seq,
+                        fedproto::types::PROPOSALS,
+                        serde_json::Value::Array(
+                            new_proposals.into_iter().map(|(_, v)| v).collect(),
+                        ),
+                    )
+                    .map(|(_, b)| (b, batch_max))
+                }),
+            };
+            if let Some((bytes, batch_max)) = bytes {
+                match post_envelope(http_ref, &base, "/fed/proposals", &bytes).await {
+                    SendOutcome::Ok(_) => {
+                        pending_proposals = None;
+                        last_proposal_id = last_proposal_id.max(batch_max);
+                    }
+                    SendOutcome::Rejected(code, body) => {
+                        pending_proposals = None;
+                        material_stale |= code == 401;
+                        tracing::warn!("组织建议推送被拒: HTTP {code} {body}");
+                    }
+                    SendOutcome::Network(_) => {
+                        pending_proposals = Some(bytes);
+                        tracing::debug!("协调者失联，建议信封留待重发");
+                    }
                 }
+            }
+
+            // 证书/签名材料被判过期（401）：整体重建，下轮重读证书与私钥文件
+            if material_stale {
+                http = None;
+                key = None;
             }
         }
     });
@@ -957,7 +1411,7 @@ mod tests {
         assert!(cmd_revoke(&dir, &fp, "重复").is_err(), "重复吊销应拒绝");
 
         // 按节点名吊销：certs/<node>.pem 存在时算指纹
-        cmd_init_ca(&dir).unwrap();
+        cmd_init_ca(&dir, "").unwrap();
         cmd_issue_cert(&dir, "node-x", &[]).unwrap();
         let fp2 = cmd_revoke(&dir, "node-x", "换证前吊销").unwrap();
         assert_eq!(fp2.len(), 64);
@@ -1003,9 +1457,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        cmd_init_ca(&dir).unwrap();
+        cmd_init_ca(&dir, "").unwrap();
         // 重复 init-ca 必须拒绝（不能覆盖信任根）
-        assert!(cmd_init_ca(&dir).is_err());
+        assert!(cmd_init_ca(&dir, "").is_err());
 
         cmd_issue_cert(&dir, "node-1", &["127.0.0.1".to_string()]).unwrap();
         let cert_path = dir.join("fed").join("certs").join("node-1.pem");

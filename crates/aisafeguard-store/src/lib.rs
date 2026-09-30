@@ -260,7 +260,10 @@ CREATE TABLE IF NOT EXISTS intel (
 CREATE TABLE IF NOT EXISTS fed_members (
     node      TEXT PRIMARY KEY,
     last_seen INTEGER NOT NULL,
-    cert_fp   TEXT NOT NULL DEFAULT ''
+    cert_fp   TEXT NOT NULL DEFAULT '',
+    -- F100 fed 协议：该节点已见最大消息序列号（-1 = 尚未见过）。单调递增，
+    -- 回退（备份恢复/伪造重放）在 check_fed_seq 拒收
+    max_seq   INTEGER NOT NULL DEFAULT -1
 );
 
 -- 误报反馈（AI 深度介入 v1）：用户判定为误报的来源，自动封禁/自动应用跳过，
@@ -355,6 +358,7 @@ impl Store {
             "ALTER TABLE rules ADD COLUMN promoted INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE events ADD COLUMN interaction TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE proposals ADD COLUMN action TEXT NOT NULL DEFAULT 'block'",
+            "ALTER TABLE fed_members ADD COLUMN max_seq INTEGER NOT NULL DEFAULT -1",
         ] {
             let _ = conn.execute(sql, []); // 列已存在时报错，忽略
         }
@@ -1263,6 +1267,63 @@ impl Store {
         }
     }
 
+    /// F100 序列号门：seq 大于该节点已见高水位则推进水位并放行（true）；
+    /// 否则判回退拒收（false）——合法重复由调用侧 seen 集合先行拦截，到这里
+    /// 还撞低水位的只剩备份恢复/伪造重放。
+    pub fn check_fed_seq(&self, node: &str, seq: u64) -> Result<bool> {
+        let conn = self.lock()?;
+        let n = conn
+            .execute(
+                "UPDATE fed_members SET max_seq = ?2 WHERE node = ?1 AND max_seq < ?2",
+                params![node, seq as i64],
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        if n == 1 {
+            return Ok(true);
+        }
+        let max: Option<i64> = conn
+            .query_row(
+                "SELECT max_seq FROM fed_members WHERE node = ?1",
+                params![node],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(matches!(max, Some(m) if m < seq as i64))
+    }
+
+    /// meta 表通用读（fed 序列号游标等进程间持久化小状态）。
+    pub fn get_meta(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.lock()?;
+        let v: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(v)
+    }
+
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.lock()?
+            .execute(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2",
+                params![key, value],
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(())
+    }
+
     pub fn list_fed_members(&self) -> Result<Vec<(String, String, i64)>> {
         let conn = self.lock()?;
         let mut stmt = conn
@@ -1310,6 +1371,35 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn fed_seq_monotonic_and_meta() {
+        let dir = std::env::temp_dir().join(format!("asg-fedseq-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("t.db")).unwrap();
+
+        // 未注册节点：无高水位行，一律拒收（宁停勿乱；真实管道 check_member 必然先建行，
+        // 该分支只是纵深防御）
+        assert!(!store.check_fed_seq("ghost", 5).unwrap());
+
+        store.upsert_fed_member("a", 1, "fp-a").unwrap();
+        assert!(store.check_fed_seq("a", 0).unwrap(), "首条放行");
+        assert!(store.check_fed_seq("a", 7).unwrap());
+        assert!(!store.check_fed_seq("a", 7).unwrap(), "同号重放拒（seen 集合由调用方先行）");
+        assert!(!store.check_fed_seq("a", 3).unwrap(), "回退拒");
+        assert!(store.check_fed_seq("a", 8).unwrap(), "乱序前进放行（单调 ≠ 连续）");
+
+        // meta 读写：不存在 → None；写入 → 读回；覆盖
+        assert_eq!(store.get_meta("fed_seq").unwrap(), None);
+        store.set_meta("fed_seq", "7").unwrap();
+        assert_eq!(store.get_meta("fed_seq").unwrap().as_deref(), Some("7"));
+        store.set_meta("fed_seq", "12").unwrap();
+        assert_eq!(store.get_meta("fed_seq").unwrap().as_deref(), Some("12"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     fn tmp_store(name: &str) -> Store {
