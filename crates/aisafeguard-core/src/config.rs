@@ -488,20 +488,61 @@ impl XdpConfig {
 pub struct IntelConfig {
     /// 默认关闭：情报拉取是对外网络请求，用户显式开启
     pub enabled: bool,
-    /// 高置信度 C2 情报自动封禁（TTL + 内网保护）
-    pub auto_block: bool,
     pub interval_secs: u64,
-    /// 情报源地址（默认 abuse.ch Feodo C2；可指向自托管/镜像源，测试友好）
-    pub feed_url: String,
+    /// F710 多源分级：每源自带置信度与「能否自动封禁」的显式许可——
+    /// 换源不再同等信任（旧单源 feed_url/auto_block 字段已删，无兼容层）
+    pub sources: Vec<IntelSource>,
+}
+
+/// 情报源（F710）：自动封禁 = auto_block && confidence=="high" 双条件；
+/// 内网保护/TTL/审计是全局保险，任何源都不能放宽。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IntelSource {
+    /// 源标识（intel 表 source 列，如 feodo_c2 / crowdsec；限字母数字下划线）
+    pub name: String,
+    pub url: String,
+    /// high | fed | local
+    pub confidence: String,
+    /// 拉回条目的类别标签（c2 / scan_source / ...）
+    pub kind: String,
+    /// 自动封禁显式许可
+    pub auto_block: bool,
+    pub ttl_secs: u64,
+}
+
+impl IntelSource {
+    pub fn valid(&self) -> bool {
+        !self.name.is_empty()
+            && self
+                .name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && !self.url.is_empty()
+            && matches!(self.confidence.as_str(), "high" | "fed" | "local")
+            && !self.kind.is_empty()
+            && self.ttl_secs > 0
+    }
+}
+
+impl IntelConfig {
+    pub fn valid(&self) -> bool {
+        !self.enabled || (!self.sources.is_empty() && self.sources.iter().all(|s| s.valid()))
+    }
 }
 
 impl Default for IntelConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            auto_block: true,
             interval_secs: 21600, // 6h
-            feed_url: "https://feodotracker.abuse.ch/downloads/ipblocklist.txt".into(),
+            sources: vec![IntelSource {
+                name: "feodo_c2".into(),
+                url: "https://feodotracker.abuse.ch/downloads/ipblocklist.txt".into(),
+                confidence: "high".into(),
+                kind: "c2".into(),
+                auto_block: true,
+                ttl_secs: 3 * 86400,
+            }],
         }
     }
 }
@@ -947,6 +988,63 @@ mod tests {
         // AI 默认人工确认
         assert!(!cfg.ai.enabled);
         assert!(!cfg.ai.auto_apply);
+    }
+
+    /// F710 多源模型：新格式解析、旧单源字段拒绝（无兼容层）、源校验。
+    #[test]
+    fn intel_multisource_parse_and_legacy_reject() {
+        let new_toml = r#"
+[intel]
+enabled = true
+interval_secs = 600
+[[intel.sources]]
+name = "feodo_c2"
+url = "https://example.com/list.txt"
+confidence = "high"
+kind = "c2"
+auto_block = true
+ttl_secs = 259200
+[[intel.sources]]
+name = "mirror"
+url = "https://mirror.example.com/list.txt"
+confidence = "fed"
+kind = "scan_source"
+auto_block = false
+ttl_secs = 604800
+"#;
+        let cfg: AppConfig = toml::from_str(new_toml).expect("新多源格式必须能解析");
+        assert!(cfg.intel.enabled);
+        assert_eq!(cfg.intel.sources.len(), 2);
+        assert_eq!(cfg.intel.sources[0].name, "feodo_c2");
+        assert!(!cfg.intel.sources[1].auto_block);
+        assert!(cfg.intel.valid());
+
+        // 旧单源字段（feed_url/auto_block）→ deny_unknown_fields 明确拒绝
+        let legacy_toml = r#"
+[intel]
+enabled = true
+feed_url = "https://example.com/list.txt"
+auto_block = true
+"#;
+        assert!(
+            toml::from_str::<AppConfig>(legacy_toml).is_err(),
+            "旧单源配置必须被明确拒绝（无兼容层）"
+        );
+
+        // 源校验：confidence 枚举外 / 空名 / 零 TTL 都非法（校验只约束启用态）
+        let mut bad = IntelConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        bad.sources[0].confidence = "最高".into();
+        assert!(!bad.valid());
+        bad.sources[0].confidence = "high".into();
+        bad.sources[0].name = String::new();
+        assert!(!bad.valid());
+        bad.sources[0].name = "feodo_c2".into();
+        bad.sources[0].ttl_secs = 0;
+        assert!(!bad.valid());
+        assert!(IntelConfig::default().valid());
     }
 
     /// H140 示例配置防漂移：(1) docs/config.example.toml 必须能解析进

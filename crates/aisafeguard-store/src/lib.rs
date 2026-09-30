@@ -37,13 +37,17 @@ pub struct EventRow {
     pub tls_ja4: String,
     /// 蜜罐交互逐命令 JSON（0.5.9 H102：中交互假 Shell 会话才有；空串 = 无）
     pub interaction: String,
+    /// 命中的规则 ID（0.7 F740：Detection 落库；旧数据/非检测事件为空串。
+    /// serde default 防新旧版本混跑——老服务 JSON 缺此字段时 GUI 不崩）
+    #[serde(default)]
+    pub rule_id: String,
     pub prev_hash: String,
     pub hash: String,
 }
 
 /// events 表完整列清单（三处查询共用：recent_events / recent_honeypot_hits / verify_chain）。
 /// 新列追加在 tls_ja4 之后、prev_hash/hash 之前——链列永远最后两列。
-const EVENT_COLUMNS: &str = "id, ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, tls_ja4, interaction, prev_hash, hash";
+const EVENT_COLUMNS: &str = "id, ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, tls_ja4, rule_id, interaction, prev_hash, hash";
 
 fn event_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
     Ok(EventRow {
@@ -58,9 +62,10 @@ fn event_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
         http_hint: r.get(8)?,
         tls_fp: r.get(9)?,
         tls_ja4: r.get(10)?,
-        interaction: r.get(11)?,
-        prev_hash: r.get(12)?,
-        hash: r.get(13)?,
+        rule_id: r.get(11)?,
+        interaction: r.get(12)?,
+        prev_hash: r.get(13)?,
+        hash: r.get(14)?,
     })
 }
 
@@ -213,6 +218,7 @@ CREATE TABLE IF NOT EXISTS events (
     http_hint   TEXT NOT NULL DEFAULT '',
     tls_fp      TEXT NOT NULL DEFAULT '',
     tls_ja4     TEXT NOT NULL DEFAULT '',
+    rule_id     TEXT NOT NULL DEFAULT '',
     prev_hash   TEXT NOT NULL DEFAULT '',
     hash        TEXT NOT NULL DEFAULT ''
 );
@@ -279,7 +285,9 @@ CREATE TABLE IF NOT EXISTS intel (
     value      TEXT NOT NULL UNIQUE,
     confidence TEXT NOT NULL,
     first_seen INTEGER NOT NULL,
-    expires_ts INTEGER NOT NULL
+    expires_ts INTEGER NOT NULL,
+    -- F710 源分级：该条目是否来自允许自动封禁的源（特权条目不被非特权源覆盖）
+    auto_block INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS fed_members (
@@ -396,6 +404,8 @@ impl Store {
             "ALTER TABLE events ADD COLUMN http_hint TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE events ADD COLUMN tls_fp TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE events ADD COLUMN tls_ja4 TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE events ADD COLUMN rule_id TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE intel ADD COLUMN auto_block INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE rules ADD COLUMN promoted INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE events ADD COLUMN interaction TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE proposals ADD COLUMN action TEXT NOT NULL DEFAULT 'block'",
@@ -477,7 +487,7 @@ impl Store {
     // ---------- 事件 ----------
 
     pub fn insert_event(&self, ev: &SecurityEvent) -> Result<()> {
-        let (listener, remote_ip, remote_port, payload, http_hint, tls_fp, tls_ja4, interaction) =
+        let (listener, remote_ip, remote_port, payload, http_hint, tls_fp, tls_ja4, rule_id, interaction) =
             match ev {
                 SecurityEvent::HoneypotHit {
                     listener,
@@ -498,6 +508,7 @@ impl Store {
                         .unwrap_or_default(),
                     String::new(),
                     String::new(),
+                    String::new(),
                     interaction
                         .as_ref()
                         .map(|steps| serde_json::to_string(steps).unwrap_or_default())
@@ -508,6 +519,7 @@ impl Store {
                     http_hint,
                     tls_fingerprint,
                     tls_ja4,
+                    rule_id,
                     ..
                 } => (
                     String::new(),
@@ -520,6 +532,7 @@ impl Store {
                         .unwrap_or_default(),
                     tls_fingerprint.clone().unwrap_or_default(),
                     tls_ja4.clone().unwrap_or_default(),
+                    rule_id.clone().unwrap_or_default(),
                     String::new(),
                 ),
                 // 凭证采集（0.5.10 H200）：事件行只落用户名（payload 列），
@@ -539,11 +552,13 @@ impl Store {
                     String::new(),
                     String::new(),
                     String::new(),
+                    String::new(),
                 ),
                 _ => (
                     String::new(),
                     String::new(),
                     0,
+                    String::new(),
                     String::new(),
                     String::new(),
                     String::new(),
@@ -573,9 +588,9 @@ impl Store {
         );
         let hash = chain_hash(&prev_hash, &canonical);
         conn.execute(
-            "INSERT INTO events (ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, tls_ja4, interaction, prev_hash, hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            params![ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, tls_ja4, interaction, prev_hash, hash],
+            "INSERT INTO events (ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, tls_ja4, rule_id, interaction, prev_hash, hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, tls_ja4, rule_id, interaction, prev_hash, hash],
         )
         .map_err(|e| Error::Store(e.to_string()))?;
         Ok(())
@@ -1333,23 +1348,29 @@ impl Store {
     // ---------- 威胁情报 ----------
 
     /// upsert：同 value 更新来源/置信度/过期时间，first_seen 保留最初值
+    /// F710 多源分级 upsert：第 7 元素 = 该条目是否来自允许自动封禁的源（特权）。
+    /// 冲突优先级：特权条目覆盖一切，非特权条目只能覆盖非特权——换源不再同等信任。
+    /// 返回实际写入行数（被优先级过滤掉的不计）。
     pub fn upsert_intel(
         &self,
-        entries: &[(String, String, String, String, i64, i64)],
+        entries: &[(String, String, String, String, i64, i64, bool)],
     ) -> Result<usize> {
         let conn = self.lock()?;
         let mut n = 0;
-        for (source, kind, value, confidence, first_seen, expires_ts) in entries {
-            conn.execute(
-                "INSERT INTO intel (source, kind, value, confidence, first_seen, expires_ts)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT(value) DO UPDATE SET
-                   source = excluded.source, kind = excluded.kind,
-                   confidence = excluded.confidence, expires_ts = excluded.expires_ts",
-                params![source, kind, value, confidence, first_seen, expires_ts],
-            )
-            .map_err(|e| Error::Store(e.to_string()))?;
-            n += 1;
+        for (source, kind, value, confidence, first_seen, expires_ts, auto_block) in entries {
+            let changed = conn
+                .execute(
+                    "INSERT INTO intel (source, kind, value, confidence, first_seen, expires_ts, auto_block)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(value) DO UPDATE SET
+                       source = excluded.source, kind = excluded.kind,
+                       confidence = excluded.confidence, expires_ts = excluded.expires_ts,
+                       auto_block = excluded.auto_block
+                     WHERE ?7 = 1 OR intel.auto_block = 0",
+                    params![source, kind, value, confidence, first_seen, expires_ts, auto_block],
+                )
+                .map_err(|e| Error::Store(e.to_string()))?;
+            n += changed;
         }
         Ok(n)
     }
@@ -1632,9 +1653,9 @@ mod tests {
         // 订阅反馈：在库条数（未过期口径；三条 expires = now+3d，+3d+1s 后全过期）
         store
             .upsert_intel(&[
-                ("feodo_c2".into(), "c2".into(), "203.0.113.7".into(), "high".into(), now, now + 3 * 86400),
-                ("feodo_c2".into(), "c2".into(), "203.0.113.8".into(), "high".into(), now, now + 3 * 86400),
-                ("local_honeypot".into(), "scan_source".into(), "203.0.113.9".into(), "local".into(), now, now + 3 * 86400),
+                ("feodo_c2".into(), "c2".into(), "203.0.113.7".into(), "high".into(), now, now + 3 * 86400, true),
+                ("feodo_c2".into(), "c2".into(), "203.0.113.8".into(), "high".into(), now, now + 3 * 86400, true),
+                ("local_honeypot".into(), "scan_source".into(), "203.0.113.9".into(), "local".into(), now, now + 3 * 86400, false),
             ])
             .unwrap();
         assert_eq!(store.intel_count(now).unwrap(), 3);
@@ -1714,6 +1735,67 @@ mod tests {
         assert!(!json.contains("argon2id"), "哈希不得进事件 API: {json}");
         assert!(!json.contains("HIDDEN"), "哈希不得进事件 API: {json}");
         assert!(json.contains("root"));
+    }
+
+    /// F710 冲突优先级：特权条目覆盖一切，非特权源不能覆盖特权条目。
+    #[test]
+    fn intel_upsert_priority_privileged_wins() {
+        let store = tmp_store("intel-prio");
+        let now = aisafeguard_core::now_ts();
+        let mk = |source: &str, conf: &str, ab: bool| {
+            (source.to_string(), "c2".to_string(), "9.9.9.9".to_string(), conf.to_string(), now, now + 60, ab)
+        };
+        // 非特权先入库
+        store.upsert_intel(&[mk("local_honeypot", "local", false)]).unwrap();
+        // 特权覆盖
+        store.upsert_intel(&[mk("feodo_c2", "high", true)]).unwrap();
+        let src = || {
+            store
+                .active_intel(now)
+                .unwrap()
+                .into_iter()
+                .find(|r| r.value == "9.9.9.9")
+                .unwrap()
+                .source
+        };
+        assert_eq!(src(), "feodo_c2");
+        // 非特权不能再覆盖特权（WHERE 过滤 → 实际写入 0 行）
+        assert_eq!(store.upsert_intel(&[mk("local_honeypot", "local", false)]).unwrap(), 0);
+        assert_eq!(src(), "feodo_c2");
+        // 特权刷新自己照常
+        assert_eq!(store.upsert_intel(&[mk("feodo_c2", "high", true)]).unwrap(), 1);
+    }
+
+    /// rule_id 落库（0.7 F740）：Detection 的规则 ID 进 events 表——
+    /// 「哪些规则命中多少」的按规则统计从此有据可查；非检测事件为空串。
+    #[test]
+    fn detection_rule_id_persisted() {
+        let store = tmp_store("rule-id");
+        let now = aisafeguard_core::now_ts();
+        store
+            .insert_event(&SecurityEvent::Detection {
+                ts: now,
+                kind: "signature".into(),
+                src_ip: "203.0.113.7".into(),
+                confidence: "high".into(),
+                severity: "high".into(),
+                evidence: "e".into(),
+                rule_id: Some("sid:1002001".into()),
+                http_hint: None,
+                tls_fingerprint: None,
+                tls_ja4: None,
+            })
+            .unwrap();
+        store
+            .insert_event(&SecurityEvent::engine("info", "流水"))
+            .unwrap();
+        let rows = store.recent_events(10, None).unwrap();
+        let det = rows.iter().find(|r| r.kind == "detection").unwrap();
+        assert_eq!(det.rule_id, "sid:1002001");
+        let eng = rows.iter().find(|r| r.kind == "engine").unwrap();
+        assert_eq!(eng.rule_id, "", "非检测事件 rule_id 为空");
+        let json = serde_json::to_string(&det).unwrap();
+        assert!(json.contains("sid:1002001"), "JSONL 导出携带 rule_id");
     }
 
     /// 指纹覆盖统计（0.5.0 H6）：Detection 总数与携带 JA3 的条数按窗口计数。

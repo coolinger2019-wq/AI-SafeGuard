@@ -2372,93 +2372,123 @@ pub async fn run_intel_refresh(
         .timeout(Duration::from_secs(90))
         .build()
         .expect("HTTP client 构建失败");
-    let mut entries: Vec<aisafeguard_detect::intel::IntelEntry> = Vec::new();
 
-    // 1) 情报源（默认 Feodo C2，高置信度；feed_url 可覆盖）
-    match aisafeguard_detect::intel::fetch_blocklist(&http, &cfg.feed_url).await {
-        Ok(ips) => {
-            for ip in ips {
-                entries.push(aisafeguard_detect::intel::IntelEntry {
-                    source: "feodo_c2".into(),
-                    kind: "c2".into(),
-                    value: ip,
-                    confidence: "high".into(),
-                    first_seen: now,
-                    expires_ts: now + 3 * 86400,
-                });
-            }
+    // 1) 逐源拉取（F710 多源分级）：单源失败只跳过该源，不拖垮其余源
+    let mut total_added = 0usize;
+    let mut total_blocked = 0usize;
+    let mut failures = 0usize;
+    for source in &cfg.sources {
+        if !source.valid() {
+            tracing::warn!("情报源 {} 配置非法（name/url/confidence/kind/ttl 检查），跳过", source.name);
+            failures += 1;
+            continue;
         }
-        Err(e) => {
-            tracing::warn!("情报拉取失败（离线或源不可达，跳过本轮）: {e}");
-            // 源不可达不产生空情报覆盖；但落失败账（订阅反馈可见）
-            let _ = eng.store.set_meta(
-                "intel_last_fetch",
-                &serde_json::json!({
-                    "ts": now, "ok": false, "added": 0,
-                    "active": eng.store.intel_count(now).unwrap_or(0), "blocked": 0,
-                })
-                .to_string(),
-            );
-            return;
+        match aisafeguard_detect::intel::fetch_blocklist(&http, &source.url).await {
+            Ok(ips) => {
+                let (added, blocked) = apply_intel_source(
+                    &eng.store,
+                    eng.firewall.as_ref(),
+                    &eng.bus,
+                    source,
+                    ips,
+                    now,
+                );
+                total_added += added;
+                total_blocked += blocked;
+            }
+            Err(e) => {
+                failures += 1;
+                tracing::warn!("情报源 {} 拉取失败（跳过该源，其余源照常）: {e}", source.name);
+            }
         }
     }
 
-    // 2) 本地蜜罐源（最近 7 天命中过的来源，仅标注，不自动封禁）
-    if let Ok(hits) = eng.store.recent_honeypot_hits(2000) {
-        let mut seen = std::collections::HashSet::new();
-        for h in hits {
-            if h.remote_ip.is_empty()
-                || h.remote_ip == "unknown"
-                || !seen.insert(h.remote_ip.clone())
-            {
-                continue;
-            }
-            entries.push(aisafeguard_detect::intel::IntelEntry {
-                source: "local_honeypot".into(),
-                kind: "scan_source".into(),
-                value: h.remote_ip,
-                confidence: "local".into(),
-                first_seen: now,
-                expires_ts: now + 7 * 86400,
-            });
-        }
-    }
+    // 2) 本地蜜罐源（最近 7 天命中过的来源，仅标注，永不自动封禁）
+    let local = aisafeguard_core::config::IntelSource {
+        name: "local_honeypot".into(),
+        url: String::new(),
+        confidence: "local".into(),
+        kind: "scan_source".into(),
+        auto_block: false,
+        ttl_secs: 7 * 86400,
+    };
+    let mut seen = std::collections::HashSet::new();
+    let hits: Vec<String> = eng
+        .store
+        .recent_honeypot_hits(2000)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|h| {
+            !h.remote_ip.is_empty()
+                && h.remote_ip != "unknown"
+                && seen.insert(h.remote_ip.clone())
+        })
+        .map(|h| h.remote_ip)
+        .collect();
+    let (added_local, _) =
+        apply_intel_source(&eng.store, eng.firewall.as_ref(), &eng.bus, &local, hits, now);
+    total_added += added_local;
 
-    let upserts: Vec<(String, String, String, String, i64, i64)> = entries
+    let _ = eng.store.prune_intel(now);
+    let active = eng.store.intel_count(now).unwrap_or(0);
+    let _ = eng.store.set_meta(
+        "intel_last_fetch",
+        &serde_json::json!({
+            "ts": now, "ok": failures == 0, "added": total_added as i64,
+            "active": active as i64, "blocked": total_blocked as i64,
+        })
+        .to_string(),
+    );
+    eng.bus.publish(SecurityEvent::engine(
+        "info",
+        format!(
+            "威胁情报更新：入库 {total_added} 条（{} 个源，失败 {failures}），在库 {active}，自动封禁 {total_blocked}",
+            cfg.sources.len()
+        ),
+    ));
+}
+
+/// F710 单源入库 + 自动封禁。门控 = 源级 auto_block && confidence=="high"
+/// 双条件（许可与信任缺一不可）；内网保护/已封跳过不变。
+/// 拆成自由函数便于单测（MockFirewall + 临时库，无需网络）。
+pub(crate) fn apply_intel_source(
+    store: &Store,
+    firewall: &dyn Firewall,
+    bus: &EventBus,
+    source: &aisafeguard_core::config::IntelSource,
+    ips: Vec<String>,
+    now: i64,
+) -> (usize, usize) {
+    let upserts: Vec<(String, String, String, String, i64, i64, bool)> = ips
         .iter()
-        .map(|e| {
+        .map(|ip| {
             (
-                e.source.clone(),
-                e.kind.clone(),
-                e.value.clone(),
-                e.confidence.clone(),
-                e.first_seen,
-                e.expires_ts,
+                source.name.clone(),
+                source.kind.clone(),
+                ip.clone(),
+                source.confidence.clone(),
+                now,
+                now + source.ttl_secs as i64,
+                source.auto_block && source.confidence == "high",
             )
         })
         .collect();
-    let n = eng.store.upsert_intel(&upserts).unwrap_or(0);
-    let _ = eng.store.prune_intel(now);
+    let added = store.upsert_intel(&upserts).unwrap_or(0);
 
-    // 3) 高置信度 C2 自动封禁（TTL 3 天，内网保护，已封跳过）
-    let mut blocked = 0;
-    if cfg.auto_block {
-        let existing: std::collections::HashSet<String> = eng
-            .store
+    let mut blocked = 0usize;
+    if source.auto_block && source.confidence == "high" {
+        let existing: std::collections::HashSet<String> = store
             .list_rules()
             .unwrap_or_default()
             .into_iter()
             .filter(|r| r.remote_ip.parse::<IpAddr>().is_ok())
             .map(|r| r.remote_ip)
             .collect();
-        for e in &entries {
-            if e.confidence != "high" || e.kind != "c2" {
-                continue;
-            }
-            let Ok(ip) = e.value.parse::<IpAddr>() else {
+        for value in &ips {
+            let Ok(ip) = value.parse::<IpAddr>() else {
                 continue;
             };
-            if aisafeguard_core::is_protected_ip(ip) || existing.contains(&e.value) {
+            if aisafeguard_core::is_protected_ip(ip) || existing.contains(value) {
                 continue;
             }
             let spec = BlockSpec {
@@ -2466,34 +2496,21 @@ pub async fn run_intel_refresh(
                 protocol: Protocol::Any,
                 remote_ip: Some(ip),
                 local_port: None,
-                note: format!("威胁情报自动封禁（{} / TTL 3 天）", e.source),
+                note: format!(
+                    "威胁情报自动封禁（{} / TTL {}）",
+                    source.name,
+                    crate::explain::humanize_secs(source.ttl_secs as i64)
+                ),
                 tag: "情报".into(),
             };
-            if eng
-                .add_block_ex(&spec, "intel", Some(now + 3 * 86400))
+            if apply_block(firewall, store, bus, &spec, "intel", Some(now + source.ttl_secs as i64))
                 .is_ok()
             {
                 blocked += 1;
             }
         }
     }
-
-    let active = eng.store.active_intel(now).map(|v| v.len()).unwrap_or(0);
-    let _ = eng.store.set_meta(
-        "intel_last_fetch",
-        &serde_json::json!({
-            "ts": now, "ok": true, "added": n as i64,
-            "active": active as i64, "blocked": blocked as i64,
-        })
-        .to_string(),
-    );
-    eng.bus.publish(SecurityEvent::engine(
-        "info",
-        format!(
-            "威胁情报更新：入库 {n} 条（Feodo C2 {}），活跃 {active}，自动封禁 {blocked}",
-            entries.iter().filter(|e| e.source == "feodo_c2").count()
-        ),
-    ));
+    (added, blocked)
 }
 
 #[cfg(test)]
@@ -2613,6 +2630,60 @@ mod tests {
         }
         assert!(kinds.iter().any(|s| s.contains("[scan] 203.0.113.7")));
         assert!(kinds.iter().any(|s| s.contains("已自动封禁 203.0.113.7")));
+    }
+
+    /// F710 源分级门控：只有 auto_block && confidence=high 的源触发自动封禁；
+    /// 内网保护/已封跳过不变；非特权源条目照常入库（标注面）。
+    #[test]
+    fn intel_source_gating_blocks_only_privileged() {
+        let f = Fixture::new("intel-gate");
+        let now = now_ts();
+        let priv_src = aisafeguard_core::config::IntelSource {
+            name: "feodo_c2".into(),
+            url: "https://x".into(),
+            confidence: "high".into(),
+            kind: "c2".into(),
+            auto_block: true,
+            ttl_secs: 259_200,
+        };
+        let pub_src = aisafeguard_core::config::IntelSource {
+            name: "mirror".into(),
+            url: "https://y".into(),
+            confidence: "fed".into(),
+            kind: "scan_source".into(),
+            auto_block: false,
+            ttl_secs: 604_800,
+        };
+        let (added1, blocked1) = apply_intel_source(
+            &f.store,
+            &f.fw,
+            &f.bus,
+            &priv_src,
+            vec!["203.0.113.7".into(), "192.168.1.50".into()],
+            now,
+        );
+        assert_eq!(added1, 2, "内网条目照常入库（情报标注面）");
+        assert_eq!(blocked1, 1, "内网地址永不自动封");
+        let (added2, blocked2) = apply_intel_source(
+            &f.store,
+            &f.fw,
+            &f.bus,
+            &pub_src,
+            vec!["203.0.113.8".into()],
+            now,
+        );
+        assert_eq!(added2, 1, "非特权源条目照常入库");
+        assert_eq!(blocked2, 0, "非特权源永不自动封禁");
+        let (_, blocked3) = apply_intel_source(
+            &f.store,
+            &f.fw,
+            &f.bus,
+            &priv_src,
+            vec!["203.0.113.7".into()],
+            now,
+        );
+        assert_eq!(blocked3, 0, "已封跳过");
+        assert_eq!(f.fw.added.lock().expect("mock 锁中毒").len(), 1);
     }
 
     #[test]

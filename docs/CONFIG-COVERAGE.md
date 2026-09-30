@@ -50,8 +50,8 @@
 | detect.rules.enabled / path / auto_block | false / 空 / false | ✅ 检测页 | 📄 | 📖 开启规则包 | |
 | detect.rules.max_rules | 5000 | 🔒 | 📄 | — | 进阶参数：整包校验上限 |
 | xdp.enabled / iface / mode | false / eth0 / skb | ✅ 蜜罐页（XDP 段） | 📄 | — | Linux-only，GUI 有开关与状态 chip |
-| intel.enabled / auto_block / feed_url | false / true / abuse.ch | ✅ 检测页 | 📄 | 手动拉取按钮 | 联网项：默认关；fed/stix 源永不自动封禁 |
-| intel.interval_secs | 6h | 🔒 | 📄 | — | 进阶参数 |
+| intel.enabled / interval_secs | false / 6h | ✅ 检测页 | 📄 | 手动拉取按钮 | 联网项：默认关；fed/stix/local 源永不自动封禁 |
+| intel.sources[]（name/url/confidence/kind/auto_block/ttl_secs） | feodo_c2 | 🔒 检测页只读展示 | 📄 | — | F710 多源分级：自动封禁 = auto_block && confidence=high 双条件；换源不再同等信任 |
 | fed.enabled / role / node / coordinator / min_peers / interval_secs / listen_addr | false / off / … | 🔒 | 📄 | — | 运维项：多节点部署与证书签发是一套流程，GUI 化反而危险 |
 | fed.ca_path / cert_path / key_path | 空 | 🔒 | 📄 | — | 运维项：证书材料路径 |
 | syslog.enabled / target / protocol | false / … / udp | ✅ 通道页 | 📄 | — | |

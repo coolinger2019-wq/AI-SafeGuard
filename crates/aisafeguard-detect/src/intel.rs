@@ -5,22 +5,9 @@
 //! 治理：TTL 过期、单源一键禁用（关闭 intel.enabled 即停）、内网保护全局生效。
 
 use aisafeguard_core::error::{Error, Result};
-use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 pub const FEODO_C2_URL: &str = "https://feodotracker.abuse.ch/downloads/ipblocklist.txt";
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IntelEntry {
-    pub source: String,
-    /// c2 | malware_distro | scan_source
-    pub kind: String,
-    pub value: String,
-    /// high（可自动封禁）| local | fed（仅标注）
-    pub confidence: String,
-    pub first_seen: i64,
-    pub expires_ts: i64,
-}
 
 /// 解析 Feodo Tracker ipblocklist.txt：`#` 注释行跳过，每行一个 IP
 pub fn parse_feodo_ipblocklist(text: &str) -> Vec<String> {

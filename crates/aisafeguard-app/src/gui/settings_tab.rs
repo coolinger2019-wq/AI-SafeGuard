@@ -259,20 +259,23 @@ impl AisafeApp {
                     "（对外网络请求，默认关；周期拉取外部名单与本机观测求交）",
                 );
                 ui.end_row();
-                ui.label("情报自动封禁");
-                ui.checkbox(
-                    &mut draft.intel.auto_block,
-                    "（仅高置信度 C2 名单；TTL 到期自动解封，内网地址永不自动封禁）",
-                );
-                ui.end_row();
-                ui.label("情报源地址");
-                ui.add(
-                    egui::TextEdit::singleline(&mut draft.intel.feed_url)
-                        .hint_text("默认 abuse.ch Feodo C2；可指向自托管/镜像源")
-                        .desired_width(360.0),
-                );
                 ui.end_row();
             });
+        // F710 多源分级只读展示：能否自动封禁是每源的显式许可；编辑走 config.toml
+        for src in &draft.intel.sources {
+            ui.horizontal(|ui| {
+                ui.label(mono_text(&src.name));
+                ui.label(caption(&src.url));
+                if src.auto_block && src.confidence == "high" {
+                    chip(ui, "允许自动封", warn());
+                } else {
+                    chip(ui, "仅标注", text_dim());
+                }
+            });
+        }
+        ui.label(caption(
+            "源增删与信任分级在 config.toml [intel.sources]；自动封禁 = 该源 auto_block 且 confidence=high 双条件，内网地址任何源都拒收。",
+        ));
         ui.horizontal(|ui| {
             if ui.button("手动拉取一轮").clicked() {
                 match self.eng.refresh_intel() {

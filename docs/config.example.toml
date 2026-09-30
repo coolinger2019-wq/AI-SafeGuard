@@ -217,14 +217,30 @@ iface = "eth0"
 mode = "skb"
 
 [intel]
-# 威胁情报（默认关：对外网络请求）：abuse.ch Feodo C2 名单与本机观测交集。
+# 威胁情报（默认关：对外网络请求）：多源名单与本机观测求交。
 enabled = false
-# 高置信度 C2 情报自动封禁（TTL + 内网保护）。
-auto_block = true
 # 拉取间隔（秒）。
 interval_secs = 21600
-# 情报源地址（可指向自托管/镜像源）。
-feed_url = "https://feodotracker.abuse.ch/downloads/ipblocklist.txt"
+
+# F710 多源分级：每源自带置信度与「能否自动封禁」的显式许可——
+# 自动封禁 = 该源 auto_block=true 且 confidence="high" 双条件；内网地址任何源都拒收；
+# 特权条目不被非特权源覆盖（冲突按源优先级）。
+[[intel.sources]]
+name = "feodo_c2"
+url = "https://feodotracker.abuse.ch/downloads/ipblocklist.txt"
+confidence = "high"
+kind = "c2"
+auto_block = true
+ttl_secs = 259200
+
+# 第二个源示例（仅标注不自动封）：
+# [[intel.sources]]
+# name = "my_mirror"
+# url = "https://internal.example.com/blocklist.txt"
+# confidence = "fed"
+# kind = "scan_source"
+# auto_block = false
+# ttl_secs = 604800
 
 [fed]
 # 组织协同（默认关）：多节点经 mTLS 共享观测与建议。

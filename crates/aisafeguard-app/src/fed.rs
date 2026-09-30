@@ -772,7 +772,7 @@ async fn fed_intel_post(
         return err("单次同步最多 500 条情报");
     }
     let now = now_ts();
-    let upserts: Vec<(String, String, String, String, i64, i64)> = entries
+    let upserts: Vec<(String, String, String, String, i64, i64, bool)> = entries
         .iter()
         // 来源 IP 的内网保护在 upsert 前置拒绝（防投毒锁网）
         .filter(|e| {
@@ -789,6 +789,7 @@ async fn fed_intel_post(
                 "fed".into(),
                 now,
                 now + 7 * 86400,
+                false,
             )
         })
         .collect();
@@ -1318,7 +1319,7 @@ pub fn cmd_stix_import(data_dir: &Path, path: &Path) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let now = now_ts();
     let store = aisafeguard_store::Store::open(&data_dir.join("aisafeguard.db"))?;
-    let upserts: Vec<(String, String, String, String, i64, i64)> = iocs
+    let upserts: Vec<(String, String, String, String, i64, i64, bool)> = iocs
         .iter()
         .map(|i| {
             (
@@ -1328,6 +1329,7 @@ pub fn cmd_stix_import(data_dir: &Path, path: &Path) -> anyhow::Result<()> {
                 "fed".into(),
                 now,
                 i.expires_ts,
+                false,
             )
         })
         .collect();
@@ -2030,7 +2032,7 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
                 && let Ok(list) = resp.json::<Vec<serde_json::Value>>().await
             {
                 let now = now_ts();
-                let upserts: Vec<(String, String, String, String, i64, i64)> = list
+                let upserts: Vec<(String, String, String, String, i64, i64, bool)> = list
                     .iter()
                     .filter_map(|v| {
                         let value = v["value"].as_str()?.to_string();
@@ -2042,6 +2044,7 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
                             "fed".to_string(),
                             now,
                             now + 7 * 86400,
+                            false,
                         ))
                     })
                     .collect();
