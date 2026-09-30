@@ -36,6 +36,8 @@ sudo bash scripts/demo-attack.sh   # 或一键演示(含自动封禁与哈希链
 
 **Windows**(管理员):`target\release\aisafeguard.exe`;服务化 `service install`(非管理员 GUI 自动经本地 API 读数据;服务/交互模式凭据路径差异见下文)。采样捕获需 [WinDivert64.sys](docs/WINDOWS-CAPTURE-TESTING.md)(官方渠道获取,支持哈希校验)。
 
+**整体功能集成测试**:`python scripts/e2e-suite.py`——对真实运行的引擎做 11 阶段全链路验证(API 基线/六协议抓捕/蜜饵水印/凭证喷洒/频次检测与内网保护/规则 CRUD/误报闭环/监听器热启停/SSH 假 Shell/暴露面/导出与哈希链),纯标准库、双平台、退出码可接 CI;未提权环境自动跳过防火墙写阶段,`--port-base` 可与本机运行中实例共存。
+
 配置参考 [docs/config.example.toml](docs/config.example.toml)(每项带注释,CI 测试防漂移);首次运行自动生成默认 `config.toml`。人话版集成操作手册:[docs/MANUAL.md](docs/MANUAL.md)(GUI「帮助」页内嵌,离线可看)。负路径行为(吊销、指纹不一致、内网保护、外发失败)的可复现实测记录:[docs/NEGATIVE-PATH-TESTING.md](docs/NEGATIVE-PATH-TESTING.md)。
 
 ## 已知限制(重要的放这里,不藏文末)
