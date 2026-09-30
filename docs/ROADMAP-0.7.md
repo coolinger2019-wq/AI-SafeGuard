@@ -81,8 +81,10 @@
 - 名单爆炸防护：单轮入库上限 + 限流（对齐现有 500 条/轮治理）。
 
 **验收**
-- [ ] 真实 key 拉一轮：入库条数 / 网段丢弃数可见；auto_block 开启时规则数与单 IP 条目数一致（内网除外）。
-- [ ] 无 key 启动 = 明确告警不拉取；断源重试不产生空情报覆盖（现状保持）。
+- [x] 解析器/门控/计数单元级完成：parse_crowdsec_blocklist 单 IP/网段分桶 + 畸形计数（测试）；key 缺失 = 明确告警跳过该源（不静默降级）；单轮 max_entries 截断计数；网段/截断计入 meta 与 GUI 状态行「丢弃 N（网段/截断，F770 决策依据）」。
+- [ ] 真实 key 拉一轮实测：入库/丢弃数可见、auto_block 规则数一致——**需用户注册 CrowdSec 免费 API key 后冒烟**；断源重试不产生空情报覆盖（现状保持）。
+
+> **F720 状态（0.7.0）**：已实现——IntelSource 加 format（feodo|crowdsec，serde default=feodo）与 max_entries（默认 1000 防名单爆炸）；fetch_crowdsec_blocklist（CTI security-blocklist，`Authorization: Key-<key>`）；key 双通道（AISAFEGUARD_CROWDSEC_KEY 最高优先/凭据管理器 crowdsec-key）；丢弃计数（网段+畸形+截断）进 meta 与 IntelStatus；许可条款核对写进 FEDERATION.md（CTI 数据许可独立于软件许可，本地消费不二次分发）。净增依赖无。注：范围原文 JSONL/逐条 expiration 修正为实际文本格式（纯文本行，无逐条元数据）——TTL 取源级配置（≤7d），条目元数据留待 CTI 单 IP 查询接口按需扩展。
 
 ---
 
