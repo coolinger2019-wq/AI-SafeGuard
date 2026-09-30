@@ -41,7 +41,9 @@ AI-SafeGuard 自身是一门"安全软件"，它自己的漏洞按最高标准�
 - 自有代码全部 `#![forbid(unsafe_code)]`
 - LLM 输出视为不可信输入：allowlist 校验、非法即作废、永不进入命令执行层
 - 密钥与 API token 存 Windows 凭据管理器，配置文件不承载秘密
-- 事件哈希链防篡改（`aisafeguard verify-log` 可离线校验）
+- 事件哈希链防篡改（`aisafeguard verify-log` 可离线校验）——注意：外发通道的验签
+  （如 webhook HMAC）只证明传输完整性，**不构成可审计证据**（可审计 = 本地哈希链 +
+  fed 消息级证书签名，见 docs/THREAT_MODEL.md「证据语义」）
 - 供应链：cargo-deny + cargo-audit 进 CI 门禁，SBOM 经 cargo-auditable 嵌入二进制
 
 详见 [docs/COMPLIANCE.md](docs/COMPLIANCE.md) 与 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
