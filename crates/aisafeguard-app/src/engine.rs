@@ -302,7 +302,7 @@ impl EngineHandle {
             honeypot_enabled: cfg.honeypot.enabled,
             listeners: self
                 .honeypot
-                .listeners
+                .listeners()
                 .iter()
                 .map(|l| ListenerInfo {
                     name: l.name.clone(),
@@ -646,6 +646,45 @@ impl EngineHandle {
         Ok((dismissed, removed))
     }
 
+    /// 蜜罐监听器热启停（0.5.12）：即时生效；配置内监听器同时把 enabled 写回
+    /// config.toml（重启后保持一致）。模板监听器只在运行时切换——其来源是
+    /// 模板目录，重启后按模板状态拉起。
+    pub fn toggle_listener(&self, name: &str, run: bool) -> Result<()> {
+        let cfg = self.config();
+        if !cfg.honeypot.enabled {
+            return Err(Error::Config(
+                "蜜罐总开关未开启——先启用蜜罐并重启程序，再使用热启停".into(),
+            ));
+        }
+        let in_config = cfg.honeypot.listeners.iter().any(|l| l.name == name);
+        if run {
+            self.honeypot.start_listener(name).map_err(Error::Config)?;
+        } else {
+            self.honeypot.stop_listener(name).map_err(Error::Config)?;
+        }
+        if in_config {
+            let mut new_cfg = cfg.clone();
+            if let Some(row) = new_cfg.honeypot.listeners.iter_mut().find(|l| l.name == name) {
+                row.enabled = run;
+            }
+            new_cfg.save(&self.cfg_path)?;
+            *self.cfg.write().expect("配置锁中毒") = new_cfg;
+        }
+        self.bus.publish(SecurityEvent::engine(
+            "info",
+            format!(
+                "蜜罐 [{name}] 已热{}（即时生效{}）",
+                if run { "启动" } else { "停止" },
+                if in_config {
+                    "，已写入配置"
+                } else {
+                    "（模板监听器，配置源自模板目录）"
+                }
+            ),
+        ));
+        Ok(())
+    }
+
     /// 确认凭证喷洒战役（0.5.11 H310）：credential_spray 类建议的人工确认入口。
     /// 不是封禁——登记为「已确认进入观察」（灰度 TTL 到期后自然淡出 AI 上下文），
     /// 并广播 ProposalApplied 留痕。
@@ -798,6 +837,7 @@ const SELF_API_ENDPOINTS: &[&str] = &[
     "GET/POST /api/config — 配置读写",
     "GET/POST/DELETE /api/ai/key — AI Key 管理",
     "GET /api/ai/runs、POST /api/ai/analyze — AI 分析",
+    "POST /api/honeypot/listeners/{name}/start|stop — 蜜罐监听器热启停（0.5.12）",
 ];
 
 /// 本产品自身攻击面快照（<self_endpoints> 段动态部分：协同开关等运行事实）。
@@ -1990,6 +2030,10 @@ impl Console for EmbeddedConsole {
 
     fn confirm_campaign(&self, id: i64) -> anyhow::Result<()> {
         self.0.confirm_campaign(id).map_err(anyhow::Error::msg)
+    }
+
+    fn toggle_listener(&self, name: &str, run: bool) -> anyhow::Result<()> {
+        self.0.toggle_listener(name, run).map_err(anyhow::Error::msg)
     }
 
     fn apply_proposal(&self, id: i64) -> anyhow::Result<RuleRow> {

@@ -1,8 +1,16 @@
 //! 帮助页（0.5.10 H140）：内嵌渲染 `docs/MANUAL.md`（离线内置，不依赖网络，
 //! 随版本发布更新）。渲染器只覆盖手册使用的 Markdown 子集——标题/列表/粗体/
 //! 行内代码/代码块/表格(等宽)/分隔线；手册内容与渲染子集共同进 H150 审计。
+//!
+//! 换行是全篇硬约束：egui 的 `Label` 默认不换行，而手册里的段落与列表项最宽
+//! 相当于内容区的 3 倍——不显式处理就会被右侧裁掉（非全屏时尤其明显）。
+//! 因此所有正文一律走 `rich_inline` 组装 `LayoutJob` 并指定 `wrap.max_width`，
+//! 列表项把项目符号与正文拼进同一个 job，避免 `ui.horizontal` 里分段而不换行。
+//! 等宽内容（代码块/表格）无法折行，放进横向滚动区，需要时用户可横向查看。
 
 use super::*;
+use egui::text::LayoutJob;
+use egui::{FontFamily, FontId, TextFormat};
 
 /// 手册内容（编译期内嵌）
 const MANUAL: &str = include_str!("../../../../docs/MANUAL.md");
@@ -36,29 +44,27 @@ fn render_markdown(ui: &mut egui::Ui, text: &str) {
             continue;
         }
         if in_code {
-            ui.label(
-                RichText::new(line)
-                    .monospace()
-                    .size(type_scale::MONO)
-                    .color(text_color()),
-            );
+            mono_line(ui, line, type_scale::MONO);
             continue;
         }
-        // 标题
+        // 标题：标记与文本分开——标记单独占一格，文本显式指定折行宽度。
+        // 注意不能把两者放进同一个 horizontal 里再靠 available_width，
+        // 横向布局会让 available_width 变成无限，折行会再次失效。
         if let Some(rest) = line.strip_prefix("# ") {
-            ui.label(RichText::new(rest).size(type_scale::TITLE).strong());
+            markdown_line(ui, rest, type_scale::TITLE, FontFamily::Proportional, None);
             ui.add_space(space::S);
             continue;
         }
         if let Some(rest) = line.strip_prefix("## ") {
             ui.add_space(space::S);
-            ui.label(RichText::new(rest).size(type_scale::SECTION).strong());
+            heading_with_marker(ui, rest, "▍", type_scale::SECTION);
             ui.add_space(space::XS);
             continue;
         }
         if let Some(rest) = line.strip_prefix("### ") {
+            ui.add_space(space::M);
+            heading_with_marker(ui, rest, "▸", type_scale::BODY);
             ui.add_space(space::XS);
-            ui.label(RichText::new(rest).size(type_scale::BODY).strong());
             continue;
         }
         // 分隔线
@@ -68,45 +74,140 @@ fn render_markdown(ui: &mut egui::Ui, text: &str) {
             ui.add_space(space::XS);
             continue;
         }
-        // 列表（无序/有序）
+        // 列表（无序/有序）：项目符号与正文拼进同一个 LayoutJob，
+        // 这样整行（含符号）一起换行，而不是在横向布局里各占一段。
         let trimmed = line.trim_start();
-        if trimmed.starts_with("- ") {
-            let content = trimmed.trim_start_matches("- ");
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("•").color(accent()));
-                rich_inline(ui, content);
-            });
+        if let Some(content) = trimmed.strip_prefix("- ") {
+            rich_inline(ui, content, Some(("• ", accent())));
             continue;
         }
-        let bullet_num = numbered_prefix(trimmed);
-        if let Some(rest) = bullet_num {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(rest).color(accent()));
-                rich_inline(ui, trimmed[rest.len()..].trim_start());
-            });
+        if let Some(rest) = numbered_prefix(trimmed) {
+            let marker = format!("{rest} ");
+            rich_inline(ui, trimmed[rest.len()..].trim_start(), Some((&marker, accent())));
             continue;
         }
         // 表格行：等宽展示（手册里表格仅作对齐参考）
         if trimmed.starts_with('|') {
-            ui.label(
-                RichText::new(trimmed)
-                    .monospace()
-                    .size(type_scale::MICRO)
-                    .color(text_dim()),
-            );
+            mono_line(ui, trimmed, type_scale::MICRO);
             continue;
         }
         // 空行与普通段落
         if trimmed.is_empty() {
             ui.add_space(space::XS);
         } else if line.starts_with(' ') {
-            ui.label(
-                RichText::new(line.trim_start())
-                    .monospace()
-                    .size(type_scale::MONO),
-            );
+            mono_line(ui, line.trim_start(), type_scale::MONO);
         } else {
-            rich_inline(ui, line);
+            rich_inline(ui, line, None);
+        }
+    }
+}
+
+/// 等宽内容（代码块/缩进块/表格行）：等宽字体无法在任意位置折行，
+/// 放进横向滚动区，窄窗口下由用户横向查看，而不是被右侧裁掉。
+fn mono_line(ui: &mut egui::Ui, text: &str, size: f32) {
+    egui::ScrollArea::horizontal()
+        .id_salt(("md-mono", text.len(), text.as_ptr() as usize))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).monospace().size(size).color(text_color()));
+        });
+}
+
+/// 标题行：先画语义标记（左侧竖条或三角），再画可换行的正文。
+/// `wrap_override` 用于外层已有横向排布、`available_width` 不可靠的场合。
+fn markdown_line(
+    ui: &mut egui::Ui,
+    text: &str,
+    size: f32,
+    family: FontFamily,
+    wrap_override: Option<f32>,
+) {
+    let mut job = LayoutJob::default();
+    job.wrap.max_width = wrap_override.unwrap_or_else(|| ui.available_width()).max(40.0);
+    // 标题内也允许 **粗体** 与 `行内代码`
+    job.append_inline(text, size, family, text_color());
+    ui.label(job);
+}
+
+/// 带语义标记的标题：标记占固定一格，正文拿"剩余宽度 - 标记 - 间距"作为折行宽度。
+fn heading_with_marker(ui: &mut egui::Ui, text: &str, marker: &str, size: f32) {
+    let mark_w = 14.0;
+    ui.horizontal(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(mark_w, 0.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                let mut m = RichText::new(marker).size(size).color(accent());
+                m = m.strong();
+                ui.label(m);
+            },
+        );
+        let wrap = (ui.available_width() - space::S).max(40.0);
+        markdown_line(
+            ui,
+            text,
+            size,
+            FontFamily::Proportional,
+            Some(wrap),
+        );
+    });
+}
+
+/// 行内富文本：**粗体** 与 `行内代码`，整行可换行
+fn rich_inline(ui: &mut egui::Ui, text: &str, marker: Option<(&str, Color32)>) {
+    let mut job = LayoutJob::default();
+    job.wrap.max_width = ui.available_width().max(40.0);
+    // 项目符号与正文拼进同一个 job：整行（含符号）一起换行。
+    // 若放进 ui.horizontal，available_width 会变成无限，折行失效。
+    if let Some((m, color)) = marker {
+        job.append(
+            m,
+            0.0,
+            TextFormat {
+                font_id: FontId::new(type_scale::BODY, FontFamily::Proportional),
+                color,
+                ..Default::default()
+            },
+        );
+    }
+    job.append_inline(text, type_scale::BODY, FontFamily::Proportional, text_color());
+    ui.label(job);
+}
+
+/// 把一段带 **粗体** 与 `行内代码` 的文本追加进 LayoutJob。
+/// 整行必须拼进同一个 job，egui 才能在整行范围内正确折行——
+/// 拆成多个 `ui.label` 会各自独立换行，破坏排版。
+trait AppendInline {
+    fn append_inline(&mut self, text: &str, size: f32, family: FontFamily, color: Color32);
+}
+
+impl AppendInline for LayoutJob {
+    fn append_inline(&mut self, text: &str, size: f32, family: FontFamily, color: Color32) {
+        for (i, seg) in text.split("**").enumerate() {
+            let bold = i % 2 == 1;
+            for (j, code_seg) in seg.split('`').enumerate() {
+                if code_seg.is_empty() {
+                    continue;
+                }
+                // 奇数段 = 行内代码
+                let is_code = j % 2 == 1;
+                let (fam, col) = if is_code {
+                    (FontFamily::Monospace, accent())
+                } else if bold {
+                    // 强调段用更亮的文字色表达，不改变字号，层级不乱
+                    (family.clone(), text_color())
+                } else {
+                    (family.clone(), color)
+                };
+                self.append(
+                    code_seg,
+                    0.0,
+                    TextFormat {
+                        font_id: FontId::new(size, fam),
+                        color: col,
+                        ..Default::default()
+                    },
+                );
+            }
         }
     }
 }
@@ -122,27 +223,6 @@ fn numbered_prefix(line: &str) -> Option<&str> {
         Some(&line[..=i])
     } else {
         None
-    }
-}
-
-/// 行内富文本：**粗体** 与 `行内代码`
-fn rich_inline(ui: &mut egui::Ui, text: &str) {
-    for (i, seg) in text.split("**").enumerate() {
-        for (j, code_seg) in seg.split('`').enumerate() {
-            if code_seg.is_empty() {
-                continue;
-            }
-            let mut rt = RichText::new(code_seg).size(type_scale::BODY);
-            // 奇数段 = 行内代码
-            if j % 2 == 1 {
-                rt = rt.monospace().color(accent());
-            }
-            // 奇数段 = 粗体
-            if i % 2 == 1 {
-                rt = rt.strong();
-            }
-            ui.label(rt);
-        }
     }
 }
 

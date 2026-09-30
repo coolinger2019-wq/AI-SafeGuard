@@ -846,7 +846,7 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
             "AI-SafeGuard {VERSION} 已启动：防火墙后端 {}（提权: {}），蜜罐 {} 个监听，频次检测 {}",
             firewall.backend(),
             firewall.is_elevated(),
-            engine.honeypot.listeners.len(),
+            engine.honeypot.listeners().len(),
             if cfg.detect.enabled {
                 "开启"
             } else {

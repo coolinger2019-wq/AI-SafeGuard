@@ -220,6 +220,12 @@ impl Console for RemoteConsole {
         Ok(())
     }
 
+    fn toggle_listener(&self, name: &str, run: bool) -> anyhow::Result<()> {
+        let action = if run { "start" } else { "stop" };
+        self.post(&format!("/api/honeypot/listeners/{name}/{action}"))?;
+        Ok(())
+    }
+
     fn dismiss_proposal(&self, id: i64) -> anyhow::Result<()> {
         self.post(&format!("/api/proposals/{id}/dismiss"))?;
         Ok(())

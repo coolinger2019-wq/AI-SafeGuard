@@ -4,12 +4,11 @@
 //! 有状态多轮）额外受独立小额预算约束——长会话不得挤占全局额度饿死其他监听器。
 //! 满额一律静默丢连接（全局）或优雅拒绝并留事件（交互），蜜罐自身不能被打挂。
 
-use std::sync::Arc;
-
 use aisafeguard_core::config::{FingerprintConfig, HoneypotConfig, ListenerConfig};
 use aisafeguard_core::event::{EventBus, SecurityEvent};
 use aisafeguard_core::now_ts;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
@@ -56,14 +55,110 @@ fn interaction_mode(kind: &str, shell: Option<&ShellRuntime>) -> &'static str {
     }
 }
 
+/// 运行时监听器注册表行：一个配置行对应一条，含热启停控制通道。
+struct RuntimeListener {
+    cfg: ListenerConfig,
+    /// 交互模式（启动时按 shell 运行时可用性算好；热启沿用）
+    mode: String,
+    running: Arc<AtomicBool>,
+    /// 服务任务是否存活（bind 失败会退出任务；热启动据此决定唤醒还是重拉）
+    task_alive: Arc<AtomicBool>,
+    /// 期望状态镜像（原子可读）：false → 摘下监听驻留；true → 服务
+    desired_state: Arc<AtomicBool>,
+    /// 期望状态的广播通道（镜像变更时发送）
+    desired_tx: watch::Sender<bool>,
+}
+
 pub struct HoneypotHandle {
-    pub listeners: Vec<ListenerState>,
+    /// 运行时注册表（配置行 + 模板监听器都在；停机/热停的行保留以便热启动）
+    registry: Mutex<Vec<RuntimeListener>>,
+    /// 共享会话上下文：热启动新任务时复用（shell 运行时/蜜饵/模板/指纹）
+    ctx: Arc<SessionCtx>,
+    bus: EventBus,
     shutdown: watch::Sender<bool>,
 }
 
 impl HoneypotHandle {
+    /// 全局停机（进程退出用）：所有监听器优雅退出。
     pub fn stop(&self) {
         let _ = self.shutdown.send(true);
+    }
+
+    /// 状态快照（status/API 用）：全部注册行，含未运行行。
+    pub fn listeners(&self) -> Vec<ListenerState> {
+        self.registry
+            .lock()
+            .map(|reg| {
+                reg.iter()
+                    .map(|r| ListenerState {
+                        name: r.cfg.name.clone(),
+                        port: r.cfg.port,
+                        kind: r.cfg.kind.clone(),
+                        mode: r.mode.clone(),
+                        running: Arc::clone(&r.running),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 热停止：期望状态收敛为 false，服务任务摘下监听并释放端口后驻留等待。
+    /// 非阻塞（发信号即返回）；状态以 `listeners()` 快照为准，GUI 缓存 2s 内刷新。
+    /// 幂等：已停止的行直接返回 Ok。
+    pub fn stop_listener(&self, name: &str) -> Result<(), String> {
+        let (desired_state, desired_tx) = {
+            let reg = self.registry.lock().map_err(|_| "注册表锁中毒".to_string())?;
+            reg.iter()
+                .find(|r| r.cfg.name == name)
+                .map(|r| (r.desired_state.clone(), r.desired_tx.clone()))
+                .ok_or_else(|| format!("监听器 [{name}] 不在运行时注册表中"))?
+        };
+        desired_state.store(false, Ordering::Relaxed);
+        let _ = desired_tx.send(false);
+        Ok(())
+    }
+
+    /// 热启动：期望状态收敛为 true。任务存活（含停止指令在途）→ 唤醒/撤回停止，
+    /// 任务由同一生命周期重新 bind（无端口竞态窗口）；任务已死（bind 失败/全局
+    /// 停机）→ 重拉。非阻塞；bind 失败留 engine 错误事件，状态以 `listeners()` 为准。
+    pub fn start_listener(&self, name: &str) -> Result<(), String> {
+        let (cfg, running, task_alive, desired_state, desired_tx, shutdown_rx) = {
+            let reg = self.registry.lock().map_err(|_| "注册表锁中毒".to_string())?;
+            let r = reg
+                .iter()
+                .find(|r| r.cfg.name == name)
+                .ok_or_else(|| format!("监听器 [{name}] 不在运行时注册表中"))?;
+            if r.running.load(Ordering::Relaxed) && r.desired_state.load(Ordering::Relaxed) {
+                return Err(format!("监听器 [{name}] 已在运行"));
+            }
+            (
+                r.cfg.clone(),
+                Arc::clone(&r.running),
+                Arc::clone(&r.task_alive),
+                r.desired_state.clone(),
+                r.desired_tx.clone(),
+                self.shutdown.subscribe(),
+            )
+        };
+        desired_state.store(true, Ordering::Relaxed);
+        let _ = desired_tx.send(true);
+        if task_alive.load(Ordering::Relaxed) {
+            return Ok(()); // 驻留任务会唤醒/撤回停止并重新 bind
+        }
+        // 任务已死（bind 失败/全局停机后）：重拉一个服务任务
+        let desired_rx = desired_tx.subscribe();
+        let bus = self.bus.clone();
+        let ctx = Arc::clone(&self.ctx);
+        tokio::spawn(spawn_guarded_listener(
+            cfg,
+            bus,
+            shutdown_rx,
+            ctx,
+            running,
+            task_alive,
+            desired_rx,
+        ));
+        Ok(())
     }
 }
 
@@ -71,200 +166,254 @@ impl HoneypotHandle {
 /// 默认落盘位置（<data_dir>/honeypot/，fed 证书路径同款约定）。
 pub fn start(cfg: &HoneypotConfig, bus: EventBus, data_dir: &std::path::Path) -> HoneypotHandle {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let mut listeners = Vec::new();
     let collect_creds = cfg.credentials.enabled;
-    if cfg.enabled {
-        // 蜜饵（0.5.10 H210）：默认关；开启时解析水印密钥（显式 key 或
-        // <data_dir>/honeypot/canary.key），并按配置放置文件系统蜜饵
-        let canary = if cfg.canary.enabled {
-            match crate::canary::CanaryState::resolve(&cfg.canary.key, data_dir) {
-                Ok(v) => {
-                    let v = Arc::new(v);
-                    if !cfg.canary.fs_paths.is_empty() {
-                        let placed = crate::canary::place_and_watch_fs_canaries(
-                            &cfg.canary.fs_paths,
-                            &bus,
-                            &v,
-                        );
-                        if placed > 0 {
-                            bus.publish(SecurityEvent::engine(
-                                "info",
-                                format!("文件系统蜜饵已启用: {placed} 处（读取即告警）"),
-                            ));
-                        }
+    // 会话上下文始终构建（热启动 start_listener 复用）；假 Shell 运行时仅在
+    // 蜜罐启用且 shell.enabled 时装配——host key 落盘是副作用，禁用时不产生
+    let canary = if cfg.enabled && cfg.canary.enabled {
+        match crate::canary::CanaryState::resolve(&cfg.canary.key, data_dir) {
+            Ok(v) => {
+                let v = Arc::new(v);
+                if !cfg.canary.fs_paths.is_empty() {
+                    let placed =
+                        crate::canary::place_and_watch_fs_canaries(&cfg.canary.fs_paths, &bus, &v);
+                    if placed > 0 {
+                        bus.publish(SecurityEvent::engine(
+                            "info",
+                            format!("文件系统蜜饵已启用: {placed} 处（读取即告警）"),
+                        ));
                     }
-                    Some(v)
                 }
-                Err(e) => {
-                    bus.publish(SecurityEvent::engine(
-                        "error",
-                        format!("蜜饵密钥初始化失败,HTTP 蜜饵停用: {e}"),
-                    ));
-                    None
-                }
+                Some(v)
             }
-        } else {
-            None
-        };
-        // 假 Shell 运行时：host key 失败 → 降级 banner 低交互并留事件
-        let shell = if cfg.shell.enabled {
-            match crate::shell::start_runtime(&cfg.shell, data_dir) {
-                Ok(rt) => {
-                    bus.publish(SecurityEvent::engine(
-                        "info",
-                        format!(
-                            "假 Shell 已启用（ssh 升级中交互,用户 {}@{}）",
-                            cfg.shell.username, cfg.shell.hostname
-                        ),
-                    ));
-                    Some(rt)
-                }
-                Err(e) => {
-                    bus.publish(SecurityEvent::engine(
-                        "error",
-                        format!("假 Shell host key 初始化失败,ssh 保持 banner 低交互: {e}"),
-                    ));
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        // 模板（0.5.11 H300）：默认关。加载注册表并把模板监听器追加到运行列表；
-        // 内容变更走轮询热重载，增删模板目录需重启（轮询只告警提示）
-        let mut extra_listeners: Vec<ListenerConfig> = Vec::new();
-        let templates: Option<Arc<TemplateRegistry>> = if cfg.templates.enabled {
-            let root = if cfg.templates.dir.is_empty() {
-                data_dir.join("honeypot").join("templates")
-            } else {
-                std::path::PathBuf::from(&cfg.templates.dir)
-            };
-            let occupied: Vec<u16> = cfg
-                .listeners
-                .iter()
-                .filter(|l| l.enabled)
-                .map(|l| l.port)
-                .collect();
-            let (registry, extra) = TemplateRegistry::load(&root, &occupied, &bus);
-            extra_listeners = extra;
-            crate::templates::spawn_template_poller(registry.clone(), bus.clone());
-            Some(registry)
-        } else {
-            None
-        };
-        let ctx = Arc::new(SessionCtx {
-            shell,
-            canary,
-            templates,
-            fp: cfg.fingerprint.clone(),
-            collect_creds,
-        });
-        for l in cfg.listeners.iter().chain(extra_listeners.iter()) {
-            // 单监听器启停（0.5.10 H130）：disabled 行保留在状态表里（模式=未启用），
-            // 但不绑定端口——GUI 能看到这条配置的存在
-            let running = Arc::new(AtomicBool::new(false));
-            if l.enabled {
-                tokio::spawn(run_listener(
-                    l.clone(),
-                    bus.clone(),
-                    shutdown_rx.clone(),
-                    ctx.clone(),
-                    running.clone(),
+            Err(e) => {
+                bus.publish(SecurityEvent::engine(
+                    "error",
+                    format!("蜜饵密钥初始化失败,HTTP 蜜饵停用: {e}"),
                 ));
+                None
             }
-            listeners.push(ListenerState {
-                name: l.name.clone(),
-                port: l.port,
-                kind: l.kind.clone(),
-                mode: if l.enabled {
-                    interaction_mode(&l.kind, ctx.shell.as_deref()).to_string()
-                } else {
-                    "未启用".to_string()
-                },
-                running,
-            });
         }
+    } else {
+        None
+    };
+    let shell = if cfg.enabled && cfg.shell.enabled {
+        match crate::shell::start_runtime(&cfg.shell, data_dir) {
+            Ok(rt) => {
+                bus.publish(SecurityEvent::engine(
+                    "info",
+                    format!(
+                        "假 Shell 已启用（ssh 升级中交互,用户 {}@{}）",
+                        cfg.shell.username, cfg.shell.hostname
+                    ),
+                ));
+                Some(rt)
+            }
+            Err(e) => {
+                bus.publish(SecurityEvent::engine(
+                    "error",
+                    format!("假 Shell host key 初始化失败,ssh 保持 banner 低交互: {e}"),
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    // 模板（0.5.11 H300）：默认关。加载注册表并把模板监听器追加到运行列表；
+    // 内容变更走轮询热重载，增删模板目录需重启（轮询只告警提示）
+    let mut extra_listeners: Vec<ListenerConfig> = Vec::new();
+    let templates: Option<Arc<TemplateRegistry>> = if cfg.enabled && cfg.templates.enabled {
+        let root = if cfg.templates.dir.is_empty() {
+            data_dir.join("honeypot").join("templates")
+        } else {
+            std::path::PathBuf::from(&cfg.templates.dir)
+        };
+        let occupied: Vec<u16> = cfg
+            .listeners
+            .iter()
+            .filter(|l| l.enabled)
+            .map(|l| l.port)
+            .collect();
+        let (registry, extra) = TemplateRegistry::load(&root, &occupied, &bus);
+        extra_listeners = extra;
+        crate::templates::spawn_template_poller(registry.clone(), bus.clone());
+        Some(registry)
+    } else {
+        None
+    };
+    let ctx = Arc::new(SessionCtx {
+        shell,
+        canary,
+        templates,
+        fp: cfg.fingerprint.clone(),
+        collect_creds,
+    });
+    // 运行时注册表：配置行 + 模板监听器全部登记（disabled 行 running=false，
+    // 可热启动）；enabled 行立即拉起
+    let mut registry: Vec<RuntimeListener> = Vec::new();
+    for l in cfg.listeners.iter().chain(extra_listeners.iter()) {
+        let (desired_tx, _) = watch::channel(l.enabled);
+        let running = Arc::new(AtomicBool::new(false));
+        let task_alive = Arc::new(AtomicBool::new(false));
+        if l.enabled {
+            let desired_rx = desired_tx.subscribe();
+            tokio::spawn(spawn_guarded_listener(
+                l.clone(),
+                bus.clone(),
+                shutdown_rx.clone(),
+                ctx.clone(),
+                running.clone(),
+                task_alive.clone(),
+                desired_rx,
+            ));
+        }
+        let desired_state = Arc::new(AtomicBool::new(l.enabled));
+        registry.push(RuntimeListener {
+            cfg: l.clone(),
+            mode: if l.enabled {
+                interaction_mode(&l.kind, ctx.shell.as_deref()).to_string()
+            } else {
+                "未启用".to_string()
+            },
+            running,
+            task_alive,
+            desired_state,
+            desired_tx,
+        });
+    }
+    if !cfg.enabled {
+        bus.publish(SecurityEvent::engine("info", "蜜罐功能已禁用"));
     }
     HoneypotHandle {
-        listeners,
+        registry: Mutex::new(registry),
+        ctx,
+        bus,
         shutdown: shutdown_tx,
     }
 }
 
+/// 服务任务包装：管理 task_alive 生命周期标志——任务退出（bind 失败/全局停机）
+/// 后置 false，热启动据此决定唤醒驻留任务还是重拉新任务。
+async fn spawn_guarded_listener(
+    l: ListenerConfig,
+    bus: EventBus,
+    shutdown: watch::Receiver<bool>,
+    ctx: Arc<SessionCtx>,
+    running: Arc<AtomicBool>,
+    task_alive: Arc<AtomicBool>,
+    desired: watch::Receiver<bool>,
+) {
+    task_alive.store(true, Ordering::Relaxed);
+    run_listener(l, bus, shutdown, ctx, running.clone(), desired).await;
+    // 单一出口统一清标志：run_listener 的所有 return 路径（含全局停机）
+    // 都必须落成「未运行」，否则状态章会残留僵尸的「运行中」
+    running.store(false, Ordering::Relaxed);
+    task_alive.store(false, Ordering::Relaxed);
+}
+
+/// 服务任务主体：期望状态驱动的服务循环（0.5.12 热启停）。
+///
+/// desired=true → bind 并服务；翻 false → 摘下监听（释放端口）后**驻留等待**
+/// （不杀任务：热停→热启由同一任务重绑，无端口竞态窗口）；bind 失败 → 留错误
+/// 事件后退出任务（热启动重拉重试，不做死循环重试）。全局 shutdown 任何状态立即退出。
 async fn run_listener(
     l: ListenerConfig,
     bus: EventBus,
     mut shutdown: watch::Receiver<bool>,
     ctx: Arc<SessionCtx>,
     running: Arc<AtomicBool>,
+    mut desired: watch::Receiver<bool>,
 ) {
     let addr = std::net::SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), l.port);
-    let listener = match TcpListener::bind(addr).await {
-        Ok(v) => v,
-        Err(e) => {
-            bus.publish(SecurityEvent::engine(
-                "error",
-                format!("蜜罐 [{}] 绑定 :{} 失败: {e}", l.name, l.port),
-            ));
-            return; // running 保持 false：GUI 状态章显示「已停止」
-        }
-    };
-    running.store(true, Ordering::Relaxed);
-    bus.publish(SecurityEvent::engine(
-        "info",
-        format!("蜜罐 [{}] ({}) 已监听 :{}", l.name, l.kind, l.port),
-    ));
-    let sem = Arc::new(Semaphore::new(MAX_CONCURRENT));
-    let interactive_sem = Arc::new(Semaphore::new(MAX_INTERACTIVE));
     loop {
-        let stream = tokio::select! {
-            _ = shutdown.changed() => break,
-            accepted = listener.accept() => match accepted {
-                Ok((s, _)) => s,
-                Err(_) => continue,
-            },
-        };
-        // 满载直接丢弃连接：蜜罐自身不能被打挂
-        let Ok(permit) = sem.clone().try_acquire_owned() else {
-            drop(stream);
-            continue;
-        };
-        // 交互会话占独立小额预算：满额优雅拒绝并留痕（对齐 OpenSSH 正常拒连语义）
-        let interactive_permit =
-            if is_interactive_session(&l.kind, ctx.shell.as_deref()) {
-            match interactive_sem.clone().try_acquire_owned() {
-                Ok(p) => Some(p),
-                Err(_) => {
-                    bus.publish(SecurityEvent::engine(
-                        "info",
-                        format!(
-                            "蜜罐 [{}] 交互会话并发已满（{}），拒绝新会话",
-                            l.name, MAX_INTERACTIVE
-                        ),
-                    ));
-                    drop(stream);
-                    drop(permit);
-                    continue;
+        // 期望状态闸门：false → 摘下监听驻留（不占端口、不占并发预算）
+        while !*desired.borrow_and_update() {
+            running.store(false, Ordering::Relaxed);
+            tokio::select! {
+                _ = shutdown.changed() => return,
+                changed = desired.changed() => {
+                    if changed.is_err() {
+                        return; // 期望状态通道关闭：注册表已亡，随引擎退场
+                    }
                 }
             }
-        } else {
-            None
+        }
+        let listener = match TcpListener::bind(addr).await {
+            Ok(v) => v,
+            Err(e) => {
+                running.store(false, Ordering::Relaxed);
+                bus.publish(SecurityEvent::engine(
+                    "error",
+                    format!("蜜罐 [{}] 绑定 :{} 失败: {e}", l.name, l.port),
+                ));
+                return; // 退出任务：热启动会重拉重试
+            }
         };
-        let bus = bus.clone();
-        let name = l.name.clone();
-        let kind = l.kind.clone();
-        let ctx = ctx.clone();
-        tokio::spawn(async move {
-            handle_conn(stream, name, kind, bus, ctx).await;
-            drop(interactive_permit);
-            drop(permit);
-        });
+        running.store(true, Ordering::Relaxed);
+        bus.publish(SecurityEvent::engine(
+            "info",
+            format!("蜜罐 [{}] ({}) 已监听 :{}", l.name, l.kind, l.port),
+        ));
+        let sem = Arc::new(Semaphore::new(MAX_CONCURRENT));
+        let interactive_sem = Arc::new(Semaphore::new(MAX_INTERACTIVE));
+        loop {
+            let stream = tokio::select! {
+                _ = shutdown.changed() => return,
+                // 热停（0.5.12）：期望状态翻 false → 摘下监听回到外层驻留
+                _ = desired.changed() => {
+                    if !*desired.borrow_and_update() {
+                        break;
+                    }
+                    continue;
+                }
+                accepted = listener.accept() => match accepted {
+                    Ok((s, _)) => s,
+                    Err(_) => continue,
+                },
+            };
+            // 满载直接丢弃连接：蜜罐自身不能被打挂
+            let Ok(permit) = sem.clone().try_acquire_owned() else {
+                drop(stream);
+                continue;
+            };
+            // 交互会话占独立小额预算：满额优雅拒绝并留痕（对齐 OpenSSH 正常拒连语义）
+            let interactive_permit =
+                if is_interactive_session(&l.kind, ctx.shell.as_deref()) {
+                match interactive_sem.clone().try_acquire_owned() {
+                    Ok(p) => Some(p),
+                    Err(_) => {
+                        bus.publish(SecurityEvent::engine(
+                            "info",
+                            format!(
+                                "蜜罐 [{}] 交互会话并发已满（{}），拒绝新会话",
+                                l.name, MAX_INTERACTIVE
+                            ),
+                        ));
+                        drop(stream);
+                        drop(permit);
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            let bus = bus.clone();
+            let name = l.name.clone();
+            let kind = l.kind.clone();
+            let ctx = ctx.clone();
+            tokio::spawn(async move {
+                handle_conn(stream, name, kind, bus, ctx).await;
+                drop(interactive_permit);
+                drop(permit);
+            });
+        }
+        running.store(false, Ordering::Relaxed);
+        bus.publish(SecurityEvent::engine(
+            "info",
+            format!("蜜罐 [{}] 已停止", l.name),
+        ));
+        // 回到外层：desired=false → 驻留；期间又被翻 true → 立即重 bind
     }
-    running.store(false, Ordering::Relaxed);
-    bus.publish(SecurityEvent::engine(
-        "info",
-        format!("蜜罐 [{}] 已停止", l.name),
-    ));
 }
 
 /// 该 kind 是否交互会话（有状态多轮）：ssh 由 [honeypot.shell].enabled +
@@ -620,6 +769,107 @@ mod tests {
                 assert!(payload.contains("admin"));
                 break;
             }
+        }
+    }
+
+    /// 0.5.12 热启停端到端：运行中热停 → 端口释放 → 热启 → 再次可连。
+    /// 全局 stop() 回归：一次性停掉全部监听器。
+    #[tokio::test]
+    async fn hot_start_stop_toggle_roundtrip() {
+        use tokio::io::AsyncWriteExt;
+
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        let bus = EventBus::new(64);
+        let mut rx = bus.subscribe();
+        let cfg = HoneypotConfig {
+            enabled: true,
+            listeners: vec![
+                ListenerConfig { name: "telnet".into(), port, kind: "telnet".into(), enabled: true },
+                ListenerConfig { name: "redis".into(), port: 6390, kind: "redis".into(), enabled: false },
+            ],
+            ..Default::default()
+        };
+        let handle = start(&cfg, bus, &std::env::temp_dir());
+
+        // 注册表：两行都在，enabled 行真实运行（spawn 后 bind 有竞态，等待就绪）
+        let snap = handle.listeners();
+        assert_eq!(snap.len(), 2);
+        let telnet = snap.iter().find(|l| l.name == "telnet").unwrap();
+        for _ in 0..40 {
+            if telnet.running.load(Ordering::Relaxed) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(telnet.running.load(Ordering::Relaxed), "enabled 行应已运行");
+        let redis = snap.iter().find(|l| l.name == "redis").unwrap();
+        assert!(!redis.running.load(Ordering::Relaxed), "disabled 行不运行");
+
+        // 等待 bind 稳定后可连
+        let mut c = None;
+        for _ in 0..40 {
+            match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                Ok(v) => { c = Some(v); break; }
+                Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
+        assert!(c.is_some(), "热停前应可连");
+        drop(c);
+
+        // 热停：信号即返（非阻塞），轮询等待任务摘下监听并释放端口
+        handle.stop_listener("telnet").expect("热停应成功");
+        let snap = handle.listeners();
+        let telnet = snap.iter().find(|l| l.name == "telnet").unwrap();
+        for _ in 0..40 {
+            if !telnet.running.load(Ordering::Relaxed) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(!telnet.running.load(Ordering::Relaxed), "热停后 running 应为 false");
+        assert!(
+            tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err(),
+            "热停后端口应不可连"
+        );
+
+        // 热停→立即热启：驻留任务唤醒重绑，无竞态窗口
+        handle.start_listener("telnet").expect("热启应成功");
+        let snap = handle.listeners();
+        let telnet = snap.iter().find(|l| l.name == "telnet").unwrap();
+        for _ in 0..40 {
+            if telnet.running.load(Ordering::Relaxed) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(telnet.running.load(Ordering::Relaxed), "热启后应运行");
+        let mut c = None;
+        for _ in 0..40 {
+            match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                Ok(v) => { c = Some(v); break; }
+                Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
+        assert!(c.is_some(), "热启后应可连");
+        if let Some(mut c) = c {
+            let _ = c.write_all(b"admin
+").await;
+        }
+
+        // 幂等/边界：重复热停 Ok、运行中热启 Err、未知名 Err
+        handle.stop_listener("telnet").expect("重复热停应幂等");
+        assert!(handle.start_listener("telnet").is_ok(), "重新热启");
+        assert!(handle.stop_listener("no-such").is_err(), "未知名应报错");
+        let _ = rx.try_recv();
+
+        // 全局停机：所有行 running 翻 false
+        handle.stop();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        for l in handle.listeners() {
+            assert!(!l.running.load(Ordering::Relaxed), "{} 应随全局停机退出", l.name);
         }
     }
 

@@ -33,6 +33,8 @@ pub async fn serve(engine: Arc<EngineHandle>) {
         .route("/api/proposals", get(list_proposals))
         .route("/api/proposals/{id}/apply", post(apply_proposal))
         .route("/api/proposals/{id}/confirm", post(confirm_campaign))
+        .route("/api/honeypot/listeners/{name}/start", post(honeypot_listener_start))
+        .route("/api/honeypot/listeners/{name}/stop", post(honeypot_listener_stop))
         .route("/api/proposals/{id}/dismiss", post(dismiss_proposal))
         .route(
             "/api/feedback",
@@ -199,6 +201,21 @@ async fn list_proposals(State(s): State<AppState>) -> Response {
 async fn apply_proposal(State(s): State<AppState>, Path(id): Path<i64>) -> Response {
     match s.engine.apply_proposal(id) {
         Ok(row) => Json(row).into_response(),
+        Err(e) => err_resp(e),
+    }
+}
+
+/// 0.5.12：蜜罐监听器热启停（即时生效）
+async fn honeypot_listener_start(State(s): State<AppState>, Path(name): Path<String>) -> Response {
+    match s.engine.toggle_listener(&name, true) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => err_resp(e),
+    }
+}
+
+async fn honeypot_listener_stop(State(s): State<AppState>, Path(name): Path<String>) -> Response {
+    match s.engine.toggle_listener(&name, false) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => err_resp(e),
     }
 }

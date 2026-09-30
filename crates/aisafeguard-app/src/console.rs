@@ -48,6 +48,8 @@ pub trait Console: Send + Sync {
     fn apply_proposal(&self, id: i64) -> anyhow::Result<RuleRow>;
     /// 确认凭证喷洒战役（H310 观察类建议的人工确认入口；不是封禁）
     fn confirm_campaign(&self, id: i64) -> anyhow::Result<()>;
+    /// 蜜罐监听器热启停（0.5.12）：即时生效；run=true 启动 / false 停止
+    fn toggle_listener(&self, name: &str, run: bool) -> anyhow::Result<()>;
     fn dismiss_proposal(&self, id: i64) -> anyhow::Result<()>;
     /// 灰度规则转正：TTL 延长到 promote_ttl_secs（人工确认后的长期封禁）
     fn promote_rule(&self, id: i64) -> anyhow::Result<RuleRow>;

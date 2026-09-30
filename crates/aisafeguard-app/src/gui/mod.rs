@@ -143,6 +143,10 @@ pub struct AisafeApp {
     // 蜜罐域（0.5.10 H130）：假 Shell 命令上限 + 监听表端口列的文本输入缓冲
     settings_shell_max_cmds: String,
     settings_listener_ports: Vec<String>,
+    // 蜜罐页监听器状态列表：当前展开配置的监听器索引 + 名称/端口编辑缓冲
+    hp_config_open: Option<usize>,
+    hp_name_buf: String,
+    hp_port_buf: String,
     // 已保存的界面偏好（缓存值；每 2 秒随 cache 刷新）
     ui_prefs: (ThemeId, f32),
     // 上一帧已应用的主题+缩放（变化才重新 apply，避免每帧重建样式）
@@ -220,6 +224,9 @@ impl AisafeApp {
             settings_fp_days: String::new(),
             settings_shell_max_cmds: String::new(),
             settings_listener_ports: Vec::new(),
+            hp_config_open: None,
+            hp_name_buf: String::new(),
+            hp_port_buf: String::new(),
             ui_prefs,
             applied_ui: Some(ui_prefs),
         }
