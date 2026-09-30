@@ -2,6 +2,26 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.5.12] - 2026-09-30
+
+0.5.12 可用性专项与测试基建：UAC 自动提权 + 蜜罐页全量状态与就地设置 + 蜜罐热启停 + 整体功能 e2e 套件（见专项立项提交）。
+
+### 新增
+
+- **UAC 自动提权**：Windows GUI 未提权且未装服务时自动弹 UAC 请求管理员权限（PowerShell `Start-Process -Verb RunAs`，CREATE_NO_WINDOW 安全 API，不破 `forbid(unsafe_code)`）；同意后提权实例接管、拒绝则未提权继续（`--uac-child` 标记防循环）；已装服务场景不变（GUI 普通权限连服务，不弹）
+- **蜜罐热启停**：监听器运行时启动/停止——`HoneypotHandle` 改注册表 + 每行期望状态驱动（watch + 原子镜像），热停摘下监听释放端口、热启同任务重绑（无端口竞态窗口）；`POST /api/honeypot/listeners/{name}/start|stop` + GUI 开关真·热切换（按真实 bind 态显示），端口/协议等改动仍如实标注「重启后生效」；修复全局停机路径残留僵尸「运行中」标志
+- **整体功能集成测试套件 `scripts/e2e-suite.py`**：spawn 模式（临时配置拉起 `--headless` 实例）覆盖 API 基线/六协议蜜罐探测与反识别断言/蜜饵水印/凭证采集与喷洒检测/扫描爆破与内网保护/规则 CRUD/误报闭环/监听器热启停/导出与哈希链校验等阶段，退出码可接 CI；**attach 模式**直接测运行中/远程部署的实例（127.0.0.1 Bearer API，可经 SSH 隧道跨机）
+
+### 变更
+
+- 蜜罐页改 Grid 两列等宽卡片，未配置协议出占位卡；监听器状态以真实 bind 成功为准（配置里有 ≠ 真的在跑）；监听表/假 Shell/凭证采集/蜜饵设置进蜜罐页就地修改，与「设置→蜜罐」共用同一份草稿与保存流程
+- 版本三处对齐：Cargo.toml 内部 crate 依赖改纯 path 引用（去掉漂移的 version 钉版），README 版本行更新，CHANGELOG 建档补齐
+
+### 实测（Windows 11 本机）
+
+- 热启停端到端（注册表状态/热停端口释放/热启重绑/幂等/未知名）+ 真机 API E2E（热停端口不可连、热启恢复、config.toml enabled 往返无损）
+- e2e-suite spawn 全阶段与 attach 模式跑通；UAC 弹窗/拒绝/服务场景手工验证
+
 ## [0.5.11] - 2026-09-30
 
 0.5.11 第三批(产品化与反识别):蜜罐模板机制 + AI 慢路径上下文增强 + 反识别加固,任务号 H300/H310/H320/H400(见 docs/ROADMAP-0.5.9.md 第三批)。

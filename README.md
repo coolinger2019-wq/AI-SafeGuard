@@ -4,7 +4,7 @@
 
 > **这不是 LLM 内容审核/Guardrail 产品**。AI 在这里只做一件事:把蜜罐与真实流量观测到的攻击证据读给 LLM,产出**严格校验的封禁建议**(默认人工确认)。检测与处置不依赖 AI——关掉 AI,快路径全功能照常。
 >
-> 当前版本 **0.5.6**。架构与设计:[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · 路线图:[docs/ROADMAP.md](docs/ROADMAP.md) + [ROADMAP-0.5.md](docs/ROADMAP-0.5.md) + [ROADMAP-0.5.3.md](docs/ROADMAP-0.5.3.md) · 威胁模型:[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) · ISO 27001 对照:[docs/COMPLIANCE.md](docs/COMPLIANCE.md) · NGFW/协同演进:[docs/NGFW_EVOLUTION.md](docs/NGFW_EVOLUTION.md)
+> 当前版本 **0.5.12**。架构与设计:[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · 路线图:[docs/ROADMAP.md](docs/ROADMAP.md) + [ROADMAP-0.5.md](docs/ROADMAP-0.5.md) + [ROADMAP-0.5.3.md](docs/ROADMAP-0.5.3.md) + [ROADMAP-0.6.md](docs/ROADMAP-0.6.md) · 威胁模型:[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) · ISO 27001 对照:[docs/COMPLIANCE.md](docs/COMPLIANCE.md) · NGFW/协同演进:[docs/NGFW_EVOLUTION.md](docs/NGFW_EVOLUTION.md)
 
 ```
  蜜罐(诱捕) ────────┐
