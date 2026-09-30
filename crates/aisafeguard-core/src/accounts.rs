@@ -26,8 +26,10 @@ pub fn local_usernames() -> std::io::Result<Vec<String>> {
 /// - Windows：排除系统内置非人类账号（Guest/DefaultAccount/WDAGUtilityAccount）。
 #[cfg(unix)]
 fn is_human_account(user: &sysinfo::User) -> bool {
-    // sysinfo 0.37 起 Linux 的 Uid 私有字段 + as_u32()；root=0 或常规登录用户 ≥1000
-    matches!(user.id().as_u32(), 0 | 1000..)
+    // sysinfo 0.37 起 Uid 字段私有（宏生成，平台异构）：经 Display 解析回 u32 比较。
+    // root=0 或常规登录用户 ≥1000；解析失败按人类账号处理（宁少排除不误伤）
+    let uid = user.id().to_string().parse::<u32>().unwrap_or(u32::MAX);
+    uid == 0 || uid >= 1000
 }
 
 #[cfg(not(unix))]
