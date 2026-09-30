@@ -12,7 +12,7 @@
 
 - [x] **版本号管理**:CHANGELOG.md 已建档;0.5.12 起版本三处一致(Cargo.toml / README / `GET /api/status` 的 version 字段);内部 crate 依赖改纯 path 引用,钉版漂移问题根除。
 - [ ] **russh 上游兼容问题**(NEGATIVE-PATH §6)持续跟踪;在 issue/文档中记录上游版本与绕过方式,避免升级依赖时静默回归。(已有诚实记录,升级依赖时核对)
-- [ ] **webhook 签名与重试**(已知限制挂着):指 forward.rs 的外部转发通道(syslog/webhook),与 fed 通道无关;fed 通道的消息级签名已随 F100 落地(ECDSA P-256,节点证书钥)。webhook 签名维持独立待办。
+- [x] **webhook 签名与重试**(指 forward.rs 外部转发通道,与 fed 通道无关):签名 = HMAC-SHA256 + timestamp(`[notify].sign`,Stripe/GitHub 同款,密钥环境变量/凭据管理器不入配置);重试 = 三件套(退避 10/30/60s + 硬上限 3 次重试 + 丢弃留计数,队列有界 100 丢新留旧,内存不落盘)。能力边界已明示:webhook 验签 ≠ 可审计证据(SECURITY.md/THREAT_MODEL)。syslog 不做重试(UDP 语义)。
 
 ---
 

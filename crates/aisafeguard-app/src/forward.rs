@@ -208,6 +208,130 @@ fn webhook_secret() -> Option<String> {
     aisafeguard_core::secrets::webhook_secret()
 }
 
+/// F-webhook 重试（拍板三件套：指数退避 + 硬上限 + 丢弃留计数）。
+/// 内存队列不落盘——外发是副本，本地哈希链才是真源，重启清空可接受。
+/// 纪律不破：队列有界（满 = 丢新留旧）、重试搭车不堵主线（500ms tick）、
+/// 退避给接收端喘息（10s/30s/60s，覆盖接收端重启窗口，总窗 ~100s < 2 分钟）。
+struct WebhookRetryItem {
+    body: Vec<u8>,
+    signed: bool,
+    attempts: u32,
+    next_try: std::time::Instant,
+}
+
+struct WebhookRetryQueue {
+    q: std::collections::VecDeque<WebhookRetryItem>,
+    dropped: u64,
+}
+
+impl WebhookRetryQueue {
+    const CAP: usize = 100;
+    /// 原始 1 发 + 最多 3 次重试
+    const MAX_ATTEMPTS: u32 = 3;
+
+    fn new() -> Self {
+        Self {
+            q: std::collections::VecDeque::new(),
+            dropped: 0,
+        }
+    }
+
+    /// 重试退避表：第 1/2/3 次重试分别等 10s/30s/60s。
+    fn delay(attempts: u32) -> Duration {
+        Duration::from_secs(match attempts {
+            0 => 10,
+            1 => 30,
+            _ => 60,
+        })
+    }
+
+    /// 首发失败入队。满 = 丢新留旧（返回 false，dropped 已计数）。
+    fn push(&mut self, body: Vec<u8>, signed: bool, now: std::time::Instant) -> bool {
+        if self.q.len() >= Self::CAP {
+            self.dropped += 1;
+            return false;
+        }
+        self.q.push_back(WebhookRetryItem {
+            body,
+            signed,
+            attempts: 0,
+            next_try: now + Self::delay(0),
+        });
+        true
+    }
+
+    /// 取出到期的重试项（发送失败由调用方 requeue 或放弃）。
+    fn take_due(&mut self, now: std::time::Instant) -> Vec<WebhookRetryItem> {
+        let mut out = Vec::new();
+        let mut keep = std::collections::VecDeque::new();
+        while let Some(it) = self.q.pop_front() {
+            if it.next_try <= now {
+                out.push(it);
+            } else {
+                keep.push_back(it);
+            }
+        }
+        self.q = keep;
+        out
+    }
+
+    /// 重发失败再入队；重试次数用尽或队满 = 放弃（dropped 计数）。返回 false = 已放弃。
+    fn requeue(&mut self, mut item: WebhookRetryItem, now: std::time::Instant) -> bool {
+        item.attempts += 1;
+        if item.attempts > Self::MAX_ATTEMPTS || self.q.len() >= Self::CAP {
+            self.dropped += 1;
+            return false;
+        }
+        item.next_try = now + Self::delay(item.attempts);
+        self.q.push_back(item);
+        true
+    }
+
+    /// 通道关闭 = 队列作废（副本语义）。
+    fn clear(&mut self) {
+        self.q.clear();
+    }
+
+    fn dropped(&self) -> u64 {
+        self.dropped
+    }
+}
+
+enum WebhookFail {
+    /// sign 开而未配密钥（不入重试——丢弃 + 限频告警）
+    NoSecret,
+    Status(u16),
+    Transport(String),
+}
+
+/// 发送一条已序列化的 webhook 请求（签名在发送时打新鲜时间戳——重试不吃旧时间戳，
+/// 避免被接收方重放窗拒收）。
+async fn send_webhook(
+    http: &reqwest::Client,
+    url: &str,
+    sign: bool,
+    body: &[u8],
+) -> Result<(), WebhookFail> {
+    let mut req = http.post(url).header("content-type", "application/json");
+    if sign {
+        let Some(secret) = webhook_secret() else {
+            return Err(WebhookFail::NoSecret);
+        };
+        let ts = aisafeguard_core::now_ts();
+        req = req
+            .header("X-AISafeGuard-Timestamp", ts.to_string())
+            .header(
+                "X-AISafeGuard-Signature",
+                format!("v1={}", webhook_sign(&secret, ts, body)),
+            );
+    }
+    match req.body(body.to_vec()).send().await {
+        Ok(resp) if !resp.status().is_success() => Err(WebhookFail::Status(resp.status().as_u16())),
+        Ok(_) => Ok(()),
+        Err(e) => Err(WebhookFail::Transport(e.to_string())),
+    }
+}
+
 pub fn spawn_notify_task(eng: &Arc<EngineHandle>) {
     let eng = Arc::clone(eng);
     let rt = eng.rt.clone();
@@ -216,22 +340,23 @@ pub fn spawn_notify_task(eng: &Arc<EngineHandle>) {
         let host = hostname();
         let mut client: Option<(u64, reqwest::Client)> = None;
         let mut last_fail: Option<std::time::Instant> = None;
+        let mut retry = WebhookRetryQueue::new();
+        let mut drops_logged: u64 = 0;
+        let mut last_drop_log: Option<std::time::Instant> = None;
         loop {
-            let ev = match rx.recv().await {
-                Ok(ev) => ev,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+            // 500ms tick：到期重试不依赖新事件到来（重试搭车，不堵主线）
+            let ev = match tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
+                Ok(Ok(ev)) => Some(ev),
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
                     tracing::warn!("webhook 转发跟不上事件流，丢弃 {n} 条");
-                    continue;
+                    None
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
+                Err(_) => None,
             };
             let cfg = eng.config().notify;
             if !cfg.enabled || cfg.url.is_empty() {
-                continue;
-            }
-            let sev = ev.severity();
-            let threshold = SecurityEvent::severity_threshold(&cfg.min_severity);
-            if sev > threshold {
+                retry.clear(); // 通道关闭 = 队列作废（副本语义）
                 continue;
             }
             // 超时配置变更时重建 client（廉价，仅在值变化时发生）
@@ -247,21 +372,52 @@ pub fn spawn_notify_task(eng: &Arc<EngineHandle>) {
                     }
                 }
             }
-            let http = &client.as_ref().expect("client 已构建").1;
+            let http = client.as_ref().expect("client 已构建").1.clone();
+
+            // 1) 到期重试先于新事件（旧事优先）
+            for item in retry.take_due(std::time::Instant::now()) {
+                if send_webhook(&http, &cfg.url, item.signed, &item.body)
+                    .await
+                    .is_err()
+                    && !retry.requeue(item, std::time::Instant::now())
+                {
+                    // 放弃已计数；周期日志统一播报
+                }
+            }
+            let drops = retry.dropped();
+            if drops > drops_logged
+                && last_drop_log
+                    .map(|t| t.elapsed() >= Duration::from_secs(60))
+                    .unwrap_or(true)
+            {
+                tracing::warn!(
+                    "webhook 重试放弃，累计丢弃 {drops} 条事件（本地哈希链为真源）"
+                );
+                drops_logged = drops;
+                last_drop_log = Some(std::time::Instant::now());
+            }
+
+            // 2) 新事件
+            let Some(ev) = ev else { continue };
+            let sev = ev.severity();
+            let threshold = SecurityEvent::severity_threshold(&cfg.min_severity);
+            if sev > threshold {
+                continue;
+            }
             let body = serde_json::json!({
                 "host": host,
                 "severity": SecurityEvent::severity_name(sev),
                 "summary": ev.summary(),
                 "event": serde_json::to_value(&ev).unwrap_or_default(),
             });
-            // F-webhook：签名覆盖「将发送的原始字节」（序列化一次，签发同字节——
-            // 接收方逐字节重算）。开而不设密钥 = 丢弃不发送（不做静默降级）
+            // 签名覆盖「将发送的原始字节」（序列化一次，签发同字节——接收方逐字节重算）
             let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
-            let mut req = http
-                .post(&cfg.url)
-                .header("content-type", "application/json");
-            if cfg.sign {
-                let Some(secret) = webhook_secret() else {
+            match send_webhook(&http, &cfg.url, cfg.sign, &body_bytes).await {
+                Ok(()) => {
+                    last_fail = None;
+                }
+                Err(WebhookFail::NoSecret) => {
+                    // 开而不设密钥 = 丢弃不发送（不做静默降级，不入重试）
                     if last_fail
                         .map(|t| t.elapsed() >= Duration::from_secs(60))
                         .unwrap_or(true)
@@ -271,35 +427,26 @@ pub fn spawn_notify_task(eng: &Arc<EngineHandle>) {
                         );
                         last_fail = Some(std::time::Instant::now());
                     }
-                    continue;
-                };
-                let ts = aisafeguard_core::now_ts();
-                req = req
-                    .header("X-AISafeGuard-Timestamp", ts.to_string())
-                    .header(
-                        "X-AISafeGuard-Signature",
-                        format!("v1={}", webhook_sign(&secret, ts, &body_bytes)),
-                    );
-            }
-            match req.body(body_bytes).send().await {
-                Ok(resp) if !resp.status().is_success() => {
-                    if last_fail
-                        .map(|t| t.elapsed() >= Duration::from_secs(60))
-                        .unwrap_or(true)
-                    {
-                        tracing::warn!("webhook 返回 {}", resp.status());
-                        last_fail = Some(std::time::Instant::now());
-                    }
                 }
-                Ok(_) => last_fail = None,
-                Err(e) => {
+                Err(WebhookFail::Status(code)) => {
                     if last_fail
                         .map(|t| t.elapsed() >= Duration::from_secs(60))
                         .unwrap_or(true)
                     {
-                        tracing::warn!("webhook 发送失败（丢弃本条，60s 内不重复记录）: {e}");
+                        tracing::warn!("webhook 返回 {code}（本条进入重试队列）");
                         last_fail = Some(std::time::Instant::now());
                     }
+                    retry.push(body_bytes, cfg.sign, std::time::Instant::now());
+                }
+                Err(WebhookFail::Transport(e)) => {
+                    if last_fail
+                        .map(|t| t.elapsed() >= Duration::from_secs(60))
+                        .unwrap_or(true)
+                    {
+                        tracing::warn!("webhook 发送失败（进入重试队列，60s 内不重复记录）: {e}");
+                        last_fail = Some(std::time::Instant::now());
+                    }
+                    retry.push(body_bytes, cfg.sign, std::time::Instant::now());
                 }
             }
         }
@@ -358,6 +505,46 @@ pub fn spawn_exposure_task(eng: &Arc<EngineHandle>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn webhook_retry_queue_policy() {
+        let t0 = std::time::Instant::now();
+        let mut q = WebhookRetryQueue::new();
+        // 退避表：10s/30s/60s
+        assert_eq!(WebhookRetryQueue::delay(0).as_secs(), 10);
+        assert_eq!(WebhookRetryQueue::delay(1).as_secs(), 30);
+        assert_eq!(WebhookRetryQueue::delay(2).as_secs(), 60);
+        assert_eq!(WebhookRetryQueue::delay(9).as_secs(), 60, "封顶 60s");
+        // 未到期不可取
+        q.push(b"e1".to_vec(), false, t0);
+        assert!(q.take_due(t0).is_empty(), "未到 10s 退避不应到期");
+        // 到期可取；重发失败再入队 → 第二档 30s
+        let items = q.take_due(t0 + Duration::from_secs(10));
+        assert_eq!(items.len(), 1);
+        assert!(q.requeue(items.into_iter().next().unwrap(), t0 + Duration::from_secs(10)));
+        assert!(q.take_due(t0 + Duration::from_secs(20)).is_empty(), "30s 档未到");
+        // 放弃：重试次数用尽（0 首发 + 3 重试 = 4 发）
+        let mut q2 = WebhookRetryQueue::new();
+        q2.push(b"e".to_vec(), false, t0);
+        let mut item = q2.take_due(t0 + Duration::from_secs(10)).pop().unwrap();
+        for (attempt, wait) in [(1u32, 30u64), (2, 60), (3, 60)] {
+            assert!(q2.requeue(item, t0), "第 {attempt} 次重试应入队");
+            item = q2.take_due(t0 + Duration::from_secs(wait)).pop().unwrap();
+            assert_eq!(item.attempts, attempt);
+        }
+        assert!(!q2.requeue(item, t0), "第 4 次失败应放弃");
+        assert_eq!(q2.dropped(), 1);
+        // 队满丢新留旧（cap 100：第 101 条被丢）
+        let mut q3 = WebhookRetryQueue::new();
+        for i in 0..WebhookRetryQueue::CAP {
+            assert!(q3.push(format!("e{i}").into_bytes(), false, t0));
+        }
+        assert!(!q3.push(b"new".to_vec(), false, t0), "满后丢新");
+        assert_eq!(q3.dropped(), 1);
+        let due = q3.take_due(t0 + Duration::from_secs(60));
+        assert_eq!(due.len(), WebhookRetryQueue::CAP);
+        assert_eq!(due[0].body, b"e0".to_vec(), "最旧的保留");
+    }
 
     /// F-webhook 已知向量：期望值由 python hashlib.hmac 独立预计算（非本实现自证）。
     /// HMAC-SHA256("test-secret", "1700000000.{\"hello\":\"world\"}")
