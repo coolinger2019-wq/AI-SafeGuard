@@ -45,6 +45,9 @@ pub async fn serve(engine: Arc<EngineHandle>) {
         .route("/api/exposure", get(get_exposure))
         .route("/api/exposure/scan", post(scan_exposure))
         .route("/api/xdp/clear", post(xdp_clear))
+        .route("/api/fed/panel", get(fed_panel))
+        .route("/api/fed/members/{node}/quarantine", post(fed_member_quarantine))
+        .route("/api/fed/members/{node}/lift", post(fed_member_lift))
         .route("/api/intel", get(get_intel))
         .route("/api/intel/refresh", post(refresh_intel))
         .route("/api/config", get(get_config).post(put_config))
@@ -206,6 +209,49 @@ async fn apply_proposal(State(s): State<AppState>, Path(id): Path<i64>) -> Respo
 }
 
 /// 0.5.12：蜜罐监听器热启停（即时生效）
+/// F500 组织面板数据（只读）
+async fn fed_panel(State(s): State<AppState>) -> Response {
+    Json(s.engine.fed_panel()).into_response()
+}
+
+/// F500 软隔离（面板与 CLI 同一 DB 通路；reason 可选）
+#[derive(Deserialize, Default)]
+struct QuarantineBody {
+    #[serde(default)]
+    reason: String,
+}
+
+async fn fed_member_quarantine(
+    State(s): State<AppState>,
+    Path(node): Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    let reason = serde_json::from_slice::<QuarantineBody>(&body)
+        .map(|b| b.reason)
+        .unwrap_or_default();
+    match s.engine.quarantine_member(&node, false, "", &reason) {
+        Ok(msg) => Json(json!({ "ok": true, "message": msg })).into_response(),
+        Err(e) => err_resp(e),
+    }
+}
+
+/// F500 解除隔离（须指纹前缀确认，≥16 位十六进制）
+#[derive(Deserialize)]
+struct LiftBody {
+    fp: String,
+}
+
+async fn fed_member_lift(
+    State(s): State<AppState>,
+    Path(node): Path<String>,
+    Json(body): Json<LiftBody>,
+) -> Response {
+    match s.engine.quarantine_member(&node, true, &body.fp, "") {
+        Ok(msg) => Json(json!({ "ok": true, "message": msg })).into_response(),
+        Err(e) => err_resp(e),
+    }
+}
+
 async fn honeypot_listener_start(State(s): State<AppState>, Path(name): Path<String>) -> Response {
     match s.engine.toggle_listener(&name, true) {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),

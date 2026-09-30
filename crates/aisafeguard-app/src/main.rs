@@ -801,9 +801,13 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
         local_accounts: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
         credentials,
         corroboration: Arc::new(std::sync::Mutex::new(corroboration::CorroborationEngine::default())),
+        // F500：fed 协议计数（恒 Some；agent/off 角色不增计数，面板展示为空）
+        fed_stats: Some(Arc::new(crate::fed::FedStats::default())),
         token,
         version: VERSION,
     });
+
+
 
     // 快路径频次检测 + TTL 自动解封
     engine::spawn_detect_task(&engine);

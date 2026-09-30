@@ -74,4 +74,18 @@ pub trait Console: Send + Sync {
     fn delete_ai_key(&self) -> anyhow::Result<()>;
     /// 实时事件流。GUI 每帧 drain；远程模式由后台轮询线程喂数据。
     fn live_events(&self) -> Receiver<LiveEvent>;
+    /// F500 组织面板数据（只读；members/stats 仅协调者角色有值）
+    fn fed_panel(&self) -> anyhow::Result<crate::engine::FedPanel> {
+        Err(anyhow::anyhow!("组织面板不可用"))
+    }
+    /// F500 软隔离/解除（与 fed quarantine CLI 同一 DB 通路；lift 须指纹前缀）
+    fn quarantine_member(
+        &self,
+        _node: &str,
+        _lift: bool,
+        _lift_fp: &str,
+        _reason: &str,
+    ) -> anyhow::Result<String> {
+        Err(anyhow::anyhow!("组织协同不可用"))
+    }
 }

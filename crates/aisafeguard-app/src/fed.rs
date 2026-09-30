@@ -77,7 +77,7 @@ pub struct FedStats {
 }
 
 impl FedStats {
-    fn to_json(&self) -> serde_json::Value {
+    pub fn to_json(&self) -> serde_json::Value {
         json!({
             "malformed": self.malformed.load(Ordering::Relaxed),
             "sig_fail": self.sig_fail.load(Ordering::Relaxed),
@@ -193,9 +193,13 @@ fn audit_log_tail(data_dir: &Path, n: usize) -> Vec<serde_json::Value> {
 /// 不能交给 axum Json 提取器的默认 422。
 pub fn fed_router(engine: Arc<EngineHandle>) -> Router {
     let state = FedState {
-        engine,
+        engine: engine.clone(),
         gate: Arc::new(Mutex::new(GateState::default())),
-        stats: Arc::new(FedStats::default()),
+        // F500：与 EngineHandle 共享同一计数（面板只读展示的真相源）
+        stats: engine
+            .fed_stats
+            .clone()
+            .unwrap_or_else(|| Arc::new(FedStats::default())),
         feed: Arc::new(Mutex::new(OrgFeed::default())),
         limiter: Arc::new(Mutex::new(InboundLimiter::default())),
     };
@@ -1414,7 +1418,21 @@ pub fn cmd_quarantine(data_dir: &Path, node: &str, lift_fp: &str, reason: &str) 
     }
     let db = data_dir.join("aisafeguard.db");
     let store = aisafeguard_store::Store::open(&db)?;
-    if lift_fp.is_empty() {
+    let msg = do_quarantine(&store, node, !lift_fp.is_empty(), lift_fp, reason)?;
+    println!("{msg}");
+    Ok(())
+}
+
+/// F500 与 CLI 共用的隔离核心（同一 DB 状态与留痕通路——「隔离操作两处入口等价」）。
+/// 返回人读结果文案。
+pub fn do_quarantine(
+    store: &aisafeguard_store::Store,
+    node: &str,
+    lift: bool,
+    lift_fp: &str,
+    reason: &str,
+) -> anyhow::Result<String> {
+    if !lift {
         let reason = reason.trim();
         let reason = if reason.is_empty() { "（管理员未注明原因）" } else { reason };
         if !store.set_fed_member_status(node, "quarantined")? {
@@ -1426,10 +1444,9 @@ pub fn cmd_quarantine(data_dir: &Path, node: &str, lift_fp: &str, reason: &str) 
                 format!("节点 {node} 已软隔离：{reason}（心跳与审计保留，事件/建议通道暂停）"),
             ))
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        println!("✓ 已软隔离 {node}");
-        println!("  解除：fed quarantine {node} --lift <证书指纹前缀≥16位>");
-        println!("  指纹查询：fed audit 导出或 GET /fed/members 的 cert_fp 字段");
-        Ok(())
+        Ok(format!(
+            "已软隔离 {node}。解除：fed quarantine {node} --lift <证书指纹前缀≥16位>（指纹见 GET /fed/members 的 cert_fp）"
+        ))
     } else {
         let fp = lift_fp.to_ascii_lowercase();
         if fp.len() < 16 || !fp.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -1451,8 +1468,7 @@ pub fn cmd_quarantine(data_dir: &Path, node: &str, lift_fp: &str, reason: &str) 
                 format!("节点 {node} 软隔离已解除（指纹前缀 {fp}… 验证通过）"),
             ))
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        println!("✓ 已解除 {node} 的软隔离（指纹前缀验证通过）");
-        Ok(())
+        Ok(format!("已解除 {node} 的软隔离（指纹前缀验证通过）"))
     }
 }
 

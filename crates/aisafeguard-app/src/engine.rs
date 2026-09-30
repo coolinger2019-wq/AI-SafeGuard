@@ -162,6 +162,8 @@ pub struct EngineHandle {
     /// min_peers quorum 门控的数据源（0.4 的 fed_reporter_count 已随
     /// 「协调者不持久化节点事件」切换至此）
     pub corroboration: Arc<std::sync::Mutex<crate::corroboration::CorroborationEngine>>,
+    /// F500：fed 协议计数（与协调者 FedState 共享同一 Arc；agent/off 角色为 None）
+    pub fed_stats: Option<Arc<crate::fed::FedStats>>,
     pub token: String,
     pub version: &'static str,
 }
@@ -249,6 +251,31 @@ pub struct StatusReport {
     pub fingerprint_24h: FingerprintStats,
     /// F300 组织协同价值指标（组织建议采纳率与印证命中率，比率展示层算）
     pub org_metrics: aisafeguard_store::OrgMetrics,
+}
+
+/// F500 组织面板数据（只读 + 现有隔离通路；不新增跨节点命令通道）。
+/// members/stats 仅协调者角色有数据；org_events 两类角色都有（本节点账本）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FedPanel {
+    pub role: String,
+    pub node: String,
+    /// agent = 协调者地址；coordinator = mTLS 监听地址；off = 空
+    pub endpoint: String,
+    pub enabled: bool,
+    pub members: Vec<FedPanelMember>,
+    pub org_events: Vec<aisafeguard_store::OrgEventRow>,
+    /// 协调者协议计数（malformed/sig_fail/seq_reject/duplicates/quarantined/rate_limited）
+    pub stats: serde_json::Value,
+    /// 数据截至（面板对离线成员展示「数据截至」语义的时间基准）
+    pub data_as_of: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FedPanelMember {
+    pub node: String,
+    pub status: String,
+    pub last_seen: i64,
+    pub cert_fp: String,
 }
 
 /// 规则子集引擎运行状态（加载留痕 + 命中计数，GUI/API 只读展示）。
@@ -432,6 +459,61 @@ impl EngineHandle {
 
     pub fn list_ai_runs(&self, limit: u32) -> Result<Vec<AiRunRow>> {
         self.store.list_ai_runs(limit)
+    }
+
+    /// F500 组织面板数据（只读）。
+    pub fn fed_panel(&self) -> FedPanel {
+        let cfg = self.config();
+        let now = now_ts();
+        let members = if cfg.fed.role == "coordinator" {
+            self.store
+                .list_fed_members()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(node, cert_fp, last_seen, status)| FedPanelMember {
+                    node,
+                    status,
+                    last_seen,
+                    cert_fp,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        FedPanel {
+            role: cfg.fed.role.clone(),
+            node: cfg.fed.node.clone(),
+            endpoint: if cfg.fed.role == "agent" {
+                cfg.fed.coordinator.clone()
+            } else {
+                cfg.fed.listen_addr.clone()
+            },
+            enabled: cfg.fed.enabled,
+            members,
+            org_events: self.store.recent_org_events(50).unwrap_or_default(),
+            stats: if cfg.fed.role == "coordinator" {
+                self.fed_stats
+                    .as_ref()
+                    .map(|s| s.to_json())
+                    .unwrap_or_else(|| serde_json::json!({}))
+            } else {
+                serde_json::json!({})
+            },
+            data_as_of: now,
+        }
+    }
+
+    /// F500 隔离操作入口（面板与 CLI 同一通路：同一 DB 状态 + 同一留痕）。
+    /// 返回人读结果文案（GUI toast 显示）。
+    pub fn quarantine_member(
+        &self,
+        node: &str,
+        lift: bool,
+        lift_fp: &str,
+        reason: &str,
+    ) -> Result<String> {
+        crate::fed::do_quarantine(&self.store, node, lift, lift_fp, reason)
+            .map_err(|e| Error::Store(e.to_string()))
     }
 
     pub fn stats_24h(&self) -> Result<StatsSummary> {
@@ -869,6 +951,8 @@ const SELF_API_ENDPOINTS: &[&str] = &[
     "GET/POST/DELETE /api/ai/key — AI Key 管理",
     "GET /api/ai/runs、POST /api/ai/analyze — AI 分析",
     "POST /api/honeypot/listeners/{name}/start|stop — 蜜罐监听器热启停（0.5.12）",
+    "GET /api/fed/panel — 组织面板数据（0.6 F500，只读）",
+    "POST /api/fed/members/{node}/quarantine|lift — 软隔离与解除（0.6 F500，与 CLI 同通路）",
 ];
 
 /// 本产品自身攻击面快照（<self_endpoints> 段动态部分：协同开关等运行事实）。

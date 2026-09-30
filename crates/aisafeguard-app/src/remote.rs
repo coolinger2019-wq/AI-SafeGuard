@@ -220,6 +220,32 @@ impl Console for RemoteConsole {
         Ok(())
     }
 
+    fn fed_panel(&self) -> anyhow::Result<crate::engine::FedPanel> {
+        Ok(self.get("/api/fed/panel")?.json()?)
+    }
+
+    fn quarantine_member(
+        &self,
+        node: &str,
+        lift: bool,
+        lift_fp: &str,
+        reason: &str,
+    ) -> anyhow::Result<String> {
+        let (path, body) = if lift {
+            (
+                format!("/api/fed/members/{node}/lift"),
+                serde_json::json!({ "fp": lift_fp }),
+            )
+        } else {
+            (
+                format!("/api/fed/members/{node}/quarantine"),
+                serde_json::json!({ "reason": reason }),
+            )
+        };
+        let v: serde_json::Value = self.post_json(&path, &body)?.json()?;
+        Ok(v["message"].as_str().unwrap_or("完成").to_string())
+    }
+
     fn toggle_listener(&self, name: &str, run: bool) -> anyhow::Result<()> {
         let action = if run { "start" } else { "stop" };
         self.post(&format!("/api/honeypot/listeners/{name}/{action}"))?;

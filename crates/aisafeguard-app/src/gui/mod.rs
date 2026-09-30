@@ -4,6 +4,7 @@ mod events_tab;
 mod firewall_tab;
 mod help_tab;
 mod honeypot_tab;
+mod org_tab;
 mod settings_tab;
 pub(crate) mod theme;
 
@@ -53,6 +54,7 @@ enum Tab {
     Events,
     Firewall,
     Honeypot,
+    Org,
     Ai,
     Settings,
     Help,
@@ -106,6 +108,7 @@ struct Cache {
     proposals: Vec<ProposalRow>,
     runs: Vec<AiRunRow>,
     feedback: Vec<aisafeguard_store::FpRow>,
+    fed_panel: Option<crate::engine::FedPanel>,
 }
 
 pub struct AisafeApp {
@@ -125,6 +128,9 @@ pub struct AisafeApp {
     new_tag: String,
     // 事件过滤
     event_filter: String,
+    // 组织页（F500）：隔离原因 / 解除指纹输入
+    org_reason: String,
+    org_lift_fp: String,
     // 事件详情（0.5.6 F14）：选中事件的 id，详情面板从缓存按 id 取
     event_detail_id: Option<i64>,
     // 设置草稿（None = 未编辑；进入设置页时从引擎取）
@@ -200,6 +206,7 @@ impl AisafeApp {
                 proposals: Vec::new(),
                 runs: Vec::new(),
                 feedback: Vec::new(),
+                fed_panel: None,
             },
             cache_at: Instant::now() - Duration::from_secs(60),
             toast: None,
@@ -210,6 +217,8 @@ impl AisafeApp {
             new_note: String::new(),
             new_tag: String::new(),
             event_filter: String::new(),
+            org_reason: String::new(),
+            org_lift_fp: String::new(),
             event_detail_id: None,
             settings_draft: None,
             settings_page: SettingsPage::default(),
@@ -256,6 +265,7 @@ impl AisafeApp {
         self.cache.proposals = self.eng.list_proposals(None, 100).unwrap_or_default();
         self.cache.runs = self.eng.list_ai_runs(8).unwrap_or_default();
         self.cache.feedback = self.eng.list_feedback().unwrap_or_default();
+        self.cache.fed_panel = self.eng.fed_panel().ok();
         if let Ok(cfg) = self.eng.config() {
             self.ui_prefs = (
                 ThemeId::from_str(&cfg.ui.theme),
@@ -319,6 +329,7 @@ impl AisafeApp {
                     (Tab::Events, "≡  事件"),
                     (Tab::Firewall, "⛨  防火墙"),
                     (Tab::Honeypot, "◉  蜜罐"),
+                    (Tab::Org, "⇄  组织"),
                     (Tab::Ai, "✦  AI 助手"),
                     (Tab::Settings, "⚙  设置"),
                     (Tab::Help, "?  帮助"),
@@ -435,6 +446,7 @@ impl eframe::App for AisafeApp {
                         Tab::Events => self.events_ui(ui),
                         Tab::Firewall => self.firewall_ui(ui),
                         Tab::Honeypot => self.honeypot_ui(ui),
+                        Tab::Org => self.org_ui(ui),
                         Tab::Ai => self.ai_ui(ui),
                         Tab::Settings => self.settings_ui(ui),
                         Tab::Help => self.help_ui(ui),
