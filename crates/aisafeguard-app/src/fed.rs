@@ -33,7 +33,7 @@ use sha2::{Digest, Sha256};
 
 use crate::corroboration::{Dim, Observation, OrgCorroboration};
 use crate::engine::EngineHandle;
-use crate::fedproto::{self, DedupSet, Envelope};
+use crate::fedproto::{self, DedupSet, Envelope, InboundLimiter};
 use aisafeguard_core::event::SecurityEvent;
 use aisafeguard_core::now_ts;
 use aisafeguard_store::IntelRow;
@@ -70,6 +70,10 @@ pub struct FedStats {
     pub seq_reject: AtomicU64,
     pub duplicates: AtomicU64,
     pub archived_events: AtomicU64,
+    /// F400：隔离期被拦的消息数
+    pub quarantined: AtomicU64,
+    /// F400：限频降级期被拦的消息数
+    pub rate_limited: AtomicU64,
 }
 
 impl FedStats {
@@ -80,6 +84,8 @@ impl FedStats {
             "seq_reject": self.seq_reject.load(Ordering::Relaxed),
             "duplicates": self.duplicates.load(Ordering::Relaxed),
             "archived_events": self.archived_events.load(Ordering::Relaxed),
+            "quarantined": self.quarantined.load(Ordering::Relaxed),
+            "rate_limited": self.rate_limited.load(Ordering::Relaxed),
         })
     }
 }
@@ -90,6 +96,8 @@ struct GateState {
     dedup: Option<DedupSet>,
     version_warned: HashSet<String>,
     sig_warned: HashSet<String>,
+    /// F400：已广播过的成员隔离状态（node → status），状态变更才广播
+    quarantine_announced: std::collections::HashMap<String, String>,
 }
 
 impl GateState {
@@ -106,6 +114,8 @@ pub struct FedState {
     /// org-feed 广播环（F200）：印证事件等组织消息，节点经 GET /fed/org-feed 拉取。
     /// 有界内存环——重启清零，节点按消息 id 幂等去重。
     feed: Arc<Mutex<OrgFeed>>,
+    /// F400：协调者入站限频器（每节点滑动分钟窗，超限降级仅心跳）
+    limiter: Arc<Mutex<InboundLimiter>>,
 }
 
 /// 组织消息广播环：单调 id + 有界队列（旧消息被挤出后，落后节点的 after 游标
@@ -187,6 +197,7 @@ pub fn fed_router(engine: Arc<EngineHandle>) -> Router {
         gate: Arc::new(Mutex::new(GateState::default())),
         stats: Arc::new(FedStats::default()),
         feed: Arc::new(Mutex::new(OrgFeed::default())),
+        limiter: Arc::new(Mutex::new(InboundLimiter::default())),
     };
     Router::new()
         .route("/fed/hello", post(fed_hello))
@@ -255,6 +266,47 @@ enum Gate {
     Fresh(Box<Envelope>),
     /// 窗口内重复（补传重发），幂等跳过但按成功应答
     Duplicate(Box<Envelope>),
+}
+
+/// F400 隔离状态变更广播（一次性）：闸门处发现成员状态与上次广播不同 →
+/// 事件流 + org-feed 广播。首次接触的 active 节点不广播（免噪音）。
+fn announce_quarantine(state: &FedState, node: &str, status: &str) {
+    let announce = {
+        let mut gate = state.gate.lock().unwrap();
+        match gate.quarantine_announced.get(node) {
+            None => {
+                if status == "quarantined" {
+                    gate.quarantine_announced
+                        .insert(node.to_string(), status.to_string());
+                    true
+                } else {
+                    false
+                }
+            }
+            Some(prev) if prev != status => {
+                gate.quarantine_announced
+                    .insert(node.to_string(), status.to_string());
+                true
+            }
+            _ => false,
+        }
+    };
+    if announce {
+        let quarantined = status == "quarantined";
+        state.engine.bus.publish(SecurityEvent::engine(
+            if quarantined { "warn" } else { "info" },
+            if quarantined {
+                format!("节点 {node} 处于软隔离状态（事件/建议通道暂停，心跳与审计保留）")
+            } else {
+                format!("节点 {node} 软隔离已解除，协同通道恢复")
+            },
+        ));
+        let msg = json!({
+            "type": "quarantine",
+            "quarantine": { "node": node, "status": status },
+        });
+        state.feed.lock().unwrap().push(msg);
+    }
 }
 
 /// 解析信封并过五道闸：解析 → 版本协商 → 时间窗 → 消息验签 → 成员绑定 → 幂等/序列号。
@@ -329,6 +381,42 @@ fn gate_envelope(state: &FedState, peer: &FedPeer, body: &Bytes) -> Result<Gate,
     }
     // 5) 成员绑定（TOFU/预登记 + last_seen 刷新）
     check_member(state, &env.node, &peer.cert_fp)?;
+    // F400 软隔离与限频（成员状态以 DB 为真源，fed quarantine CLI 即时生效）
+    let member_status = state
+        .engine
+        .store
+        .fed_member_status(&env.node)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "active".into());
+    announce_quarantine(state, &env.node, &member_status);
+    if member_status == "quarantined"
+        && matches!(
+            env.ty.as_str(),
+            fedproto::types::EVENTS | fedproto::types::PROPOSALS | fedproto::types::REPORTS
+        )
+    {
+        state.stats.quarantined.fetch_add(1, Ordering::Relaxed);
+        // 审计通道保留：隔离期消息仍留原始信封（可离线验签取证）
+        append_audit_log(&state.engine.config().general.data_dir, &env, now);
+        return Err(err_status(
+            StatusCode::FORBIDDEN,
+            "节点已被软隔离（心跳与审计保留，事件/建议通道暂停）；解除：协调者侧 fed quarantine <node> --lift <指纹前缀>",
+        ));
+    }
+    let cap = state.engine.config().fed.inbound_rate_per_min;
+    if !state.limiter.lock().unwrap().check(&env.node, now, cap)
+        && env.ty != fedproto::types::HELLO
+    {
+        state.stats.rate_limited.fetch_add(1, Ordering::Relaxed);
+        return Err(err_status(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "入站消息速率超限（{cap}/分钟）：该节点降级为仅心跳模式 {} 分钟（防广播放大）",
+                fedproto::InboundLimiter::COOLDOWN_SECS / 60
+            ),
+        ));
+    }
     let mut gate = state.gate.lock().unwrap();
     // 6a) 幂等：24h 窗内 (node, seq) 已见 = 补传重发，跳过但按成功应答
     if !gate.dedup().first_time(&env.node, env.seq, now, fedproto::REPLAY_WINDOW_SECS) {
@@ -904,8 +992,8 @@ async fn fed_members(State(state): State<FedState>) -> Response {
         .list_fed_members()
         .unwrap_or_default()
         .into_iter()
-        .map(|(node, cert_fp, last_seen)| {
-            json!({ "node": node, "cert_fp": cert_fp, "last_seen": last_seen })
+        .map(|(node, cert_fp, last_seen, status)| {
+            json!({ "node": node, "cert_fp": cert_fp, "last_seen": last_seen, "status": status })
         })
         .collect();
     Json(members).into_response()
@@ -1140,8 +1228,8 @@ pub fn cmd_audit(data_dir: &Path, out: &Path, window_secs: i64) -> anyhow::Resul
     let members: Vec<serde_json::Value> = store
         .list_fed_members()?
         .into_iter()
-        .map(|(node, cert_fp, last_seen)| {
-            serde_json::json!({ "node": node, "cert_fp": cert_fp, "last_seen": last_seen })
+        .map(|(node, cert_fp, last_seen, status)| {
+            serde_json::json!({ "node": node, "cert_fp": cert_fp, "last_seen": last_seen, "status": status })
         })
         .collect();
     let revocations: Vec<serde_json::Value> = std::fs::read(revocations_path(data_dir))
@@ -1184,6 +1272,57 @@ pub fn cmd_expect(data_dir: &Path, node: &str, fp: &str) -> anyhow::Result<()> {
     std::fs::write(&path, serde_json::to_string_pretty(&map)?)?;
     println!("✓ 已预登记 {node} 的证书指纹（该节点非匹配指纹的接入将被拒）");
     Ok(())
+}
+
+/// `fed quarantine <node> [原因]` / `fed quarantine <node> --lift <指纹前缀>`（F400 软隔离）。
+/// 与吊销的区别：吊销断一切连接（驱离），隔离保留心跳与审计、只断事件/建议通道
+/// （留观察的停权）。解除需管理员提供证书指纹前缀（≥16 位十六进制）确认——防误操作。
+pub fn cmd_quarantine(data_dir: &Path, node: &str, lift_fp: &str, reason: &str) -> anyhow::Result<()> {
+    if !valid_node_name(node) {
+        anyhow::bail!("node 名不合法（限字母数字_-，≤32 字符）");
+    }
+    let db = data_dir.join("aisafeguard.db");
+    let store = aisafeguard_store::Store::open(&db)?;
+    if lift_fp.is_empty() {
+        let reason = reason.trim();
+        let reason = if reason.is_empty() { "（管理员未注明原因）" } else { reason };
+        if !store.set_fed_member_status(node, "quarantined")? {
+            anyhow::bail!("成员 {node} 不存在（先 issue-cert 并等其上线）");
+        }
+        store
+            .insert_event(&SecurityEvent::engine(
+                "warn",
+                format!("节点 {node} 已软隔离：{reason}（心跳与审计保留，事件/建议通道暂停）"),
+            ))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        println!("✓ 已软隔离 {node}");
+        println!("  解除：fed quarantine {node} --lift <证书指纹前缀≥16位>");
+        println!("  指纹查询：fed audit 导出或 GET /fed/members 的 cert_fp 字段");
+        Ok(())
+    } else {
+        let fp = lift_fp.to_ascii_lowercase();
+        if fp.len() < 16 || !fp.chars().all(|c| c.is_ascii_hexdigit()) {
+            anyhow::bail!("解除隔离需提供证书指纹前缀（≥16 位十六进制）——防误操作解除");
+        }
+        let members = store.list_fed_members()?;
+        let Some((_, cert_fp, _, _)) = members.iter().find(|(n, _, _, _)| n == node) else {
+            anyhow::bail!("成员 {node} 不存在");
+        };
+        if !cert_fp.starts_with(&fp) {
+            anyhow::bail!("指纹前缀与 {node} 的证书指纹不符，拒绝解除（宁停勿乱）");
+        }
+        if !store.set_fed_member_status(node, "active")? {
+            anyhow::bail!("成员 {node} 不存在");
+        }
+        store
+            .insert_event(&SecurityEvent::engine(
+                "info",
+                format!("节点 {node} 软隔离已解除（指纹前缀 {fp}… 验证通过）"),
+            ))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        println!("✓ 已解除 {node} 的软隔离（指纹前缀验证通过）");
+        Ok(())
+    }
 }
 
 /// 解析 fed 证书文件路径：空配置回退 <数据目录>/fed/ 默认位置。
@@ -1490,8 +1629,8 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
         let mut key: Option<ring::signature::EcdsaKeyPair> = None;
         let mut warned_material = false;
         // 未确认信封（按类型各一槽）：网络失败保留重发，被 4xx 拒收丢弃重建。
-        // events 槽附带该批凭证游标（成功应答后才推进，4xx/网络失败不丢观测）
-        let mut pending_events: Option<(Vec<u8>, Option<i64>)> = None;
+        // events 槽附带该批凭证游标与批次最大事件 id（成功应答后才推进）
+        let mut pending_events: Option<(Vec<u8>, Option<i64>, i64)> = None;
         let mut pending_proposals: Option<Vec<u8>> = None;
         // 版本失配阻断：只发 hello 探测，直到协调者侧接受（节点需升级）
         let mut version_blocked: Option<String> = None;
@@ -1639,11 +1778,39 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
             // 1) 上报本地事件（蜜罐命中 + 检测判定；超 24h 的旧事件不再外发，
             //    本地哈希链是归档真源）。未确认信封原样重发，不重建。
             let bytes = match pending_events.take() {
-                Some((b, m)) => Some((b, m)),
-                None => eng.store.recent_events(100, None).ok().and_then(|rows| {
+                Some((b, m, batch)) => Some((b, m, batch)),
+                None => {
+                    // F400 出站有界队列：丢新留旧——积压超上限先推进游标牺牲最新段
+                    // （本地哈希链是事件完整性真源，外发本来就是副本）
+                    let newest = eng
+                        .store
+                        .recent_events(1, None)
+                        .ok()
+                        .and_then(|v| v.first().map(|e| e.id))
+                        .unwrap_or(0);
+                    let (cursor, dropped) = fedproto::backlog_drop(
+                        last_event_id,
+                        newest,
+                        fedproto::OUTBOUND_BACKLOG,
+                    );
+                    if dropped > 0 {
+                        last_event_id = cursor;
+                        eng.bus.publish(SecurityEvent::engine(
+                            "warn",
+                            format!(
+                                "出站积压超 {} 条：按丢新留旧策略丢弃最新 {dropped} 条（本地哈希链完整保留）",
+                                fedproto::OUTBOUND_BACKLOG
+                            ),
+                        ));
+                    }
+                    // 最旧优先取一批（F400：建议风暴既有单建议幂等游标，印证广播
+                    // 有协调者侧攻击者键冷却——出站限频由此结构性满足）
+                    eng.store
+                        .events_since_asc(cursor, 100)
+                        .ok()
+                        .and_then(|rows| {
                     let new_events: Vec<PushEvent> = rows
                         .iter()
-                        .filter(|e| e.id > last_event_id)
                         .filter(|e| {
                             matches!(e.kind.as_str(), "honeypot_hit" | "detection" | "canary")
                         })
@@ -1671,33 +1838,34 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
                         .filter(|c| now_ts() - c.ts <= fedproto::REPLAY_WINDOW_SECS)
                         .map(|c| json!({ "ts": c.ts, "remote_ip": c.remote_ip, "username": c.username }))
                         .collect();
-                    if new_events.is_empty() && creds.is_empty() {
-                        None
-                    } else {
-                        seal_envelope(
-                            &eng,
-                            &cfg.node,
-                            key_ref,
-                            &mut seq,
-                            fedproto::types::EVENTS,
-                            json!({ "events": new_events, "credentials": creds }),
-                        )
-                        .map(|(_, b)| (b, cred_max))
-                    }
-                }),
+                            if new_events.is_empty() && creds.is_empty() {
+                                None
+                            } else {
+                                seal_envelope(
+                                    &eng,
+                                    &cfg.node,
+                                    key_ref,
+                                    &mut seq,
+                                    fedproto::types::EVENTS,
+                                    json!({ "events": new_events, "credentials": creds }),
+                                )
+                                .map(|(_, b)| {
+                                    (b, cred_max, rows.last().map(|e| e.id).unwrap_or(0))
+                                })
+                            }
+                        })
+                }
             };
-            if let Some((bytes, cred_max)) = bytes {
+            if let Some((bytes, cred_max, batch_max)) = bytes {
                 match post_envelope(http_ref, &base, "/fed/events", &bytes).await {
                     SendOutcome::Ok(_) => {
                         pending_events = None;
                         if let Some(m) = cred_max {
                             last_cred_ts = last_cred_ts.max(m);
                         }
-                        if let Ok(rows) = eng.store.recent_events(1, None)
-                            && let Some(max) = rows.first().map(|e| e.id)
-                        {
-                            last_event_id = last_event_id.max(max);
-                        }
+                        // F400 最旧优先：游标推进到本批最大 id（未被选取的
+                        // kind/过老行本就永不外发，不阻塞游标）
+                        last_event_id = last_event_id.max(batch_max);
                     }
                     SendOutcome::Rejected(code, body) => {
                         // 4xx = 这份信封本身有问题（重发无意义），丢弃下轮重建；
@@ -1707,7 +1875,7 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
                         tracing::warn!("组织事件上报被拒: HTTP {code} {body}");
                     }
                     SendOutcome::Network(_) => {
-                        pending_events = Some((bytes, cred_max));
+                        pending_events = Some((bytes, cred_max, batch_max));
                         tracing::debug!("协调者失联，事件信封留待重发");
                     }
                 }
@@ -1898,6 +2066,21 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
                                 format!(
                                     "组织误报提示：组织内 {count} 个节点把「{key}」标记为误报（建议性质，是否跟进由本节点决定）"
                                 ),
+                            ));
+                        }
+                        "quarantine" => {
+                            let q = &msg["quarantine"];
+                            let (Some(n), Some(st)) =
+                                (q["node"].as_str(), q["status"].as_str())
+                            else {
+                                continue;
+                            };
+                            let _ = eng
+                                .store
+                                .insert_org_event(now, "quarantine", "", n, 0, st);
+                            eng.bus.publish(SecurityEvent::engine(
+                                if st == "quarantined" { "warn" } else { "info" },
+                                format!("组织隔离广播：节点 {n} 状态 → {st}（隔离 = 留观察停权，吊销 = 驱离）"),
                             ));
                         }
                         "quorum" => {

@@ -540,6 +540,10 @@ pub struct FedConfig {
     /// F300：组织推荐升级阈值（采纳率百分比，默认 60）。零误报 + 采纳数 ≥2
     /// 且采纳率达标 → 升级为「组织推荐」（后续复验默认严重度提高，仍是建议）
     pub org_adoption_percent: u32,
+    /// F400：协调者对单节点入站消息限频（条/分钟，默认 240，0 = 不限）。
+    /// 超限降级「仅心跳」5 分钟——防被攻陷节点把组织当广播放大器。
+    /// 正常节点每周期至多 4 类消息（interval 最小 15s ≈ 16 条/分钟），余量充足。
+    pub inbound_rate_per_min: u32,
 }
 
 impl Default for FedConfig {
@@ -557,6 +561,7 @@ impl Default for FedConfig {
             key_path: String::new(),
             share_fp: false,
             org_adoption_percent: 60,
+            inbound_rate_per_min: 240,
         }
     }
 }

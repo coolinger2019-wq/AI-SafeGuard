@@ -288,7 +288,10 @@ CREATE TABLE IF NOT EXISTS fed_members (
     cert_fp   TEXT NOT NULL DEFAULT '',
     -- F100 fed 协议：该节点已见最大消息序列号（-1 = 尚未见过）。单调递增，
     -- 回退（备份恢复/伪造重放）在 check_fed_seq 拒收
-    max_seq   INTEGER NOT NULL DEFAULT -1
+    max_seq   INTEGER NOT NULL DEFAULT -1,
+    -- F400 软隔离：active | quarantined（心跳与审计保留，事件/建议通道暂停；
+    -- 与吊销的区别：吊销断一切连接，隔离是留观察的停权）
+    status    TEXT NOT NULL DEFAULT 'active'
 );
 
 -- 误报反馈（AI 深度介入 v1）：用户判定为误报的来源，自动封禁/自动应用跳过，
@@ -397,6 +400,7 @@ impl Store {
             "ALTER TABLE events ADD COLUMN interaction TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE proposals ADD COLUMN action TEXT NOT NULL DEFAULT 'block'",
             "ALTER TABLE fed_members ADD COLUMN max_seq INTEGER NOT NULL DEFAULT -1",
+            "ALTER TABLE fed_members ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
         ] {
             let _ = conn.execute(sql, []); // 列已存在时报错，忽略
         }
@@ -1464,13 +1468,58 @@ impl Store {
         Ok(())
     }
 
-    pub fn list_fed_members(&self) -> Result<Vec<(String, String, i64)>> {
+    /// F400 软隔离状态切换（active | quarantined）。返回 false = 成员不存在。
+    pub fn set_fed_member_status(&self, node: &str, status: &str) -> Result<bool> {
+        let n = self
+            .lock()?
+            .execute(
+                "UPDATE fed_members SET status = ?2 WHERE node = ?1",
+                params![node, status],
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(n > 0)
+    }
+
+    pub fn fed_member_status(&self, node: &str) -> Result<Option<String>> {
         let conn = self.lock()?;
+        let v: Option<String> = conn
+            .query_row(
+                "SELECT status FROM fed_members WHERE node = ?1",
+                params![node],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(v)
+    }
+
+    /// F400 事件补传（丢新留旧有界队列的取数侧）：id 升序取一段。
+    pub fn events_since_asc(&self, after_id: i64, limit: u32) -> Result<Vec<EventRow>> {
+        let conn = self.lock()?;
+        let sql = format!(
+            "SELECT {EVENT_COLUMNS} FROM events WHERE id > ?1 ORDER BY id ASC LIMIT ?2"
+        );
         let mut stmt = conn
-            .prepare("SELECT node, cert_fp, last_seen FROM fed_members ORDER BY last_seen DESC")
+            .prepare(&sql)
             .map_err(|e| Error::Store(e.to_string()))?;
         let rows = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .query_map(params![after_id, limit], event_row)
+            .map_err(|e| Error::Store(e.to_string()))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| Error::Store(e.to_string()))
+    }
+
+    pub fn list_fed_members(&self) -> Result<Vec<(String, String, i64, String)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT node, cert_fp, last_seen, status FROM fed_members ORDER BY last_seen DESC")
+            .map_err(|e| Error::Store(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
             .map_err(|e| Error::Store(e.to_string()))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| Error::Store(e.to_string()))
@@ -1511,6 +1560,26 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn fed_member_quarantine_status() {
+        let store = tmp_store("fed-q-status");
+        store.upsert_fed_member("a", 1, "fp-a").unwrap();
+        assert_eq!(
+            store.fed_member_status("a").unwrap().as_deref(),
+            Some("active")
+        );
+        assert!(store.set_fed_member_status("a", "quarantined").unwrap());
+        assert_eq!(
+            store.fed_member_status("a").unwrap().as_deref(),
+            Some("quarantined")
+        );
+        assert_eq!(store.list_fed_members().unwrap()[0].3, "quarantined");
+        assert!(
+            !store.set_fed_member_status("ghost", "active").unwrap(),
+            "成员不存在返回 false"
+        );
+    }
 
     #[test]
     fn org_events_ledger_and_metrics() {
@@ -1782,7 +1851,10 @@ mod tests {
         assert!(store.upsert_fed_member("agent1", 200, "fp-a").unwrap());
         let rows = store.list_fed_members().unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0], ("agent1".into(), "fp-a".into(), 200));
+        assert_eq!(
+            rows[0],
+            ("agent1".into(), "fp-a".into(), 200, "active".into())
+        );
         // 异指纹：拒绝（证书冒用/更换都在此拦下，换证需管理员删成员记录）
         assert!(!store.upsert_fed_member("agent1", 300, "fp-b").unwrap());
         assert_eq!(store.list_fed_members().unwrap()[0].2, 200);

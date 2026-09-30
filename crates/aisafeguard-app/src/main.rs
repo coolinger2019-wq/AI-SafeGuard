@@ -180,6 +180,39 @@ fn main() -> anyhow::Result<()> {
                             }
                         }
                     }
+                    Some("quarantine") => {
+                        i += 1;
+                        match args.get(i) {
+                            Some(node) => {
+                                let mut lift_fp = String::new();
+                                let mut reason = String::new();
+                                let mut j = i + 1;
+                                while let Some(a) = args.get(j) {
+                                    if a == "--lift" {
+                                        lift_fp = args.get(j + 1).cloned().unwrap_or_default();
+                                        j += 2;
+                                    } else {
+                                        if !reason.is_empty() {
+                                            reason.push(' ');
+                                        }
+                                        reason.push_str(a);
+                                        j += 1;
+                                    }
+                                }
+                                i = j.saturating_sub(1);
+                                command = Some((
+                                    "fed-quarantine".into(),
+                                    Some(format!("{node}\u{1}{lift_fp}\u{1}{reason}")),
+                                ));
+                            }
+                            None => {
+                                eprintln!(
+                                    "用法: aisafeguard fed quarantine <node> [原因] | fed quarantine <node> --lift <指纹前缀>"
+                                );
+                                std::process::exit(2);
+                            }
+                        }
+                    }
                     Some("audit") => {
                         i += 1;
                         match args.get(i) {
@@ -349,6 +382,23 @@ fn main() -> anyhow::Result<()> {
                 let data_dir = resolve_cfg(cfg_path, data_dir)?.0.data_dir();
                 return fed::cmd_audit(&data_dir, Path::new(&out), 604_800)
                     .map_err(|e| anyhow::anyhow!("{e}"));
+            }
+            "fed-quarantine" => {
+                let Some(joined) = arg else {
+                    eprintln!("用法: aisafeguard fed quarantine <node> [原因]");
+                    std::process::exit(2);
+                };
+                let parts: Vec<&str> = joined.split('\u{1}').collect();
+                let node = parts.first().copied().unwrap_or_default();
+                let lift_fp = parts.get(1).copied().unwrap_or_default();
+                let reason = parts.get(2).copied().unwrap_or_default();
+                return fed::cmd_quarantine(
+                    &resolve_cfg(cfg_path, data_dir)?.0.data_dir(),
+                    node,
+                    lift_fp,
+                    reason,
+                )
+                .map_err(|e| anyhow::anyhow!("{e}"));
             }
             "fed-expect" => {
                 let Some(joined) = arg else {

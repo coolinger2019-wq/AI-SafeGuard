@@ -218,6 +218,65 @@ impl DedupSet {
 
 }
 
+// ---------- F400 韧性：入站限频与出站有界队列（纯逻辑，可注入时钟测试） ----------
+
+/// 出站积压上限（丢新留旧）：落后超过此值 → 丢弃最新段，本地哈希链是事件
+/// 完整性真源，外发本来就是副本。
+pub const OUTBOUND_BACKLOG: i64 = 10_000;
+
+/// F400 有界队列「丢新留旧」策略：积压超上限时推进游标、牺牲最新段。
+/// 返回 (新游标, 丢弃条数)。
+pub fn backlog_drop(cursor: i64, newest: i64, bound: i64) -> (i64, i64) {
+    let backlog = (newest - cursor).max(0);
+    if backlog <= bound {
+        return (cursor, 0);
+    }
+    (newest - bound, backlog - bound)
+}
+
+/// 协调者入站限频器：每节点滑动分钟窗计数，超限降级「仅心跳」一个冷却期。
+/// 正常节点每周期至多 4 类消息（interval 最小 15s ≈ 16 条/分钟）。
+#[derive(Debug, Default)]
+pub struct InboundLimiter {
+    windows: HashMap<String, (i64, u32)>,
+    degraded_until: HashMap<String, i64>,
+}
+
+impl InboundLimiter {
+    /// 单节点冷却期（秒）：降级后只收 hello，期满自动恢复全量通道。
+    pub const COOLDOWN_SECS: i64 = 300;
+
+    /// 过闸判定。cap_per_min = 0 表示不限。对 hello 也计数（hello 洪泛同样触发
+    /// 降级），但调用方在降级期放行 hello（心跳是最后的观察通道）。
+    pub fn check(&mut self, node: &str, now: i64, cap_per_min: u32) -> bool {
+        if cap_per_min == 0 {
+            return true;
+        }
+        if self.is_degraded(node, now) {
+            return false;
+        }
+        let (start, count) = self.windows.entry(node.to_string()).or_insert((now, 0));
+        if now - *start >= 60 {
+            *start = now;
+            *count = 0;
+        }
+        *count += 1;
+        if *count > cap_per_min {
+            self.degraded_until
+                .insert(node.to_string(), now + Self::COOLDOWN_SECS);
+            self.windows.remove(node);
+            return false;
+        }
+        true
+    }
+
+    pub fn is_degraded(&self, node: &str, now: i64) -> bool {
+        self.degraded_until
+            .get(node)
+            .is_some_and(|&until| now < until)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,6 +377,40 @@ mod tests {
         assert!(!verify_signature(&point, &bytes, "zz"));
         assert!(!verify_signature(&point, &bytes, ""));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inbound_limiter_degrades_and_recovers() {
+        let mut l = InboundLimiter::default();
+        let t0 = 10_000;
+        // 正常流量：240/min 内全部放行（同一分钟窗内）
+        for i in 0..240 {
+            assert!(l.check("a", t0 + i / 10, 240), "第 {i} 条应放行");
+        }
+        // 第 241 条 → 触发降级（冷却至 t0+30+300）
+        assert!(!l.check("a", t0 + 30, 240));
+        assert!(l.is_degraded("a", t0 + 100));
+        assert!(!l.check("a", t0 + 200, 240), "降级期内继续拒");
+        assert!(l.is_degraded("a", t0 + 329));
+        assert!(!l.is_degraded("a", t0 + 331), "冷却期（300s）满自动恢复");
+        assert!(l.check("a", t0 + 331, 240), "恢复后放行并重开窗口");
+        // 其他节点不受牵连
+        assert!(l.check("b", t0 + 30, 240));
+        // cap = 0 不限
+        let mut l2 = InboundLimiter::default();
+        for i in 0..2000 {
+            assert!(l2.check("a", t0 + i, 0));
+        }
+    }
+
+    #[test]
+    fn backlog_drop_keeps_old_drops_new() {
+        // 未超限：原样
+        assert_eq!(backlog_drop(100, 200, 10_000), (100, 0));
+        // 积压 10_050：丢最新 50，保最旧 10_000
+        assert_eq!(backlog_drop(0, 10_050, 10_000), (50, 50));
+        // 游标超前（异常）：不丢弃
+        assert_eq!(backlog_drop(500, 100, 10_000), (500, 0));
     }
 
     #[test]
