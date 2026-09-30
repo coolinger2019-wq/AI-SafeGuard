@@ -284,6 +284,28 @@ impl AisafeApp {
                 caption("拉取间隔默认 6 小时（config.toml [intel].interval_secs）；保存后即时生效。                 组织 fed 源与 STIX 导入源永不自动封禁，仅标注。"),
             );
         });
+        // 订阅反馈（看得见名单规模与上次拉取结果，否则「只有 5 条封禁」很费解）
+        if let Some(st) = &self.cache.status {
+            let intel = &st.intel;
+            ui.horizontal(|ui| {
+                if intel.entries == 0 {
+                    chip(ui, "情报库为空（未订阅或尚未拉取）", text_dim());
+                } else {
+                    chip(ui, &format!("情报在库 {} 条", intel.entries), ok());
+                }
+                match intel.last_fetch_ts {
+                    None => ui.label(caption("启动后尚未拉取（周期任务启动 20s 后跑首轮）")),
+                    Some(_) if !intel.last_fetch_ok => {
+                        ui.label(caption("上次拉取失败（源不可达/离线；名单保持原样）"))
+                    }
+                    Some(ts) => ui.label(caption(format!(
+                        "上次拉取 {} 前：入库 {} 条 · 在库 {} · 自动封禁 {}",
+                        crate::explain::humanize_secs(aisafeguard_core::now_ts() - ts),
+                        intel.last_fetch_added, intel.last_fetch_active, intel.last_fetch_blocked,
+                    ))),
+                };
+            });
+        }
 
         ui.add_space(space::M);
         section(ui, "流量采样捕获（真实流量观测）");

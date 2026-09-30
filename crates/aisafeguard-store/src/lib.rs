@@ -1170,6 +1170,19 @@ impl Store {
         })
     }
 
+    /// 情报订阅反馈：当前在库（未过期）条目数。
+    pub fn intel_count(&self, now: i64) -> Result<i64> {
+        let conn = self.lock()?;
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM intel WHERE expires_ts > ?1",
+                params![now],
+                |r| r.get(0),
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(n)
+    }
+
     /// F300 误报回流扫描：since 以来有更新的本地误报标记。
     pub fn recent_fp(&self, since: i64) -> Result<Vec<(String, i64, i64)>> {
         let conn = self.lock()?;
@@ -1615,6 +1628,17 @@ mod tests {
         assert_eq!(m.suggestions_dismissed, 1);
         assert_eq!(m.corroborations_received, 2);
         assert_eq!(m.corroborations_hit, 1);
+
+        // 订阅反馈：在库条数（未过期口径；三条 expires = now+3d，+3d+1s 后全过期）
+        store
+            .upsert_intel(&[
+                ("feodo_c2".into(), "c2".into(), "203.0.113.7".into(), "high".into(), now, now + 3 * 86400),
+                ("feodo_c2".into(), "c2".into(), "203.0.113.8".into(), "high".into(), now, now + 3 * 86400),
+                ("local_honeypot".into(), "scan_source".into(), "203.0.113.9".into(), "local".into(), now, now + 3 * 86400),
+            ])
+            .unwrap();
+        assert_eq!(store.intel_count(now).unwrap(), 3);
+        assert_eq!(store.intel_count(now + 3 * 86400 + 1).unwrap(), 0);
 
         // 误报回流扫描
         store.insert_fp_feedback("9.9.9.9", now, "误报", None).unwrap();

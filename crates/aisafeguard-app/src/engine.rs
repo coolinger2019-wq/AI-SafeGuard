@@ -251,6 +251,19 @@ pub struct StatusReport {
     pub fingerprint_24h: FingerprintStats,
     /// F300 组织协同价值指标（组织建议采纳率与印证命中率，比率展示层算）
     pub org_metrics: aisafeguard_store::OrgMetrics,
+    /// 情报订阅状态（订阅反馈：在库条数 + 上次拉取结果）
+    pub intel: IntelStatus,
+}
+
+/// 情报订阅状态（GUI 设置页反馈；last_fetch None = 启动后从未拉取）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct IntelStatus {
+    pub entries: i64,
+    pub last_fetch_ts: Option<i64>,
+    pub last_fetch_ok: bool,
+    pub last_fetch_added: i64,
+    pub last_fetch_active: i64,
+    pub last_fetch_blocked: i64,
 }
 
 /// F500 组织面板数据（只读 + 现有隔离通路；不新增跨节点命令通道）。
@@ -404,6 +417,34 @@ impl EngineHandle {
                 .store
                 .org_metrics_since(since)
                 .unwrap_or_default(),
+            intel: {
+                let meta = self
+                    .store
+                    .get_meta("intel_last_fetch")
+                    .ok()
+                    .flatten()
+                    .and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok());
+                IntelStatus {
+                    entries: self.store.intel_count(now_ts()).unwrap_or(0),
+                    last_fetch_ts: meta.as_ref().and_then(|m| m["ts"].as_i64()),
+                    last_fetch_ok: meta
+                        .as_ref()
+                        .and_then(|m| m["ok"].as_bool())
+                        .unwrap_or(false),
+                    last_fetch_added: meta
+                        .as_ref()
+                        .and_then(|m| m["added"].as_i64())
+                        .unwrap_or(0),
+                    last_fetch_active: meta
+                        .as_ref()
+                        .and_then(|m| m["active"].as_i64())
+                        .unwrap_or(0),
+                    last_fetch_blocked: meta
+                        .as_ref()
+                        .and_then(|m| m["blocked"].as_i64())
+                        .unwrap_or(0),
+                }
+            },
         }
     }
 
@@ -2349,7 +2390,15 @@ pub async fn run_intel_refresh(
         }
         Err(e) => {
             tracing::warn!("情报拉取失败（离线或源不可达，跳过本轮）: {e}");
-            // 源不可达不产生空情报覆盖
+            // 源不可达不产生空情报覆盖；但落失败账（订阅反馈可见）
+            let _ = eng.store.set_meta(
+                "intel_last_fetch",
+                &serde_json::json!({
+                    "ts": now, "ok": false, "added": 0,
+                    "active": eng.store.intel_count(now).unwrap_or(0), "blocked": 0,
+                })
+                .to_string(),
+            );
             return;
         }
     }
@@ -2430,6 +2479,14 @@ pub async fn run_intel_refresh(
     }
 
     let active = eng.store.active_intel(now).map(|v| v.len()).unwrap_or(0);
+    let _ = eng.store.set_meta(
+        "intel_last_fetch",
+        &serde_json::json!({
+            "ts": now, "ok": true, "added": n as i64,
+            "active": active as i64, "blocked": blocked as i64,
+        })
+        .to_string(),
+    );
     eng.bus.publish(SecurityEvent::engine(
         "info",
         format!(
