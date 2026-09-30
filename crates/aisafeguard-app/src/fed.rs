@@ -193,6 +193,7 @@ pub fn fed_router(engine: Arc<EngineHandle>) -> Router {
         .route("/fed/events", post(fed_events))
         .route("/fed/intel", get(fed_intel_get).post(fed_intel_post))
         .route("/fed/org-feed", get(fed_org_feed))
+        .route("/fed/reports", post(fed_reports))
         .route("/fed/proposals", post(fed_proposals))
         .route("/fed/members", get(fed_members))
         .with_state(state)
@@ -544,6 +545,43 @@ async fn fed_events(
             });
             let feed_id = state.feed.lock().unwrap().push(msg);
             oc.id = feed_id; // 对外 id 统一用 feed 游标（agent 去重键）
+            // F300：印证驱动的组织建议（F300 产生源之一）。仅 ip/canary 维度有
+            // 可封禁目标；进各节点慢路径 pending，人工确认——印证只加置信不变
+            if matches!(oc.dim, Dim::Ip | Dim::Canary) {
+                // F300：该键已达组织推荐 → 推送时提高默认严重度（仍是建议）
+                let boosted = state
+                    .engine
+                    .corroboration
+                    .lock()
+                    .map(|c| {
+                        c.adoption.recommended(
+                            &format!("block:{}:any", oc.key),
+                            state.engine.config().fed.org_adoption_percent.clamp(1, 100),
+                            2,
+                        )
+                    })
+                    .unwrap_or(false);
+                let severity = if boosted { "critical" } else { oc.severity.as_str() };
+                let sugg = json!({
+                    "type": "org-suggestion",
+                    "suggestion": {
+                        "origin": "corroboration",
+                        "key": format!("block:{}:any", oc.key),
+                        "action": "block",
+                        "direction": "in",
+                        "protocol": "any",
+                        "remote_ip": oc.key,
+                        "local_port": serde_json::Value::Null,
+                        "severity": severity,
+                        "reason": format!(
+                            "组织印证（{} 个节点独立观测到 {}）",
+                            oc.nodes.len(),
+                            oc.key
+                        ),
+                    },
+                });
+                state.feed.lock().unwrap().push(sugg);
+            }
             emitted.push(oc);
         }
     }
@@ -731,7 +769,130 @@ async fn fed_proposals(
                 reason: valid.reason.clone(),
             });
             accepted += 1;
+            // F300：推送全组织（产生源之二：节点 AI 建议组织共享）——协调者本地
+            // 留一份 pending，其余节点经 org-feed 拉取后各自复验
+            let key = format!(
+                "block:{}:{}",
+                valid.remote_ip,
+                valid.local_port
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "any".into())
+            );
+            // F300：该键已达组织推荐 → 推送时提高默认严重度（仍是建议）
+            let boosted = state
+                .engine
+                .corroboration
+                .lock()
+                .map(|c| {
+                    c.adoption.recommended(
+                        &key,
+                        state.engine.config().fed.org_adoption_percent.clamp(1, 100),
+                        2,
+                    )
+                })
+                .unwrap_or(false);
+            let severity = if boosted { "critical" } else { valid.severity.as_str() };
+            let sugg = json!({
+                "type": "org-suggestion",
+                "suggestion": {
+                    "origin": env.node,
+                    "key": key,
+                    "action": "block",
+                    "direction": valid.direction,
+                    "protocol": valid.protocol,
+                    "remote_ip": valid.remote_ip,
+                    "local_port": valid.local_port,
+                    "severity": severity,
+                    "reason": valid.reason,
+                },
+            });
+            state.feed.lock().unwrap().push(sugg);
         }
+    }
+    Json(json!({ "ok": true, "accepted": accepted })).into_response()
+}
+
+// ---------- F300：建议生命周期回流（采纳/收弃/误报）与组织推荐升级 ----------
+
+#[derive(Deserialize)]
+struct FedReport {
+    key: String,
+    /// applied | promoted | dismissed | fp
+    outcome: String,
+    /// 提议方去重引用（建议 id / 误报 last_ts）
+    ref_id: i64,
+}
+
+async fn fed_reports(
+    State(state): State<FedState>,
+    peer: axum::Extension<FedPeer>,
+    body: Bytes,
+) -> Response {
+    let env = match gate_envelope(&state, &peer, &body) {
+        Ok(Gate::Duplicate(_)) => {
+            return Json(json!({ "ok": true, "duplicate": true })).into_response();
+        }
+        Ok(Gate::Fresh(e)) => e,
+        Err(resp) => return resp,
+    };
+    let payload: Vec<FedReport> = match serde_json::from_value(env.payload.clone()) {
+        Ok(v) => v,
+        Err(e) => {
+            state.stats.malformed.fetch_add(1, Ordering::Relaxed);
+            return err(format!("reports payload 非法: {e}"));
+        }
+    };
+    if payload.len() > 100 {
+        return err("单次回流最多 100 条");
+    }
+    append_audit_log(&state.engine.config().general.data_dir, &env, now_ts());
+    let threshold = state.engine.config().fed.org_adoption_percent.clamp(1, 100);
+    let mut accepted = 0usize;
+    // 触发的推荐升级先收集再广播（不持锁推 feed/总线）
+    let mut fires: Vec<(String, crate::corroboration::AdoptionStats)> = Vec::new();
+    let mut fp_flags: Vec<(String, u32)> = Vec::new();
+    if let Ok(mut c) = state.engine.corroboration.lock() {
+        for r in &payload {
+            if !c.adoption.record(&env.node, r.ref_id, &r.key, &r.outcome) {
+                continue;
+            }
+            accepted += 1;
+            // 误报标记 → fp-flag 广播（建议性质，接收方只提示不动作）
+            if r.outcome == "fp" {
+                let st = c.adoption.stats_of(&r.key);
+                fp_flags.push((r.key.clone(), st.fp));
+            }
+            if c.adoption.should_fire(&r.key, threshold, 2) {
+                c.adoption.mark_recommended(&r.key);
+                fires.push((r.key.clone(), c.adoption.stats_of(&r.key)));
+            }
+        }
+    }
+    for (key, count) in fp_flags {
+        let msg = json!({
+            "type": "fp-flag",
+            "fp": { "key": key, "count": count, "origin": env.node },
+        });
+        state.feed.lock().unwrap().push(msg);
+    }
+    for (key, st) in fires {
+        let msg = json!({
+            "type": "quorum",
+            "quorum": {
+                "key": key,
+                "applied": st.applied,
+                "dismissed": st.dismissed,
+                "threshold": threshold,
+            },
+        });
+        state.feed.lock().unwrap().push(msg);
+        state.engine.bus.publish(SecurityEvent::engine(
+            "info",
+            format!(
+                "组织推荐升级：「{key}」采纳 {} / 收弃 {}（采纳率 ≥ {threshold}%，零误报）——各节点复验默认严重度提高，仍为建议",
+                st.applied, st.dismissed
+            ),
+        ));
     }
     Json(json!({ "ok": true, "accepted": accepted })).into_response()
 }
@@ -1344,6 +1505,9 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
         // F320 并入：本节点时钟偏移（上轮 hello 算出）与告警状态
         let mut last_offset: Option<i64> = None;
         let mut offset_alerted = false;
+        // F300：生命周期回流游标（已上报的本地建议 id）与误报回流 ts 游标
+        let mut reported: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        let mut last_fp_ts: i64 = 0;
 
         loop {
             let interval = eng.config().fed.interval_secs.clamp(15, 3600);
@@ -1575,8 +1739,8 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
                 }
             }
 
-            // 2.5) 拉取组织印证事件并本地复验（F200）：有本节点活动记录才采纳提示，
-            //      无则静默留痕（建议性质，永不自动处置——复验失败丢弃 + 留痕）
+            // 2.5) 拉取组织消息（F200 印证 + F300 建议/误报/推荐）：逐条本地复验，
+            //      复验失败静默丢弃 + 留痕；一切消息只加置信，永不自动处置
             if let Ok(resp) = http_ref
                 .get(format!("{base}/fed/org-feed?node={}&after={}", cfg.node, feed_cursor))
                 .send()
@@ -1586,40 +1750,246 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
             {
                 feed_cursor = v["cursor"].as_u64().unwrap_or(feed_cursor);
                 let now = now_ts();
+                let since = now - 86_400;
                 for m in v["messages"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
                     let id = m["id"].as_u64().unwrap_or(0);
                     if !feed_seen.first_time("__feed__", id, now, 86_400) {
                         continue;
                     }
-                    let oc = &m["msg"]["corroboration"];
-                    let (Some(dim), Some(key)) = (oc["dim"].as_str(), oc["key"].as_str()) else {
-                        continue;
-                    };
-                    let since = now - 86_400;
-                    let hit = match dim {
-                        "fingerprint" => {
-                            eng.store.has_recent_observation("fp", key, since).unwrap_or(false)
-                        }
-                        "credential" => {
-                            eng.credentials.username_seen(key, since).unwrap_or(false)
-                        }
-                        // ip / canary 都按源 IP 查本节点活动
-                        _ => eng.store.has_recent_observation("ip", key, since).unwrap_or(false),
-                    };
-                    let nodes = oc["nodes"].as_array().map(|a| a.len()).unwrap_or(0);
-                    if hit {
-                        eng.bus.publish(SecurityEvent::engine(
-                            if oc["severity"].as_str() == Some("critical") {
-                                "warn"
+                    let msg = &m["msg"];
+                    match msg["type"].as_str().unwrap_or("") {
+                        "corroboration" => {
+                            let oc = &msg["corroboration"];
+                            let (Some(dim), Some(key)) = (oc["dim"].as_str(), oc["key"].as_str())
+                            else {
+                                continue;
+                            };
+                            let nodes = oc["nodes"].as_array().map(|a| a.len()).unwrap_or(0);
+                            let hit = match dim {
+                                "fingerprint" => eng
+                                    .store
+                                    .has_recent_observation("fp", key, since)
+                                    .unwrap_or(false),
+                                "credential" => eng
+                                    .credentials
+                                    .username_seen(key, since)
+                                    .unwrap_or(false),
+                                // ip / canary 都按源 IP 查本节点活动
+                                _ => eng
+                                    .store
+                                    .has_recent_observation("ip", key, since)
+                                    .unwrap_or(false),
+                            };
+                            let _ = eng.store.insert_org_event(
+                                now,
+                                "corroboration",
+                                dim,
+                                key,
+                                nodes as i64,
+                                if hit { "hit" } else { "miss" },
+                            );
+                            if hit {
+                                eng.bus.publish(SecurityEvent::engine(
+                                    if oc["severity"].as_str() == Some("critical") {
+                                        "warn"
+                                    } else {
+                                        "info"
+                                    },
+                                    format!(
+                                        "组织印证复验命中：{dim} 「{key}」组织内 {nodes} 节点独立观测，本节点亦有活动记录（仅加置信，处置仍走本地路径）"
+                                    ),
+                                ));
                             } else {
-                                "info"
-                            },
-                            format!(
-                                "组织印证复验命中：{dim} 「{key}」组织内 {nodes} 节点独立观测，本节点亦有活动记录（仅加置信，处置仍走本地路径）"
-                            ),
-                        ));
-                    } else {
-                        tracing::debug!("组织印证复验未命中（留痕）：{dim} {key}");
+                                tracing::debug!("组织印证复验未命中（留痕）：{dim} {key}");
+                            }
+                        }
+                        "org-suggestion" => {
+                            let sg = &msg["suggestion"];
+                            // 自己产的建议不回灌（组织广播全量到达）
+                            if sg["origin"].as_str() == Some(cfg.node.as_str()) {
+                                continue;
+                            }
+                            let (Some(key), Some(remote_ip)) =
+                                (sg["key"].as_str(), sg["remote_ip"].as_str())
+                            else {
+                                continue;
+                            };
+                            // 复验四关：IP 合法、非内网保护、本节点有观测、未被误报抑制
+                            let Ok(ip) = remote_ip.parse::<std::net::IpAddr>() else {
+                                continue;
+                            };
+                            if aisafeguard_core::is_protected_ip(ip) {
+                                tracing::debug!("组织建议复验拒绝（内网保护）：{key}");
+                                continue;
+                            }
+                            if !eng
+                                .store
+                                .has_recent_observation("ip", remote_ip, since)
+                                .unwrap_or(false)
+                            {
+                                tracing::debug!("组织建议复验未命中（本节点无该源活动）：{key}");
+                                continue;
+                            }
+                            if eng
+                                .store
+                                .active_fp(
+                                    remote_ip,
+                                    now,
+                                    eng.config().ai.fp_suppress_secs as i64,
+                                    None,
+                                )
+                                .unwrap_or(false)
+                            {
+                                tracing::debug!("组织建议复验拒绝（误报抑制中）：{key}");
+                                continue;
+                            }
+                            if eng
+                                .store
+                                .pending_proposal_exists(remote_ip, None)
+                                .unwrap_or(true)
+                            {
+                                continue;
+                            }
+                            let severity = sg["severity"].as_str().unwrap_or("high");
+                            let reason = sg["reason"].as_str().unwrap_or("组织建议");
+                            let direction = sg["direction"].as_str().unwrap_or("in");
+                            let protocol = sg["protocol"].as_str().unwrap_or("any");
+                            if let Ok(pid) = eng.store.insert_proposal(
+                                "fed:org",
+                                "block",
+                                severity,
+                                direction,
+                                protocol,
+                                remote_ip,
+                                None,
+                                None,
+                                reason,
+                                "组织建议（本地复验通过，待人工确认）",
+                            ) {
+                                let _ =
+                                    eng.store.insert_org_event(now, "suggestion", "", key, 0, "");
+                                eng.bus.publish(SecurityEvent::ProposalCreated {
+                                    ts: now,
+                                    proposal_id: pid,
+                                    severity: severity.to_string(),
+                                    reason: reason.to_string(),
+                                });
+                            }
+                        }
+                        "fp-flag" => {
+                            let f = &msg["fp"];
+                            if f["origin"].as_str() == Some(cfg.node.as_str()) {
+                                continue;
+                            }
+                            let Some(key) = f["key"].as_str() else {
+                                continue;
+                            };
+                            let count = f["count"].as_u64().unwrap_or(0);
+                            let _ = eng.store.insert_org_event(
+                                now,
+                                "fp-flag",
+                                "",
+                                key,
+                                count as i64,
+                                "",
+                            );
+                            eng.bus.publish(SecurityEvent::engine(
+                                "info",
+                                format!(
+                                    "组织误报提示：组织内 {count} 个节点把「{key}」标记为误报（建议性质，是否跟进由本节点决定）"
+                                ),
+                            ));
+                        }
+                        "quorum" => {
+                            let q = &msg["quorum"];
+                            let Some(key) = q["key"].as_str() else {
+                                continue;
+                            };
+                            let applied = q["applied"].as_u64().unwrap_or(0);
+                            let _ = eng.store.insert_org_event(
+                                now,
+                                "quorum",
+                                "",
+                                key,
+                                applied as i64,
+                                "",
+                            );
+                            eng.bus.publish(SecurityEvent::engine(
+                                "info",
+                                format!(
+                                    "组织推荐：「{key}」已获组织采纳升级（{applied} 节点采纳、零误报）——后续同类建议默认严重度提高，仍为建议"
+                                ),
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // 2.6) 生命周期回流（F300）：已定局的组织建议 + （share_fp 开启时）
+            //      本地误报标记。协调者按 (node, ref) 去重，重启重报无害。
+            {
+                let mut results: Vec<serde_json::Value> = Vec::new();
+                if let Ok(rows) = eng.store.list_proposals(None, 100) {
+                    for p in rows.iter().filter(|p| {
+                        p.status != "pending"
+                            && p.model.starts_with("fed:")
+                            && !reported.contains(&p.id)
+                    }) {
+                        let key = format!(
+                            "{}:{}:{}",
+                            p.action,
+                            p.remote_ip,
+                            p.local_port
+                                .map(|x| x.to_string())
+                                .unwrap_or_else(|| "any".into())
+                        );
+                        results.push(json!({
+                            "key": key, "outcome": p.status, "ref_id": p.id,
+                        }));
+                    }
+                }
+                if eng.config().fed.share_fp
+                    && let Ok(rows) = eng.store.recent_fp(last_fp_ts)
+                {
+                    for (value, _count, last_ts) in &rows {
+                        results.push(json!({
+                            "key": value, "outcome": "fp", "ref_id": last_ts,
+                        }));
+                    }
+                    if let Some(max) = rows.iter().map(|r| r.2).max() {
+                        last_fp_ts = last_fp_ts.max(max);
+                    }
+                }
+                results.truncate(100);
+                if !results.is_empty()
+                    && let Some((_, bytes)) = seal_envelope(
+                        &eng,
+                        &cfg.node,
+                        key_ref,
+                        &mut seq,
+                        fedproto::types::REPORTS,
+                        serde_json::Value::Array(results.clone()),
+                    )
+                {
+                    match post_envelope(http_ref, &base, "/fed/reports", &bytes).await {
+                        SendOutcome::Ok(_) => {
+                            for r in &results {
+                                if let Some(id) = r["ref_id"].as_i64() {
+                                    reported.insert(id);
+                                }
+                            }
+                            if reported.len() > 10_000 {
+                                reported.clear();
+                            }
+                        }
+                        SendOutcome::Rejected(code, body) => {
+                            material_stale |= code == 401;
+                            tracing::warn!("组织回流被拒: HTTP {code} {body}");
+                        }
+                        SendOutcome::Network(_) => {
+                            tracing::debug!("协调者失联，回流留待下轮");
+                        }
                     }
                 }
             }

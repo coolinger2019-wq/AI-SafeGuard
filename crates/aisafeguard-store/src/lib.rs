@@ -159,6 +159,31 @@ pub struct ValueMetrics {
     pub auto_blocks: i64,
 }
 
+/// F300 组织事件账本行（org_events）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrgEventRow {
+    pub id: i64,
+    pub ts: i64,
+    pub kind: String,
+    pub dim: String,
+    pub key: String,
+    pub nodes_count: i64,
+    pub detail: String,
+}
+
+/// F300 组织建议价值指标（口径：proposals 表 model LIKE 'fed:%' + org_events 印证账本）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OrgMetrics {
+    /// 收到的组织建议数（model LIKE 'fed:%'）
+    pub suggestions_received: i64,
+    /// 已采纳（applied；promoted 由展示层另行统计）
+    pub suggestions_applied: i64,
+    pub suggestions_dismissed: i64,
+    /// 收到的组织印证数 / 本地复验命中数（org_events kind='corroboration'）
+    pub corroborations_received: i64,
+    pub corroborations_hit: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StatsSummary {
     pub total: i64,
@@ -268,6 +293,19 @@ CREATE TABLE IF NOT EXISTS fed_members (
 
 -- 误报反馈（AI 深度介入 v1）：用户判定为误报的来源，自动封禁/自动应用跳过，
 -- 并作为上下文送回 AI。value = 来源 IP；TTL 语义由查询侧（last_ts + 抑制期）实现。
+-- F300 组织事件账本：本节点收到的组织消息（印证/建议/误报标记/组织推荐）留痕，
+-- 供 AI <org> 上下文段、/api/rules 组织提示与价值指标读取。key 语义随 kind：
+-- corroboration=攻击者键（ip/ja3/用户名），suggestion/fp-flag/block:{ip}:{port}。
+CREATE TABLE IF NOT EXISTS org_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          INTEGER NOT NULL,
+    kind        TEXT NOT NULL,
+    dim         TEXT NOT NULL DEFAULT '',
+    key         TEXT NOT NULL DEFAULT '',
+    nodes_count INTEGER NOT NULL DEFAULT 0,
+    detail      TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS fp_feedback (
     value      TEXT PRIMARY KEY,
     count      INTEGER NOT NULL DEFAULT 1,
@@ -1041,6 +1079,107 @@ impl Store {
         Ok(hit != 0)
     }
 
+    // ---------- F300 组织事件账本 ----------
+
+    pub fn insert_org_event(
+        &self,
+        ts: i64,
+        kind: &str,
+        dim: &str,
+        key: &str,
+        nodes_count: i64,
+        detail: &str,
+    ) -> Result<i64> {
+        self.lock()?
+            .execute(
+                "INSERT INTO org_events (ts, kind, dim, key, nodes_count, detail)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![ts, kind, dim, key, nodes_count, detail],
+            )
+            .map(|id| id as i64)
+            .map_err(|e| Error::Store(e.to_string()))
+    }
+
+    pub fn recent_org_events(&self, limit: u32) -> Result<Vec<OrgEventRow>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT id, ts, kind, dim, key, nodes_count, detail FROM org_events ORDER BY id DESC LIMIT ?1")
+            .map_err(|e| Error::Store(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![limit], |r| {
+                Ok(OrgEventRow {
+                    id: r.get(0)?,
+                    ts: r.get(1)?,
+                    kind: r.get(2)?,
+                    dim: r.get(3)?,
+                    key: r.get(4)?,
+                    nodes_count: r.get(5)?,
+                    detail: r.get(6)?,
+                })
+            })
+            .map_err(|e| Error::Store(e.to_string()))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(rows)
+    }
+
+    /// 某来源键的组织误报标记条数（/api/rules 组织提示用）。
+    pub fn org_flag_count(&self, key: &str) -> i64 {
+        self.lock()
+            .ok()
+            .and_then(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM org_events WHERE kind = 'fp-flag' AND key = ?1",
+                    params![key],
+                    |r| r.get::<_, i64>(0),
+                )
+                .ok()
+            })
+            .unwrap_or(0)
+    }
+
+    /// F300 价值指标：组织建议（proposals model LIKE 'fed:%'）+ 印证命中。
+    pub fn org_metrics_since(&self, since: i64) -> Result<OrgMetrics> {
+        let conn = self.lock()?;
+        let (received, applied, dismissed) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(status = 'applied'), 0), COALESCE(SUM(status = 'dismissed'), 0)
+                 FROM proposals WHERE model LIKE 'fed:%' AND created_ts >= ?1",
+                params![since],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        let (corr_received, corr_hit) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(detail = 'hit'), 0) FROM org_events
+                 WHERE kind = 'corroboration' AND ts >= ?1",
+                params![since],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(OrgMetrics {
+            suggestions_received: received,
+            suggestions_applied: applied,
+            suggestions_dismissed: dismissed,
+            corroborations_received: corr_received,
+            corroborations_hit: corr_hit,
+        })
+    }
+
+    /// F300 误报回流扫描：since 以来有更新的本地误报标记。
+    pub fn recent_fp(&self, since: i64) -> Result<Vec<(String, i64, i64)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT value, count, last_ts FROM fp_feedback WHERE last_ts >= ?1 ORDER BY last_ts")
+            .map_err(|e| Error::Store(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(|e| Error::Store(e.to_string()))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(rows)
+    }
+
     /// 误报标记：把该来源的全部 pending 建议一并收弃（用户已判定其为正常）。
     /// 返回收弃条数。
     pub fn dismiss_pending_proposals_for_ip(&self, remote_ip: &str) -> Result<i64> {
@@ -1372,6 +1511,50 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn org_events_ledger_and_metrics() {
+        let dir = std::env::temp_dir().join(format!("asg-org-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("t.db")).unwrap();
+        let now = aisafeguard_core::now_ts();
+
+        // 账本写入与读取（倒序）
+        store.insert_org_event(now, "corroboration", "ip", "203.0.113.7", 2, "hit").unwrap();
+        store.insert_org_event(now, "corroboration", "ip", "203.0.113.8", 2, "miss").unwrap();
+        store.insert_org_event(now, "fp-flag", "", "203.0.113.7", 3, "").unwrap();
+        let rows = store.recent_org_events(10).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].kind, "fp-flag");
+        assert_eq!(store.org_flag_count("203.0.113.7"), 1);
+        assert_eq!(store.org_flag_count("无"), 0);
+
+        // 组织建议指标（model LIKE 'fed:%'）
+        store
+            .insert_proposal("fed:org", "block", "high", "in", "any", "203.0.113.7", None, None, "r", "a")
+            .unwrap();
+        let pid2 = store
+            .insert_proposal("fed:org", "block", "high", "in", "any", "203.0.113.9", None, None, "r", "a")
+            .unwrap();
+        store
+            .insert_proposal("ai", "block", "high", "in", "any", "1.2.3.4", None, None, "r", "a")
+            .unwrap();
+        store.set_proposal_status(pid2, "dismissed", None).unwrap();
+        let m = store.org_metrics_since(now - 60).unwrap();
+        assert_eq!(m.suggestions_received, 2, "只统计 fed:* 建议");
+        assert_eq!(m.suggestions_dismissed, 1);
+        assert_eq!(m.corroborations_received, 2);
+        assert_eq!(m.corroborations_hit, 1);
+
+        // 误报回流扫描
+        store.insert_fp_feedback("9.9.9.9", now, "误报", None).unwrap();
+        let fps = store.recent_fp(now - 60).unwrap();
+        assert_eq!(fps.len(), 1);
+        assert_eq!(fps[0].0, "9.9.9.9");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn fed_seq_monotonic_and_meta() {

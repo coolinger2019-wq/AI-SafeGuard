@@ -69,7 +69,8 @@ fn source_label(origin: &str) -> &'static str {
         "engine" => "检测引擎",
         "ai" => "AI",
         "intel" => "情报",
-        "org" => "组织",
+        // F300：组织来源（组织建议应用的规则，含印证驱动与节点共享两条产生源）
+        "org" => "组织协同",
         _ => "未知",
     }
 }
@@ -79,7 +80,7 @@ fn ttl_state(row: &RuleRow) -> &'static str {
         None => "manual",
         Some(_) if row.promoted => "promoted",
         Some(_) => match row.origin.as_str() {
-            "ai" => "trial",
+            "ai" | "org" => "trial",
             "engine" | "intel" => "engine",
             _ => "manual",
         },
@@ -130,6 +131,11 @@ fn reason_summary(origin: &str, note: &str) -> String {
         // AI 规则 note = "AI 建议 #{id}: {reason}"
         "ai" => match cleaned.split_once(": ") {
             Some((_, reason)) if !reason.is_empty() => format!("AI 建议：{reason}"),
+            _ => fallback(&cleaned),
+        },
+        // F300 组织建议 note = "组织建议 #{id}: {reason}"
+        "org" => match cleaned.split_once(": ") {
+            Some((_, reason)) if !reason.is_empty() => format!("组织建议：{reason}"),
             _ => fallback(&cleaned),
         },
         "intel" => format!("情报命中：{cleaned}"),
@@ -237,6 +243,27 @@ mod tests {
         assert_eq!(reason_summary("manual", "手工拉黑"), "手工拉黑");
         // 未知来源默认文案
         assert_eq!(reason_summary("legacy", ""), "来源未知 / 长期");
+    }
+
+    #[test]
+    fn org_origin_labels_and_summary() {
+        use super::*;
+        // 来源文案（F300「组织」来源位）
+        assert_eq!(source_label("org"), "组织协同");
+        // TTL 语义：org 与 ai 同为灰度 trial，转正后 promoted
+        assert_eq!(
+            ttl_state(&row("org", "n", Some(aisafeguard_core::now_ts() + 600), false)),
+            "trial"
+        );
+        assert_eq!(
+            ttl_state(&row("org", "n", Some(aisafeguard_core::now_ts() + 600), true)),
+            "promoted"
+        );
+        // 原因摘要模板
+        assert_eq!(
+            reason_summary("org", "组织建议 #7: 组织内 2 节点独立观测"),
+            "组织建议：组织内 2 节点独立观测"
+        );
     }
 
     #[test]

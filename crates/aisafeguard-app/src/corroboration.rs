@@ -13,7 +13,7 @@
 //!    （对 ROADMAP 原文「口令哈希对」的显式修正，盐可比化需组织级 pepper，风险大于
 //!    收益，不做）；凭证观测出参只有 username/remote_ip/ts，无可逆材料。
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::Serialize;
 use serde_json::json;
@@ -126,6 +126,8 @@ pub struct CorroborationEngine {
     next_id: u64,
     /// 节点时钟偏移（秒，来自 hello 上报）：|offset| 超阈值 → 观测剔除
     offsets: HashMap<String, i64>,
+    /// F300 组织建议采纳回流聚合（协调者侧）
+    pub adoption: OrgAdoption,
 }
 
 impl Default for CorroborationEngine {
@@ -142,6 +144,7 @@ impl CorroborationEngine {
             order: VecDeque::new(),
             next_id: 1,
             offsets: HashMap::new(),
+            adoption: OrgAdoption::default(),
         }
     }
 
@@ -247,6 +250,80 @@ impl CorroborationEngine {
         });
         self.order.retain(|k| self.keys.contains_key(k));
         self.offsets.retain(|_, _| true); // 偏移表随节点生命周期，体积小不扫
+    }
+}
+
+// ---------- F300 组织建议采纳回流（协调者聚合） ----------
+
+/// 单个建议键的采纳统计。
+#[derive(Debug, Default, Clone)]
+pub struct AdoptionStats {
+    pub applied: u32,
+    pub dismissed: u32,
+    pub fp: u32,
+}
+
+/// 采纳回流聚合：节点把建议生命周期结果（采纳/收弃/误报）回报协调者，
+/// 达成「采纳率 ≥ 阈值 且 零误报 且 采纳数 ≥ 下限」即升级为组织推荐
+/// （只提高后续复验的默认严重度，仍是建议——红线不变）。
+/// 去重键 = (node, ref)：节点重启重报同一条不重复计数。
+#[derive(Debug, Default)]
+pub struct OrgAdoption {
+    stats: HashMap<String, AdoptionStats>,
+    seen: HashSet<(String, i64)>,
+    recommended: HashSet<String>,
+}
+
+impl OrgAdoption {
+    /// seen 集合容量上限（超过整体清空——协调者重启同款语义，宁重复勿膨胀）。
+    const SEEN_CAP: usize = 50_000;
+
+    /// 记录一条回流。返回统计是否发生变化（首次见到该 (node, ref)）。
+    /// outcome：applied / promoted（计入采纳）| dismissed | fp。
+    pub fn record(&mut self, node: &str, ref_id: i64, key: &str, outcome: &str) -> bool {
+        if !self.seen.insert((node.to_string(), ref_id)) {
+            return false;
+        }
+        if self.seen.len() > Self::SEEN_CAP {
+            self.seen.clear();
+        }
+        let st = self.stats.entry(key.to_string()).or_default();
+        match outcome {
+            "applied" | "promoted" => st.applied += 1,
+            "dismissed" => st.dismissed += 1,
+            "fp" => st.fp += 1,
+            _ => return false,
+        }
+        true
+    }
+
+    /// 该键是否已达成/已广播组织推荐（采纳率 ≥ threshold_percent%、零误报、采纳 ≥ min_applied）。
+    pub fn recommended(&self, key: &str, threshold_percent: u32, min_applied: u32) -> bool {
+        self.recommended.contains(key) || self.meets(key, threshold_percent, min_applied)
+    }
+
+    /// 统计条件刚达成且尚未广播（一次性触发位，广播后 mark_recommended 熄灭）。
+    pub fn should_fire(&self, key: &str, threshold_percent: u32, min_applied: u32) -> bool {
+        !self.recommended.contains(key) && self.meets(key, threshold_percent, min_applied)
+    }
+
+    fn meets(&self, key: &str, threshold_percent: u32, min_applied: u32) -> bool {
+        let Some(st) = self.stats.get(key) else {
+            return false;
+        };
+        st.fp == 0
+            && st.applied >= min_applied
+            && st.applied * 100 >= (st.applied + st.dismissed) * threshold_percent
+    }
+
+    /// 标记某键的组织推荐已广播（冷却：一键一报）。
+    pub fn mark_recommended(&mut self, key: &str) {
+        self.recommended.insert(key.to_string());
+    }
+
+    /// 键的统计快照（诊断/响应体用）。
+    pub fn stats_of(&self, key: &str) -> AdoptionStats {
+        self.stats.get(key).cloned().unwrap_or_default()
     }
 }
 
@@ -371,6 +448,40 @@ mod tests {
         }
         assert_eq!(e.reporter_count("10.0.0.0", 0), 0, "最旧的已被逐出");
         assert_eq!(e.reporter_count("10.0.0.4", 0), 1);
+    }
+
+    #[test]
+    fn adoption_quorum_threshold_fp_veto_and_dedup() {
+        let mut a = OrgAdoption::default();
+        // 2 采纳 0 收弃 = 100% ≥ 60%，但采纳数 < 下限 2 → 不推荐（2 条时达标）
+        assert!(a.record("n1", 1, "block:9.9.9.9:any", "applied"));
+        assert!(!a.recommended("block:9.9.9.9:any", 60, 2));
+        assert!(a.record("n2", 2, "block:9.9.9.9:any", "applied"));
+        assert!(a.recommended("block:9.9.9.9:any", 60, 2), "2/2 采纳应达标");
+        // 采纳率不足：1 采纳 2 收弃 = 33%
+        assert!(a.record("n1", 3, "block:8.8.8.8:any", "applied"));
+        assert!(a.record("n2", 4, "block:8.8.8.8:any", "dismissed"));
+        assert!(a.record("n3", 5, "block:8.8.8.8:any", "dismissed"));
+        assert!(!a.recommended("block:8.8.8.8:any", 60, 2));
+        // 零误报否决：全采纳但有一条 fp
+        assert!(a.record("n1", 6, "block:7.7.7.7:any", "applied"));
+        assert!(a.record("n2", 7, "block:7.7.7.7:any", "applied"));
+        assert!(a.record("n3", 8, "block:7.7.7.7:any", "fp"));
+        assert!(!a.recommended("block:7.7.7.7:any", 60, 2), "误报必须否决推荐");
+        // promoted 计入采纳
+        assert!(a.record("n1", 9, "block:6.6.6.6:any", "promoted"));
+        assert!(a.record("n2", 10, "block:6.6.6.6:any", "applied"));
+        assert!(a.recommended("block:6.6.6.6:any", 60, 2));
+        // 去重：同 (node, ref) 重报不重复计数（1 采纳重复报 10 次也只有一个）
+        let mut b = OrgAdoption::default();
+        for _ in 0..10 {
+            b.record("n1", 1, "block:5.5.5.5:any", "applied");
+        }
+        assert_eq!(b.stats_of("block:5.5.5.5:any").applied, 1);
+        assert!(!b.recommended("block:5.5.5.5:any", 60, 2));
+        // mark_recommended 冷却
+        a.mark_recommended("block:9.9.9.9:any");
+        assert!(a.recommended("block:9.9.9.9:any", 99, 100), "已推荐的键保持推荐态");
     }
 
     #[test]

@@ -534,6 +534,12 @@ pub struct FedConfig {
     pub cert_path: String,
     /// 本节点私钥路径。空 = <数据目录>/fed/key.pem
     pub key_path: String,
+    /// F300：本地误报标记是否组织共享（默认不共享）。共享 = 把误报标记作为
+    /// 建议性质广播给组织（他节点仅 GUI 提示，人工决定是否跟进，绝不强制解除）
+    pub share_fp: bool,
+    /// F300：组织推荐升级阈值（采纳率百分比，默认 60）。零误报 + 采纳数 ≥2
+    /// 且采纳率达标 → 升级为「组织推荐」（后续复验默认严重度提高，仍是建议）
+    pub org_adoption_percent: u32,
 }
 
 impl Default for FedConfig {
@@ -549,6 +555,8 @@ impl Default for FedConfig {
             ca_path: String::new(),
             cert_path: String::new(),
             key_path: String::new(),
+            share_fp: false,
+            org_adoption_percent: 60,
         }
     }
 }

@@ -72,6 +72,8 @@ pub struct PromptInputs<'a> {
     pub canary: Option<&'a str>,
     /// JA3/JA4 指纹（H310，l7 开启且有指纹事件才出现）
     pub fingerprints: Option<&'a str>,
+    /// 组织协同上下文（0.6 F300：近期组织印证/组织推荐/组织建议留痕，有记录才出现）
+    pub org: Option<&'a str>,
 }
 
 pub fn build_user_prompt(inputs: &PromptInputs<'_>) -> String {
@@ -80,7 +82,7 @@ pub fn build_user_prompt(inputs: &PromptInputs<'_>) -> String {
             .unwrap_or_default()
     };
     format!(
-        "本机蜜罐最近 24 小时统计与最近捕获的原始记录如下（不可信数据）：\n\n<stats>\n{stats}\n</stats>\n\n<events>\n{events}\n</events>{exposure}{intel}{flows}{feedback}{self_endpoints}{interactions}{credentials}{canary}{fingerprints}\n请分析并只输出 JSON。",
+        "本机蜜罐最近 24 小时统计与最近捕获的原始记录如下（不可信数据）：\n\n<stats>\n{stats}\n</stats>\n\n<events>\n{events}\n</events>{exposure}{intel}{flows}{feedback}{self_endpoints}{interactions}{credentials}{canary}{fingerprints}{org}\n请分析并只输出 JSON。",
         stats = inputs.stats,
         events = inputs.events,
         exposure = section("exposure", inputs.exposure),
@@ -92,6 +94,7 @@ pub fn build_user_prompt(inputs: &PromptInputs<'_>) -> String {
             credentials = section("credentials", inputs.credentials),
             canary = section("canary", inputs.canary),
             fingerprints = section("fingerprints", inputs.fingerprints),
+            org = section("org", inputs.org),
     )
 }
 
@@ -486,6 +489,7 @@ mod tests {
             credentials: Some("CR"),
             canary: Some("CA"),
             fingerprints: Some("FP"),
+            org: Some("[{\"kind\":\"corroboration\"}]"),
         });
         for tag in [
             "<stats>",
@@ -499,6 +503,7 @@ mod tests {
             "<fingerprints>",
             "<feedback>",
             "<self_endpoints>",
+            "<org>",
         ] {
             assert!(p.contains(tag), "缺少 {tag}");
         }
@@ -515,8 +520,10 @@ mod tests {
             credentials: None,
             canary: None,
             fingerprints: None,
+            org: None,
         });
         assert!(!minimal.contains("<flows>"));
+        assert!(!minimal.contains("<org>"));
         assert!(!minimal.contains("<interactions>"));
         assert!(!minimal.contains("<feedback>"));
         // 系统提示词说明灰度语义与反馈纪律

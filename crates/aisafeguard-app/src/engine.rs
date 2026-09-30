@@ -247,6 +247,8 @@ pub struct StatusReport {
     pub xdp: XdpStatus,
     /// JA3 指纹覆盖（0.5.0 H6：24h 内 Detection 事件携带指纹的占比，比率展示层算）
     pub fingerprint_24h: FingerprintStats,
+    /// F300 组织协同价值指标（组织建议采纳率与印证命中率，比率展示层算）
+    pub org_metrics: aisafeguard_store::OrgMetrics,
 }
 
 /// 规则子集引擎运行状态（加载留痕 + 命中计数，GUI/API 只读展示）。
@@ -371,6 +373,10 @@ impl EngineHandle {
                     with_fingerprint,
                 }
             },
+            org_metrics: self
+                .store
+                .org_metrics_since(since)
+                .unwrap_or_default(),
         }
     }
 
@@ -406,8 +412,18 @@ impl EngineHandle {
     }
 
     /// 规则展示模型（0.5.4 F1）：GUI 与 /api/rules 共用，可解释封禁。
+    /// F300：规则行附带组织误报提示（「组织内 N 节点标记误报」，建议性质，
+    /// 是否跟进由用户决定——绝不自动改本地抑制）。
     pub fn list_rules_explain(&self) -> Result<Vec<RuleExplain>> {
-        Ok(RuleExplain::of_list(self.store.list_rules()?))
+        let mut out = RuleExplain::of_list(self.store.list_rules()?);
+        for e in out.iter_mut() {
+            let n = self.store.org_flag_count(&e.remote_ip);
+            if n > 0 {
+                e.reason_summary =
+                    format!("{}（组织内 {} 节点标记误报）", e.reason_summary, n);
+            }
+        }
+        Ok(out)
     }
 
     pub fn list_proposals(&self, status: Option<&str>, limit: u32) -> Result<Vec<ProposalRow>> {
@@ -535,18 +551,29 @@ impl EngineHandle {
                     .map_err(|e| Error::Store(format!("建议中的 IP 非法: {e}")))?,
             )
         };
+        // F300「组织」来源位：组织建议（model fed:*）落 org 来源，可解释文案
+        // 与 TTL 语义在 explain.rs 单独成路；本地 AI 建议维持 ai 来源
+        let org = p.model.starts_with("fed:");
         let spec = BlockSpec {
             direction,
             protocol,
             remote_ip,
             local_port: p.local_port,
-            note: format!("AI 建议 #{}: {}", p.id, p.reason),
-            tag: "AI".into(),
+            note: if org {
+                format!("组织建议 #{}: {}", p.id, p.reason)
+            } else {
+                format!("AI 建议 #{}: {}", p.id, p.reason)
+            },
+            tag: if org { "ORG".into() } else { "AI".into() },
         };
-        // 灰度执行（AI 深度介入 v1）：AI 建议应用即短 TTL 试运行，到期自动解封；
+        // 灰度执行（AI 深度介入 v1）：建议应用即短 TTL 试运行，到期自动解封；
         // AI 明确给了 ttl_secs 用它的，否则用配置的默认灰度时长。人工"转正"才延长。
         let trial_ttl = p.ttl_secs.unwrap_or(self.config().ai.trial_ttl_secs as i64);
-        let row = self.add_block_ex(&spec, "ai", Some(now_ts() + trial_ttl))?;
+        let row = self.add_block_ex(
+            &spec,
+            if org { "org" } else { "ai" },
+            Some(now_ts() + trial_ttl),
+        )?;
         self.store
             .set_proposal_status(id, "applied", Some(row.id))?;
         self.bus.publish(SecurityEvent::ProposalApplied {
@@ -1832,6 +1859,24 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
         .map(|v| serde_json::to_string(&v).unwrap_or_default());
     // 本产品自身 API/服务攻击面
     let self_endpoints_json = self_surface_json(eng);
+    // F300 组织上下文：近期组织印证（含复验结果）/组织推荐——有记录才出现。
+    // 只含组织聚合结论与键值，无任何载荷细节与凭证材料
+    let org_json: Option<String> = {
+        let arr: Vec<serde_json::Value> = eng
+            .store
+            .recent_org_events(20)
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| matches!(r.kind.as_str(), "corroboration" | "quorum" | "suggestion"))
+            .map(|r| {
+                serde_json::json!({
+                    "ts": r.ts, "kind": r.kind, "dim": r.dim,
+                    "key": r.key, "nodes": r.nodes_count, "detail": r.detail,
+                })
+            })
+            .collect();
+        (!arr.is_empty()).then(|| serde_json::to_string(&arr).unwrap_or_default())
+    };
 
     let client = AiClient::new(&cfg.ai.base_url, &cfg.ai.model, &key);
     let result = client
@@ -1849,6 +1894,7 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                 credentials: credentials_json.as_deref(),
                 canary: canary_json.as_deref(),
                 fingerprints: fingerprints_json.as_deref(),
+                org: org_json.as_deref(),
             }),
         )
         .await;

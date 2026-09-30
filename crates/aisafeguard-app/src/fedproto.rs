@@ -29,6 +29,8 @@ pub mod types {
     pub const HELLO: &str = "hello";
     pub const EVENTS: &str = "events";
     pub const PROPOSALS: &str = "proposals";
+    /// F300 组织建议生命周期回流（采纳/收弃/误报标记）
+    pub const REPORTS: &str = "reports";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
