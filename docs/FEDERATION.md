@@ -132,6 +132,11 @@ aisafeguard stix-import stix包.json
 - **导入**：验签失败/缺签名/超 5MB/超条数一律拒收；IOC 进情报表
   （`stix:<节点>` 源），**默认只告警**——命中来源在事件流打 `ioc-hit` 标签
   （约 1 分钟内生效），防火墙无自动动作；`valid_until` 到期自动失效（缺省 7 天）。
+- **CrowdSec 源许可核对（F720）**：CrowdSec **软件**为 MIT 开源；但其 **CTI 情报数据**有独立
+  使用条款（免费档需注册 API key、有限流，禁止转售/再分发原始名单）。接入前核对
+  https://docs.crowdsec.net 的 CTI 使用条款；本产品的接入方式 = 拉取 security-blocklist
+  后本地消费（不二次分发），key 走环境变量/凭据管理器不入配置。
+
 - **外部验证**：`cargo test -p aisafeguard-app write_sample_for_external_validation
   -- --nocapture` 生成 `target/stix-sample.json`，然后
   `python -c "import json,stix2; stix2.parse(json.dumps(json.load(open('target/stix-sample.json'))['bundle']))"`

@@ -302,9 +302,14 @@ impl AisafeApp {
                         ui.label(caption("上次拉取失败（源不可达/离线；名单保持原样）"))
                     }
                     Some(ts) => ui.label(caption(format!(
-                        "上次拉取 {} 前：入库 {} 条 · 在库 {} · 自动封禁 {}",
+                        "上次拉取 {} 前：入库 {} 条 · 在库 {} · 自动封禁 {}{}",
                         crate::explain::humanize_secs(aisafeguard_core::now_ts() - ts),
                         intel.last_fetch_added, intel.last_fetch_active, intel.last_fetch_blocked,
+                        if intel.last_fetch_dropped > 0 {
+                            format!(" · 丢弃 {}（网段/截断，F770 决策依据）", intel.last_fetch_dropped)
+                        } else {
+                            String::new()
+                        },
                     ))),
                 };
             });

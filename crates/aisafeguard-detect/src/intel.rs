@@ -35,9 +35,87 @@ pub async fn fetch_blocklist(http: &reqwest::Client, url: &str) -> Result<Vec<St
     Ok(parse_feodo_ipblocklist(&text))
 }
 
+/// F720 CrowdSec security-blocklist 解析结果：
+/// singles = 单 IP（可入库）；ranges = CIDR 网段（一期丢弃，计数是 F770 决策依据）；
+/// malformed = 既不是 IP 也不是网段的行（并入丢弃口径）。
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct ParsedBlocklist {
+    pub singles: Vec<String>,
+    pub ranges: Vec<String>,
+    pub malformed: usize,
+}
+
+/// 解析 CrowdSec security-blocklist 文本：每行一个 IP 或 CIDR 网段，
+/// `#` 注释与空行跳过（官方格式）。
+pub fn parse_crowdsec_blocklist(text: &str) -> ParsedBlocklist {
+    let mut out = ParsedBlocklist::default();
+    for line in text.lines() {
+        let l = line.trim();
+        if l.is_empty() || l.starts_with('#') {
+            continue;
+        }
+        if l.contains('/') {
+            // 网段：格式合法才计入 ranges（否则按畸形丢弃口径）
+            let ok = l
+                .split_once('/')
+                .and_then(|(ip, prefix)| {
+                    ip.parse::<std::net::IpAddr>().ok().zip(prefix.parse::<u8>().ok())
+                })
+                .is_some();
+            if ok {
+                out.ranges.push(l.to_string());
+            } else {
+                out.malformed += 1;
+            }
+            continue;
+        }
+        match l.parse::<std::net::IpAddr>() {
+            Ok(_) => out.singles.push(l.to_string()),
+            Err(_) => out.malformed += 1,
+        }
+    }
+    out
+}
+
+/// F720 拉取 CrowdSec security-blocklist（需 API key：请求头 `Authorization: Key-<key>`）。
+pub async fn fetch_crowdsec_blocklist(
+    http: &reqwest::Client,
+    url: &str,
+    key: &str,
+) -> Result<ParsedBlocklist> {
+    let resp = http
+        .get(url)
+        .timeout(Duration::from_secs(90))
+        .header("Authorization", format!("Key-{key}"))
+        .send()
+        .await
+        .map_err(|e| Error::Ai(format!("CrowdSec 拉取失败: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(Error::Ai(format!(
+            "CrowdSec 源返回 HTTP {}（key 无效/过期或限流）",
+            resp.status()
+        )));
+    }
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| Error::Ai(format!("CrowdSec 响应读取失败: {e}")))?;
+    Ok(parse_crowdsec_blocklist(&text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F720 解析器：单 IP / 网段分桶、注释空行跳过、畸形行计数。
+    #[test]
+    fn parse_crowdsec_splits_singles_and_ranges() {
+        let text = "# Format: ip\n# Updated: 2026-10-01\n\n203.0.113.7\n198.51.100.0/24\nnot-an-ip\n2001:db8::1\n300.1.2.3/24\n";
+        let p = parse_crowdsec_blocklist(text);
+        assert_eq!(p.singles, vec!["203.0.113.7", "2001:db8::1"]);
+        assert_eq!(p.ranges, vec!["198.51.100.0/24"]);
+        assert_eq!(p.malformed, 2, "裸畸形行 + 非法网段都算丢弃口径");
+    }
 
     #[test]
     fn parse_feodo_skips_comments_and_extracts_ips() {

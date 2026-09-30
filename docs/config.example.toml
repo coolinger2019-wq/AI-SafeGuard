@@ -232,6 +232,23 @@ confidence = "high"
 kind = "c2"
 auto_block = true
 ttl_secs = 259200
+# 拉取格式：feodo（纯文本）| crowdsec（CTI security-blocklist）
+format = "feodo"
+# 单轮入库上限（防名单爆炸；超出截断并计入丢弃）
+max_entries = 1000
+
+# CrowdSec 社区名单示例（F720，自动封禁语义与官方 bouncer 一致；需免费 API key）：
+# 密钥不入配置——环境变量 AISAFEGUARD_CROWDSEC_KEY 或凭据管理器 crowdsec-key；
+# 缺 key 时该源跳过并明确告警（不做静默降级）。网段条目一期丢弃并计数。
+# [[intel.sources]]
+# name = "crowdsec"
+# url = "https://cti.api.crowdsec.net/v2/security-blocklist"
+# confidence = "high"
+# kind = "c2"
+# auto_block = true
+# ttl_secs = 86400
+# format = "crowdsec"
+# max_entries = 1000
 
 # 第二个源示例（仅标注不自动封）：
 # [[intel.sources]]
@@ -241,6 +258,8 @@ ttl_secs = 259200
 # kind = "scan_source"
 # auto_block = false
 # ttl_secs = 604800
+# format = "feodo"
+# max_entries = 1000
 
 [fed]
 # 组织协同（默认关）：多节点经 mTLS 共享观测与建议。

@@ -497,6 +497,7 @@ pub struct IntelConfig {
 /// 情报源（F710）：自动封禁 = auto_block && confidence=="high" 双条件；
 /// 内网保护/TTL/审计是全局保险，任何源都不能放宽。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct IntelSource {
     /// 源标识（intel 表 source 列，如 feodo_c2 / crowdsec；限字母数字下划线）
     pub name: String,
@@ -508,6 +509,26 @@ pub struct IntelSource {
     /// 自动封禁显式许可
     pub auto_block: bool,
     pub ttl_secs: u64,
+    /// 拉取格式（F720）：feodo（纯文本每行一个 IP）| crowdsec（CTI security-blocklist，
+    /// 需 API key：环境变量 AISAFEGUARD_CROWDSEC_KEY 或凭据管理器 crowdsec-key）
+    pub format: String,
+    /// 单轮入库上限（F720 防名单爆炸）：超出截断 + 告警计数
+    pub max_entries: u64,
+}
+
+impl Default for IntelSource {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            url: String::new(),
+            confidence: "high".into(),
+            kind: "c2".into(),
+            auto_block: false,
+            ttl_secs: 86_400,
+            format: "feodo".into(),
+            max_entries: 1000,
+        }
+    }
 }
 
 impl IntelSource {
@@ -521,6 +542,8 @@ impl IntelSource {
             && matches!(self.confidence.as_str(), "high" | "fed" | "local")
             && !self.kind.is_empty()
             && self.ttl_secs > 0
+            && matches!(self.format.as_str(), "feodo" | "crowdsec")
+            && (1..=50_000).contains(&self.max_entries)
     }
 }
 
@@ -542,6 +565,8 @@ impl Default for IntelConfig {
                 kind: "c2".into(),
                 auto_block: true,
                 ttl_secs: 3 * 86400,
+                format: "feodo".into(),
+                max_entries: 1000,
             }],
         }
     }
@@ -1004,6 +1029,8 @@ confidence = "high"
 kind = "c2"
 auto_block = true
 ttl_secs = 259200
+format = "feodo"
+max_entries = 1000
 [[intel.sources]]
 name = "mirror"
 url = "https://mirror.example.com/list.txt"

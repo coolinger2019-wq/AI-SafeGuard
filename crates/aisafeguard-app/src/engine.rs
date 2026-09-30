@@ -264,6 +264,9 @@ pub struct IntelStatus {
     pub last_fetch_added: i64,
     pub last_fetch_active: i64,
     pub last_fetch_blocked: i64,
+    /// 网段丢弃 + 超上限截断（F770 决策依据）
+    #[serde(default)]
+    pub last_fetch_dropped: i64,
 }
 
 /// F500 组织面板数据（只读 + 现有隔离通路；不新增跨节点命令通道）。
@@ -442,6 +445,10 @@ impl EngineHandle {
                     last_fetch_blocked: meta
                         .as_ref()
                         .and_then(|m| m["blocked"].as_i64())
+                        .unwrap_or(0),
+                    last_fetch_dropped: meta
+                        .as_ref()
+                        .and_then(|m| m["dropped"].as_i64())
                         .unwrap_or(0),
                 }
             },
@@ -2377,13 +2384,50 @@ pub async fn run_intel_refresh(
     let mut total_added = 0usize;
     let mut total_blocked = 0usize;
     let mut failures = 0usize;
+    let mut dropped = 0usize; // 网段（F770 决策依据）+ 超上限截断
     for source in &cfg.sources {
         if !source.valid() {
-            tracing::warn!("情报源 {} 配置非法（name/url/confidence/kind/ttl 检查），跳过", source.name);
+            tracing::warn!("情报源 {} 配置非法（name/url/confidence/kind/ttl/format 检查），跳过", source.name);
             failures += 1;
             continue;
         }
-        match aisafeguard_detect::intel::fetch_blocklist(&http, &source.url).await {
+        // F720：按 format 分发拉取器；crowdsec 需 key（环境变量最高优先，其次凭据管理器）——
+        // 缺 key = 跳过该源 + 明确告警，不做静默降级（对齐 webhook 签名先例）
+        let fetched = match source.format.as_str() {
+            "crowdsec" => {
+                let Some(key) = crowdsec_key() else {
+                    failures += 1;
+                    tracing::warn!(
+                        "情报源 {} 需要 CrowdSec API key（环境变量 AISAFEGUARD_CROWDSEC_KEY 或凭据管理器 crowdsec-key）：跳过该源，不做静默降级",
+                        source.name
+                    );
+                    continue;
+                };
+                aisafeguard_detect::intel::fetch_crowdsec_blocklist(&http, &source.url, &key)
+                    .await
+                    .map(|p| {
+                        dropped += p.ranges.len() + p.malformed;
+                        p.singles
+                    })
+            }
+            _ => aisafeguard_detect::intel::fetch_blocklist(&http, &source.url)
+                .await
+                .map(|ips| {
+                    if ips.len() as u64 > source.max_entries {
+                        tracing::warn!(
+                            "情报源 {} 单轮 {} 条超上限 {}：截断",
+                            source.name,
+                            ips.len(),
+                            source.max_entries
+                        );
+                        dropped += (ips.len() as u64 - source.max_entries) as usize;
+                    }
+                    ips.into_iter()
+                        .take(source.max_entries as usize)
+                        .collect()
+                }),
+        };
+        match fetched {
             Ok(ips) => {
                 let (added, blocked) = apply_intel_source(
                     &eng.store,
@@ -2411,6 +2455,8 @@ pub async fn run_intel_refresh(
         kind: "scan_source".into(),
         auto_block: false,
         ttl_secs: 7 * 86400,
+        format: "feodo".into(),
+        max_entries: 2000,
     };
     let mut seen = std::collections::HashSet::new();
     let hits: Vec<String> = eng
@@ -2436,16 +2482,28 @@ pub async fn run_intel_refresh(
         &serde_json::json!({
             "ts": now, "ok": failures == 0, "added": total_added as i64,
             "active": active as i64, "blocked": total_blocked as i64,
+            "dropped": dropped as i64,
         })
         .to_string(),
     );
     eng.bus.publish(SecurityEvent::engine(
         "info",
         format!(
-            "威胁情报更新：入库 {total_added} 条（{} 个源，失败 {failures}），在库 {active}，自动封禁 {total_blocked}",
+            "威胁情报更新：入库 {total_added} 条（{} 个源，失败 {failures}），在库 {active}，自动封禁 {total_blocked}，丢弃 {dropped}（网段/截断）",
             cfg.sources.len()
         ),
     ));
+}
+
+/// F720：CrowdSec key 双通道——环境变量 `AISAFEGUARD_CROWDSEC_KEY` 最高优先
+/// （CI/无头/服务注入），其次凭据管理器（crowdsec-key）。config 无秘密原则。
+fn crowdsec_key() -> Option<String> {
+    if let Ok(v) = std::env::var("AISAFEGUARD_CROWDSEC_KEY")
+        && !v.is_empty()
+    {
+        return Some(v);
+    }
+    aisafeguard_core::secrets::crowdsec_key()
 }
 
 /// F710 单源入库 + 自动封禁。门控 = 源级 auto_block && confidence=="high"
@@ -2645,6 +2703,8 @@ mod tests {
             kind: "c2".into(),
             auto_block: true,
             ttl_secs: 259_200,
+            format: "feodo".into(),
+            max_entries: 1000,
         };
         let pub_src = aisafeguard_core::config::IntelSource {
             name: "mirror".into(),
@@ -2653,6 +2713,8 @@ mod tests {
             kind: "scan_source".into(),
             auto_block: false,
             ttl_secs: 604_800,
+            format: "feodo".into(),
+            max_entries: 1000,
         };
         let (added1, blocked1) = apply_intel_source(
             &f.store,
