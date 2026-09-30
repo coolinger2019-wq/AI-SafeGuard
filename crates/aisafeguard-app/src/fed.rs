@@ -13,7 +13,7 @@
 //! 防投毒基线不变：远端情报 confidence="fed" 永不自动封禁；远端建议过本地 allowlist
 //! 复验后仅进慢路径；内网保护前置拒收。
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -31,10 +31,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
+use crate::corroboration::{Dim, Observation, OrgCorroboration};
 use crate::engine::EngineHandle;
-use crate::fedproto::{
-    self, DedupSet, Envelope,
-};
+use crate::fedproto::{self, DedupSet, Envelope};
 use aisafeguard_core::event::SecurityEvent;
 use aisafeguard_core::now_ts;
 use aisafeguard_store::IntelRow;
@@ -104,6 +103,78 @@ pub struct FedState {
     engine: Arc<EngineHandle>,
     gate: Arc<Mutex<GateState>>,
     stats: Arc<FedStats>,
+    /// org-feed 广播环（F200）：印证事件等组织消息，节点经 GET /fed/org-feed 拉取。
+    /// 有界内存环——重启清零，节点按消息 id 幂等去重。
+    feed: Arc<Mutex<OrgFeed>>,
+}
+
+/// 组织消息广播环：单调 id + 有界队列（旧消息被挤出后，落后节点的 after 游标
+/// 自然取到空段，等下一轮印证即可——观测在节点本地，不丢）。
+#[derive(Default)]
+struct OrgFeed {
+    next_id: u64,
+    items: VecDeque<(u64, serde_json::Value)>,
+}
+
+impl OrgFeed {
+    const CAP: usize = 1000;
+
+    fn push(&mut self, v: serde_json::Value) -> u64 {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.items.push_back((id, v));
+        while self.items.len() > Self::CAP {
+            self.items.pop_front();
+        }
+        id
+    }
+
+    fn since(&self, after: u64) -> (Vec<(u64, serde_json::Value)>, u64) {
+        (
+            self.items.iter().filter(|(id, _)| *id > after).cloned().collect(),
+            self.next_id,
+        )
+    }
+}
+
+// ---------- 有界审计日志（拍板决议②：协调者留滚动原始消息，不做事件库） ----------
+
+/// 原始签名信封追加进 <data_dir>/fed/audit.jsonl（可离线验签）；超 10MB 轮转
+/// 为 audit.jsonl.1（只保一代）。写失败只记日志——审计是外发副本，不阻塞主流程。
+fn append_audit_log(data_dir: &Path, env: &Envelope, now: i64) {
+    let dir = fed_dir(data_dir);
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join("audit.jsonl");
+    if let Ok(meta) = std::fs::metadata(&path)
+        && meta.len() > 10 * 1024 * 1024
+    {
+        let _ = std::fs::rename(&path, dir.join("audit.jsonl.1"));
+    }
+    let line = json!({
+        "received_ts": now,
+        "node": env.node,
+        "seq": env.seq,
+        "type": env.ty,
+        "envelope": env,
+    });
+    use std::io::Write as _;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// 审计日志尾部 N 行（cmd_audit 用）。
+fn audit_log_tail(data_dir: &Path, n: usize) -> Vec<serde_json::Value> {
+    let Ok(raw) = std::fs::read_to_string(fed_dir(data_dir).join("audit.jsonl")) else {
+        return Vec::new();
+    };
+    raw.lines()
+        .rev()
+        .take(n)
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
 }
 
 /// /fed 路由面。只挂在 mTLS 监听上：rustls 已验证客户端证书链到组织 CA，
@@ -115,11 +186,13 @@ pub fn fed_router(engine: Arc<EngineHandle>) -> Router {
         engine,
         gate: Arc::new(Mutex::new(GateState::default())),
         stats: Arc::new(FedStats::default()),
+        feed: Arc::new(Mutex::new(OrgFeed::default())),
     };
     Router::new()
         .route("/fed/hello", post(fed_hello))
         .route("/fed/events", post(fed_events))
         .route("/fed/intel", get(fed_intel_get).post(fed_intel_post))
+        .route("/fed/org-feed", get(fed_org_feed))
         .route("/fed/proposals", post(fed_proposals))
         .route("/fed/members", get(fed_members))
         .with_state(state)
@@ -297,6 +370,16 @@ async fn fed_hello(
         Ok(Gate::Duplicate(e)) | Ok(Gate::Fresh(e)) => e,
         Err(resp) => return resp,
     };
+    // 节点时钟偏移上报（F320 并入）：agent 用上一轮 hello 响应的 server_ts 算出偏移，
+    // 随本轮 hello 带回；超阈值 → 该节点观测在印证计算中被剔除（宁少勿错）
+    if let Some(offset) = env.payload["offset_secs"].as_i64() {
+        state
+            .engine
+            .corroboration
+            .lock()
+            .map(|mut c| c.set_offset(&env.node, offset))
+            .ok();
+    }
     let members = state.engine.store.list_fed_members().unwrap_or_default().len();
     Json(json!({
         "ok": true,
@@ -312,14 +395,79 @@ async fn fed_hello(
 
 // ---------- agent → 协调者：事件上报 ----------
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct FedEvent {
     ts: i64,
     kind: String,
-    listener: String,
     remote_ip: String,
-    remote_port: u16,
-    summary: String,
+    /// JA3 md5（detect 事件才有；F200 指纹维度输入）
+    #[serde(default)]
+    tls_fp: String,
+    /// JA4（同上）
+    #[serde(default)]
+    tls_ja4: String,
+    // listener/remote_port/summary 不参与印证——完整载荷已随原始信封进审计日志
+}
+
+#[derive(Clone, Deserialize)]
+struct FedCred {
+    ts: i64,
+    username: String,
+}
+
+#[derive(Deserialize)]
+struct FedEventsPayload {
+    events: Vec<FedEvent>,
+    /// 凭证观测（F200 凭证维度，v1 用户名比对；无可逆材料——见 corroboration.rs 头注）
+    #[serde(default)]
+    credentials: Vec<FedCred>,
+}
+
+/// 观测投影：节点事件 → 印证窗口的原始观测（只取节点/时间/维度/键四元组）。
+fn observations_of(node: &str, p: &FedEventsPayload) -> Vec<Observation> {
+    let mut obs = Vec::new();
+    for ev in &p.events {
+        obs.push(Observation {
+            node: node.to_string(),
+            ts: ev.ts,
+            dim: Dim::Ip,
+            key: ev.remote_ip.clone(),
+        });
+        if !ev.tls_fp.is_empty() {
+            obs.push(Observation {
+                node: node.to_string(),
+                ts: ev.ts,
+                dim: Dim::Fingerprint,
+                key: ev.tls_fp.clone(),
+            });
+        }
+        if !ev.tls_ja4.is_empty() {
+            obs.push(Observation {
+                node: node.to_string(),
+                ts: ev.ts,
+                dim: Dim::Fingerprint,
+                key: ev.tls_ja4.clone(),
+            });
+        }
+        if ev.kind == "canary" {
+            // 蜜饵水印触发（0.5.10 canary 事件）：横向移动线索维度
+            obs.push(Observation {
+                node: node.to_string(),
+                ts: ev.ts,
+                dim: Dim::Canary,
+                key: ev.remote_ip.clone(),
+            });
+        }
+    }
+    for c in &p.credentials {
+        obs.push(Observation {
+            node: node.to_string(),
+            ts: c.ts,
+            dim: Dim::Credential,
+            key: c.username.clone(),
+        });
+    }
+    obs
 }
 
 async fn fed_events(
@@ -334,60 +482,120 @@ async fn fed_events(
         Ok(Gate::Fresh(e)) => e,
         Err(resp) => return resp,
     };
-    let events: Vec<FedEvent> = match serde_json::from_value(env.payload.clone()) {
+    let payload: FedEventsPayload = match serde_json::from_value(env.payload.clone()) {
         Ok(v) => v,
         Err(e) => {
             state.stats.malformed.fetch_add(1, Ordering::Relaxed);
             return err(format!("events payload 非法: {e}"));
         }
     };
-    if events.len() > 100 {
+    if payload.events.len() > 100 {
         return err("单次上报最多 100 条事件");
     }
-    let now = now_ts();
-    let mut stored = 0usize;
-    let mut archived = 0usize;
-    for ev in &events {
-        // 补传窗（0.6 拍板）：24h 内的收下；更旧的只计数归档不落库（本地哈希链
-        // 是事件完整性的真源，外发本来就是副本）；未来 1h 内容忍时钟漂移
-        if now - ev.ts > fedproto::REPLAY_WINDOW_SECS {
-            archived += 1;
-            continue;
-        }
-        if ev.ts - now > 3600 {
-            continue;
-        }
-        let se = if ev.kind == "honeypot_hit" {
-            SecurityEvent::HoneypotHit {
-                ts: ev.ts,
-                listener: format!("fed:{}:{}", env.node, ev.listener),
-                kind: ev.kind.clone(),
-                port: 0,
-                remote_ip: ev.remote_ip.clone(),
-                remote_port: ev.remote_port,
-                summary: ev.summary.clone(),
-                payload: String::new(),
-                http_hint: None,
-                interaction: None,
-            }
-        } else {
-            SecurityEvent::Engine {
-                ts: ev.ts,
-                level: "fed".into(),
-                message: format!("[{}] {}", env.node, ev.summary),
-            }
-        };
-        if state.engine.store.insert_event(&se).is_ok() {
-            stored += 1;
-        }
+    if payload.credentials.len() > 100 {
+        return err("单次上报最多 100 条凭证观测");
     }
+    let now = now_ts();
+    let mut archived = 0usize;
+    // 补传窗过滤在投影前做（>24h 的旧事件不进印证，只计数；本地哈希链是归档真源）
+    let fresh: Vec<FedEvent> = payload
+        .events
+        .iter()
+        .filter(|ev| {
+            if now - ev.ts > fedproto::REPLAY_WINDOW_SECS {
+                archived += 1;
+                return false;
+            }
+            ev.ts - now <= 3600
+        })
+        .cloned()
+        .collect();
+    let filtered = FedEventsPayload {
+        events: fresh,
+        credentials: payload
+            .credentials
+            .iter()
+            .filter(|c| now - c.ts <= fedproto::REPLAY_WINDOW_SECS && c.ts - now <= 3600)
+            .cloned()
+            .collect(),
+    };
     if archived > 0 {
         state
             .stats
             .archived_events
             .fetch_add(archived as u64, Ordering::Relaxed);
     }
-    Json(json!({ "ok": true, "stored": stored, "archived": archived })).into_response()
+    // 拍板决议②：协调者不再把节点事件写进自己的 events 表——原始签名信封进
+    // 有界审计日志（可离线验签），观测进内存印证窗口
+    append_audit_log(&state.engine.config().general.data_dir, &env, now);
+    // 观测 → 印证评估；新产出的组织事件进广播环 + 协调者事件流（GUI 可见）
+    let mut emitted: Vec<OrgCorroboration> = Vec::new();
+    for obs in observations_of(&env.node, &filtered) {
+        let hit = state
+            .engine
+            .corroboration
+            .lock()
+            .ok()
+            .and_then(|mut c| c.record(&obs, now));
+        if let Some(mut oc) = hit {
+            let msg = json!({
+                "type": "corroboration",
+                "corroboration": oc.to_json(),
+            });
+            let feed_id = state.feed.lock().unwrap().push(msg);
+            oc.id = feed_id; // 对外 id 统一用 feed 游标（agent 去重键）
+            emitted.push(oc);
+        }
+    }
+    for oc in &emitted {
+        state.engine.bus.publish(SecurityEvent::engine(
+            if oc.severity == "critical" { "warn" } else { "info" },
+            format!(
+                "组织印证：{} 「{}」由 {} 个节点独立观测（{}）——仅加置信，处置仍归各节点本地决策",
+                oc.dim.as_str(),
+                oc.key,
+                oc.nodes.len(),
+                oc.nodes.join("、")
+            ),
+        ));
+    }
+    Json(json!({
+        "ok": true,
+        "accepted_events": filtered.events.len(),
+        "accepted_credentials": filtered.credentials.len(),
+        "archived": archived,
+        "corroborations": emitted.len(),
+    }))
+    .into_response()
+}
+
+// ---------- agent 拉取组织消息（F200）：印证事件广播 ----------
+
+#[derive(Deserialize)]
+struct OrgFeedQuery {
+    node: String,
+    #[serde(default)]
+    after: u64,
+}
+
+async fn fed_org_feed(
+    State(state): State<FedState>,
+    peer: axum::Extension<FedPeer>,
+    axum::extract::Query(q): axum::extract::Query<OrgFeedQuery>,
+) -> Response {
+    if !valid_node_name(&q.node) {
+        return err("node 名不合法");
+    }
+    if let Err(resp) = check_member(&state, &q.node, &peer.cert_fp) {
+        return resp;
+    }
+    let (messages, cursor) = state.feed.lock().unwrap().since(q.after);
+    Json(json!({
+        "ok": true,
+        "cursor": cursor,
+        "messages": messages.iter().map(|(id, m)| json!({ "id": id, "msg": m })).collect::<Vec<_>>(),
+    }))
+    .into_response()
 }
 
 // ---------- 情报同步（双向） ----------
@@ -779,27 +987,22 @@ pub fn cmd_audit(data_dir: &Path, out: &Path, window_secs: i64) -> anyhow::Resul
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
-    // 最近协同事件（fed: 前缀 listener）
-    let recent = store.recent_events(50, None).unwrap_or_default();
-    let fed_events: Vec<serde_json::Value> = recent
-        .iter()
-        .filter(|e| e.listener.starts_with("fed:") || e.summary.contains("[fed]"))
-        .map(|e| serde_json::json!({ "ts": e.ts, "kind": e.kind, "listener": e.listener, "remote_ip": e.remote_ip, "summary": e.summary }))
-        .collect();
+    // 最近收到的原始签名信封（F200 起：协调者不留事件库，审计看 audit.jsonl）
+    let fed_envelopes = audit_log_tail(data_dir, 50);
     let doc = serde_json::json!({
         "exported_ts": now,
         "window_secs": window_secs,
         "members": members,
         "revocations": revocations,
-        "recent_fed_events": fed_events,
+        "recent_fed_envelopes": fed_envelopes,
     });
     std::fs::write(out, serde_json::to_string_pretty(&doc)?)?;
     println!(
-        "✓ 协同审计已导出 {}（成员 {} · 吊销 {} · 近期协同事件 {}）",
+        "✓ 协同审计已导出 {}（成员 {} · 吊销 {} · 近期原始信封 {}）",
         out.display(),
         members.len(),
         revocations.len(),
-        fed_events.len()
+        fed_envelopes.len()
     );
     Ok(())
 }
@@ -994,6 +1197,10 @@ struct PushEvent {
     remote_ip: String,
     remote_port: u16,
     summary: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    tls_fp: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    tls_ja4: String,
 }
 
 /// agent 的 mTLS HTTP 客户端：携带本节点证书（clientAuth）+ 组织 CA 验证协调者。
@@ -1121,13 +1328,22 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
         let mut http: Option<reqwest::Client> = None;
         let mut key: Option<ring::signature::EcdsaKeyPair> = None;
         let mut warned_material = false;
-        // 未确认信封（按类型各一槽）：网络失败保留重发，被 4xx 拒收丢弃重建
-        let mut pending_events: Option<Vec<u8>> = None;
+        // 未确认信封（按类型各一槽）：网络失败保留重发，被 4xx 拒收丢弃重建。
+        // events 槽附带该批凭证游标（成功应答后才推进，4xx/网络失败不丢观测）
+        let mut pending_events: Option<(Vec<u8>, Option<i64>)> = None;
         let mut pending_proposals: Option<Vec<u8>> = None;
         // 版本失配阻断：只发 hello 探测，直到协调者侧接受（节点需升级）
         let mut version_blocked: Option<String> = None;
         // 已告警过的失配版本（避免每周期刷同一条告警）
         let mut warned_version = String::new();
+        // F200：凭证观测上传游标（按 ts，内存态；重复观测在协调者按集合语义幂等）
+        let mut last_cred_ts: i64 = 0;
+        // F200：组织消息拉取游标 + 已处理消息去重（feed id）
+        let mut feed_cursor: u64 = 0;
+        let mut feed_seen = fedproto::DedupSet::new(2000);
+        // F320 并入：本节点时钟偏移（上轮 hello 算出）与告警状态
+        let mut last_offset: Option<i64> = None;
+        let mut offset_alerted = false;
 
         loop {
             let interval = eng.config().fed.interval_secs.clamp(15, 3600);
@@ -1184,12 +1400,34 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
             let base = cfg.coordinator.trim_end_matches('/').to_string();
             let mut material_stale = false;
 
-            // 0) hello：心跳 + 版本探测 + last_seen。版本失配时这是唯一发出的消息。
+            // 0) hello：心跳 + 版本探测 + last_seen + 时钟偏移上报。版本失配时这是唯一发出的消息。
+            let hello_payload = json!({ "offset_secs": last_offset });
             if let Some((_, bytes)) =
-                seal_envelope(&eng, &cfg.node, key_ref, &mut seq, fedproto::types::HELLO, json!({}))
+                seal_envelope(&eng, &cfg.node, key_ref, &mut seq, fedproto::types::HELLO, hello_payload)
             {
                 match post_envelope(http_ref, &base, "/fed/hello", &bytes).await {
                     SendOutcome::Ok(v) => {
+                        // F320 并入：与协调者时钟对表；偏移超阈值本节点告警（恢复自动解除）
+                        if let Some(server_ts) = v["server_ts"].as_i64() {
+                            let offset = server_ts - now_ts();
+                            last_offset = Some(offset);
+                            let skewed = offset.abs() > 5;
+                            if skewed && !offset_alerted {
+                                offset_alerted = true;
+                                eng.bus.publish(SecurityEvent::engine(
+                                    "warn",
+                                    format!(
+                                        "本节点时钟偏移 {offset}s（协调者对表）：超阈值将被组织印证降权，请校准系统时间/NTP"
+                                    ),
+                                ));
+                            } else if !skewed && offset_alerted {
+                                offset_alerted = false;
+                                eng.bus.publish(SecurityEvent::engine(
+                                    "info",
+                                    "本节点时钟偏移已恢复（组织印证降权解除）",
+                                ));
+                            }
+                        }
                         if version_blocked.is_some() {
                             eng.bus.publish(SecurityEvent::engine(
                                 "info",
@@ -1237,12 +1475,14 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
             // 1) 上报本地事件（蜜罐命中 + 检测判定；超 24h 的旧事件不再外发，
             //    本地哈希链是归档真源）。未确认信封原样重发，不重建。
             let bytes = match pending_events.take() {
-                Some(b) => Some(b),
+                Some((b, m)) => Some((b, m)),
                 None => eng.store.recent_events(100, None).ok().and_then(|rows| {
                     let new_events: Vec<PushEvent> = rows
                         .iter()
                         .filter(|e| e.id > last_event_id)
-                        .filter(|e| matches!(e.kind.as_str(), "honeypot_hit" | "detection"))
+                        .filter(|e| {
+                            matches!(e.kind.as_str(), "honeypot_hit" | "detection" | "canary")
+                        })
                         .filter(|e| now_ts() - e.ts <= fedproto::REPLAY_WINDOW_SECS)
                         .map(|e| PushEvent {
                             ts: e.ts,
@@ -1251,9 +1491,23 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
                             remote_ip: e.remote_ip.clone(),
                             remote_port: e.remote_port,
                             summary: e.summary.clone(),
+                            tls_fp: e.tls_fp.clone(),
+                            tls_ja4: e.tls_ja4.clone(),
                         })
                         .collect();
-                    if new_events.is_empty() {
+                    // F200：凭证观测随行（v1 用户名比对；无可逆材料出参）。
+                    // 无事件但有新凭证时也独立成封
+                    let creds_rows = eng
+                        .credentials
+                        .recent(last_cred_ts, 100)
+                        .unwrap_or_default();
+                    let cred_max = creds_rows.iter().map(|c| c.ts).max();
+                    let creds: Vec<serde_json::Value> = creds_rows
+                        .iter()
+                        .filter(|c| now_ts() - c.ts <= fedproto::REPLAY_WINDOW_SECS)
+                        .map(|c| json!({ "ts": c.ts, "remote_ip": c.remote_ip, "username": c.username }))
+                        .collect();
+                    if new_events.is_empty() && creds.is_empty() {
                         None
                     } else {
                         seal_envelope(
@@ -1262,16 +1516,19 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
                             key_ref,
                             &mut seq,
                             fedproto::types::EVENTS,
-                            serde_json::to_value(&new_events).unwrap_or_default(),
+                            json!({ "events": new_events, "credentials": creds }),
                         )
-                        .map(|(_, b)| b)
+                        .map(|(_, b)| (b, cred_max))
                     }
                 }),
             };
-            if let Some(bytes) = bytes {
+            if let Some((bytes, cred_max)) = bytes {
                 match post_envelope(http_ref, &base, "/fed/events", &bytes).await {
                     SendOutcome::Ok(_) => {
                         pending_events = None;
+                        if let Some(m) = cred_max {
+                            last_cred_ts = last_cred_ts.max(m);
+                        }
                         if let Ok(rows) = eng.store.recent_events(1, None)
                             && let Some(max) = rows.first().map(|e| e.id)
                         {
@@ -1286,7 +1543,7 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
                         tracing::warn!("组织事件上报被拒: HTTP {code} {body}");
                     }
                     SendOutcome::Network(_) => {
-                        pending_events = Some(bytes);
+                        pending_events = Some((bytes, cred_max));
                         tracing::debug!("协调者失联，事件信封留待重发");
                     }
                 }
@@ -1315,6 +1572,55 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
                     .collect();
                 if !upserts.is_empty() {
                     let _ = eng.store.upsert_intel(&upserts);
+                }
+            }
+
+            // 2.5) 拉取组织印证事件并本地复验（F200）：有本节点活动记录才采纳提示，
+            //      无则静默留痕（建议性质，永不自动处置——复验失败丢弃 + 留痕）
+            if let Ok(resp) = http_ref
+                .get(format!("{base}/fed/org-feed?node={}&after={}", cfg.node, feed_cursor))
+                .send()
+                .await
+                && resp.status().is_success()
+                && let Ok(v) = resp.json::<serde_json::Value>().await
+            {
+                feed_cursor = v["cursor"].as_u64().unwrap_or(feed_cursor);
+                let now = now_ts();
+                for m in v["messages"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
+                    let id = m["id"].as_u64().unwrap_or(0);
+                    if !feed_seen.first_time("__feed__", id, now, 86_400) {
+                        continue;
+                    }
+                    let oc = &m["msg"]["corroboration"];
+                    let (Some(dim), Some(key)) = (oc["dim"].as_str(), oc["key"].as_str()) else {
+                        continue;
+                    };
+                    let since = now - 86_400;
+                    let hit = match dim {
+                        "fingerprint" => {
+                            eng.store.has_recent_observation("fp", key, since).unwrap_or(false)
+                        }
+                        "credential" => {
+                            eng.credentials.username_seen(key, since).unwrap_or(false)
+                        }
+                        // ip / canary 都按源 IP 查本节点活动
+                        _ => eng.store.has_recent_observation("ip", key, since).unwrap_or(false),
+                    };
+                    let nodes = oc["nodes"].as_array().map(|a| a.len()).unwrap_or(0);
+                    if hit {
+                        eng.bus.publish(SecurityEvent::engine(
+                            if oc["severity"].as_str() == Some("critical") {
+                                "warn"
+                            } else {
+                                "info"
+                            },
+                            format!(
+                                "组织印证复验命中：{dim} 「{key}」组织内 {nodes} 节点独立观测，本节点亦有活动记录（仅加置信，处置仍走本地路径）"
+                            ),
+                        ));
+                    } else {
+                        tracing::debug!("组织印证复验未命中（留痕）：{dim} {key}");
+                    }
                 }
             }
 

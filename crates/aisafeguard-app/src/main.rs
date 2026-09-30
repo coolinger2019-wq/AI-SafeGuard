@@ -2,6 +2,7 @@ mod api;
 mod console;
 mod engine;
 mod explain;
+mod corroboration;
 mod fed;
 mod fedproto;
 mod forward;
@@ -708,6 +709,7 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
         honeypot,
         local_accounts: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
         credentials,
+        corroboration: Arc::new(std::sync::Mutex::new(corroboration::CorroborationEngine::default())),
         token,
         version: VERSION,
     });

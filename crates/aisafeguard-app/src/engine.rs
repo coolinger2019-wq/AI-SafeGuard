@@ -158,6 +158,10 @@ pub struct EngineHandle {
     pub local_accounts: Arc<RwLock<std::collections::HashSet<String>>>,
     /// 凭证库（0.5.10 H200）：AI 慢路径上下文也要读（H310 只取掩码形态）
     pub credentials: Arc<CredentialStore>,
+    /// 多机印证引擎（0.6 F200）：协调者侧内存滑动窗；agent 侧闲置（不参与计算）。
+    /// min_peers quorum 门控的数据源（0.4 的 fed_reporter_count 已随
+    /// 「协调者不持久化节点事件」切换至此）
+    pub corroboration: Arc<std::sync::Mutex<crate::corroboration::CorroborationEngine>>,
     pub token: String,
     pub version: &'static str,
 }
@@ -1912,9 +1916,10 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                         match p.remote_ip.parse::<IpAddr>() {
                             Ok(ip) => {
                                 let reporters = eng
-                                    .store
-                                    .fed_reporter_count(&ip.to_string(), now_ts() - 7 * 86_400)
-                                    .unwrap_or(0);
+                                    .corroboration
+                                    .lock()
+                                    .map(|c| c.reporter_count(&ip.to_string(), now_ts() - 86_400))
+                                    .unwrap_or(0) as i64;
                                 reporters == 0 || reporters as u32 >= cfg.fed.min_peers
                             }
                             Err(_) => true,

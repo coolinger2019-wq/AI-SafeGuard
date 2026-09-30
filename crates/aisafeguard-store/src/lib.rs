@@ -1027,17 +1027,18 @@ impl Store {
 
     /// 某来源 IP 的独立协同上报节点数（0.4.0 C3 quorum）：
     /// 事件 listener 形如 `fed:<节点>:<监听器>`，按节点去重。
-    pub fn fed_reporter_count(&self, remote_ip: &str, since: i64) -> Result<i64> {
-        let n: i64 = self
+    /// F200 组织印证本地复验：本节点近期是否观测过某来源（ip 维度查 remote_ip，
+    /// fp 维度查 JA3/JA4 两列）。返回首条命中即 true。
+    pub fn has_recent_observation(&self, dim: &str, value: &str, since: i64) -> Result<bool> {
+        let sql = match dim {
+            "fp" => "SELECT EXISTS(SELECT 1 FROM events WHERE ts >= ?3 AND (tls_fp = ?1 OR tls_ja4 = ?1))",
+            _ => "SELECT EXISTS(SELECT 1 FROM events WHERE ts >= ?3 AND remote_ip = ?1)",
+        };
+        let hit: i64 = self
             .lock()?
-            .query_row(
-                "SELECT COUNT(DISTINCT listener) FROM events
-             WHERE remote_ip = ?1 AND ts >= ?2 AND listener LIKE 'fed:%'",
-                params![remote_ip, since],
-                |r| r.get(0),
-            )
+            .query_row(sql, params![value, value, since], |r| r.get(0))
             .map_err(|e| Error::Store(e.to_string()))?;
-        Ok(n)
+        Ok(hit != 0)
     }
 
     /// 误报标记：把该来源的全部 pending 建议一并收弃（用户已判定其为正常）。
@@ -1555,41 +1556,6 @@ mod tests {
     }
 
     /// quorum 计数（0.4.0 C3）：按 listener 前缀 fed: 去重节点。
-    #[test]
-    fn fed_reporter_count_dedupes_by_node() {
-        let store = tmp_store("fed-q");
-        let now = aisafeguard_core::now_ts();
-        for (node, ip) in [
-            ("agent1", "203.0.113.7"),
-            ("agent2", "203.0.113.7"),
-            ("agent1", "203.0.113.7"),
-        ] {
-            store
-                .insert_event(&aisafeguard_core::event::SecurityEvent::HoneypotHit {
-                    ts: now,
-                    listener: format!("fed:{node}:ssh"),
-                    kind: "honeypot_hit".into(),
-                    port: 2222,
-                    remote_ip: ip.into(),
-                    remote_port: 55555,
-                    summary: "q".into(),
-                    payload: String::new(),
-                    http_hint: None,
-                    interaction: None,
-                })
-                .unwrap();
-        }
-        assert_eq!(
-            store.fed_reporter_count("203.0.113.7", now - 60).unwrap(),
-            2
-        );
-        assert_eq!(
-            store.fed_reporter_count("198.51.100.1", now - 60).unwrap(),
-            0
-        );
-    }
-
-    /// 端口粒度抑制（0.4.0 B4）：IP 级记录抑制任何处置；端口级记录仅抑制对应端口。
     #[test]
     fn fp_port_scope() {
         let store = tmp_store("fp-port");

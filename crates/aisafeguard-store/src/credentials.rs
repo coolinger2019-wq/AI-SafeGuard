@@ -135,6 +135,19 @@ impl CredentialStore {
 
     /// 窗口内最近的凭证观察（H310：供 AI 慢路径上下文）。只返回用户名与
     /// 「是否有口令」布尔——pass_hash 刻意不出参（不进 API/提示词/日志）。
+    /// F200 凭证维度本地复验：本节点近期是否观测过某用户名的凭证投递。
+    pub fn username_seen(&self, username: &str, since: i64) -> Result<bool> {
+        let conn = self.lock()?;
+        let hit: i64 = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM credentials WHERE username = ?1 AND ts >= ?2)",
+                rusqlite::params![username, since],
+                |r| r.get(0),
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(hit != 0)
+    }
+
     pub fn recent(&self, since: i64, limit: u32) -> Result<Vec<CredObservation>> {
         let conn = self.lock()?;
         let mut stmt = conn
