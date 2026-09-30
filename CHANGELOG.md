@@ -2,6 +2,19 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [未发布]
+
+### 新增
+
+- **webhook 请求签名**：`[notify].sign`（默认关）开启后，事件外发附带
+  `X-AISafeGuard-Timestamp` + `X-AISafeGuard-Signature: v1=<hex>`
+  （HMAC-SHA256 覆盖 `"{timestamp}.{原始字节}"`，Stripe/GitHub webhook 同款语义，
+  接收方同密钥重算比对 + 时间窗防重放）。密钥不入配置文件：环境变量
+  `AISAFEGUARD_WEBHOOK_SECRET`（最高优先）或凭据管理器（webhook-secret）；
+  开而不设密钥 = 丢弃不发送（不做静默降级）。能力边界明示：HMAC 只证明传输
+  完整性，不构成可审计证据（THREAT_MODEL「证据语义」）。已知向量测试由
+  python hashlib 独立预计算。净增依赖无（ring::hmac 既有栈）。
+
 ## [0.6.0] - 2026-09-30
 
 0.6「多机协同完全体」：回答「多台机器看到同一个攻击者时，组织比我单个人更确信」。

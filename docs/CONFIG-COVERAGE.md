@@ -56,6 +56,7 @@
 | syslog.enabled / target / protocol | false / … / udp | ✅ 通道页 | 📄 | — | |
 | notify.enabled / url / min_severity | false / 空 / warning | ✅ 通道页 | 📄 | — | |
 | notify.timeout_secs | 10 | 🔒 | 📄 | — | 进阶参数 |
+| notify.sign | false | 🔒 | 📄 | — | HMAC 签名开关；密钥走环境变量 AISAFEGUARD_WEBHOOK_SECRET / 凭据管理器（不入配置） |
 | exposure.auto_scan_secs | 0 | ✅ 通道页 | 📄 | — | |
 | ui.theme / font_scale | deep_blue / 1.15 | ✅ 外观页 | 📄 | — | |
 

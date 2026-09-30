@@ -179,6 +179,35 @@ pub fn spawn_syslog_task(eng: &Arc<EngineHandle>) {
 
 /// Webhook 告警任务：severity 达到 min_severity 的事件 POST JSON 到接收端。
 /// 请求超时（配置）与失败都只丢本条；失败留 tracing 且 60 秒限频，防目标宕机刷日志。
+/// F-webhook：HMAC-SHA256 请求签名（Stripe/GitHub webhook 同款语义）。
+/// 覆盖 "{timestamp}.{原始字节}"——接收方以同密钥同序重算比对 + 时间窗防重放。
+/// 能力边界：HMAC 只证明「传输未被第三方篡改」，不构成可审计证据
+/// （THREAT_MODEL「证据语义」：可审计 = 本地哈希链 + fed 证书签名）。
+pub fn webhook_sign(secret: &str, timestamp: i64, body: &[u8]) -> String {
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
+    let mut msg = Vec::with_capacity(body.len() + 21);
+    msg.extend_from_slice(timestamp.to_string().as_bytes());
+    msg.push(b'.');
+    msg.extend_from_slice(body);
+    let tag = ring::hmac::sign(&key, &msg);
+    let mut out = String::with_capacity(64);
+    for b in tag.as_ref() {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
+/// 签名密钥：环境变量 `AISAFEGUARD_WEBHOOK_SECRET` 最高优先（CI/无头/服务注入），
+/// 其次凭据管理器（webhook-secret）——与 AI Key 同款双通道。
+fn webhook_secret() -> Option<String> {
+    if let Ok(v) = std::env::var("AISAFEGUARD_WEBHOOK_SECRET")
+        && !v.is_empty()
+    {
+        return Some(v);
+    }
+    aisafeguard_core::secrets::webhook_secret()
+}
+
 pub fn spawn_notify_task(eng: &Arc<EngineHandle>) {
     let eng = Arc::clone(eng);
     let rt = eng.rt.clone();
@@ -225,7 +254,34 @@ pub fn spawn_notify_task(eng: &Arc<EngineHandle>) {
                 "summary": ev.summary(),
                 "event": serde_json::to_value(&ev).unwrap_or_default(),
             });
-            match http.post(&cfg.url).json(&body).send().await {
+            // F-webhook：签名覆盖「将发送的原始字节」（序列化一次，签发同字节——
+            // 接收方逐字节重算）。开而不设密钥 = 丢弃不发送（不做静默降级）
+            let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
+            let mut req = http
+                .post(&cfg.url)
+                .header("content-type", "application/json");
+            if cfg.sign {
+                let Some(secret) = webhook_secret() else {
+                    if last_fail
+                        .map(|t| t.elapsed() >= Duration::from_secs(60))
+                        .unwrap_or(true)
+                    {
+                        tracing::warn!(
+                            "[notify].sign 已开启但未配置密钥（AISAFEGUARD_WEBHOOK_SECRET 或凭据管理器 webhook-secret）：事件丢弃不发送"
+                        );
+                        last_fail = Some(std::time::Instant::now());
+                    }
+                    continue;
+                };
+                let ts = aisafeguard_core::now_ts();
+                req = req
+                    .header("X-AISafeGuard-Timestamp", ts.to_string())
+                    .header(
+                        "X-AISafeGuard-Signature",
+                        format!("v1={}", webhook_sign(&secret, ts, &body_bytes)),
+                    );
+            }
+            match req.body(body_bytes).send().await {
                 Ok(resp) if !resp.status().is_success() => {
                     if last_fail
                         .map(|t| t.elapsed() >= Duration::from_secs(60))
@@ -302,6 +358,24 @@ pub fn spawn_exposure_task(eng: &Arc<EngineHandle>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F-webhook 已知向量：期望值由 python hashlib.hmac 独立预计算（非本实现自证）。
+    /// HMAC-SHA256("test-secret", "1700000000.{\"hello\":\"world\"}")
+    #[test]
+    fn webhook_sign_matches_independent_vector() {
+        let sig = webhook_sign("test-secret", 1_700_000_000, br#"{"hello":"world"}"#);
+        assert_eq!(
+            sig,
+            "f85455a1b55ea86f7a15f5f9923d0abc4b888da84ec485f2ff358f427776beca"
+        );
+        assert_eq!(sig.len(), 64);
+        // 任一输入变化 → 签名变化
+        assert_ne!(webhook_sign("test-secret", 1_700_000_001, br#"{"hello":"world"}"#), sig);
+        assert_ne!(webhook_sign("other-secret", 1_700_000_000, br#"{"hello":"world"}"#), sig);
+        assert_ne!(webhook_sign("test-secret", 1_700_000_000, br#"{"hello":"world2"}"#), sig);
+        // 空密钥/空体不 panic
+        assert_eq!(webhook_sign("", 0, b"").len(), 64);
+    }
 
     fn sample_event() -> SecurityEvent {
         SecurityEvent::Detection {

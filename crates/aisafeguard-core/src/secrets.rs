@@ -10,6 +10,7 @@ use crate::error::{Error, Result};
 const SERVICE: &str = "AISafeGuard";
 const AI_KEY_USER: &str = "ai-key";
 const API_TOKEN_USER: &str = "api-token";
+const WEBHOOK_SECRET_USER: &str = "webhook-secret";
 
 fn entry(user: &str) -> Result<keyring::Entry> {
     keyring::Entry::new(SERVICE, user).map_err(|e| Error::Config(format!("凭据管理器不可用: {e}")))
@@ -55,6 +56,20 @@ pub fn set_ai_key(value: &str) -> Result<()> {
 
 pub fn delete_ai_key() -> Result<()> {
     delete(AI_KEY_USER)
+}
+
+// ---------- webhook HMAC 密钥（F-webhook） ----------
+
+pub fn webhook_secret() -> Option<String> {
+    get(WEBHOOK_SECRET_USER)
+}
+
+pub fn set_webhook_secret(value: &str) -> Result<()> {
+    set(WEBHOOK_SECRET_USER, value)
+}
+
+pub fn delete_webhook_secret() -> Result<()> {
+    delete(WEBHOOK_SECRET_USER)
 }
 
 // ---------- 本地 API token ----------

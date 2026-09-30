@@ -612,6 +612,11 @@ pub struct NotifyConfig {
     /// info | notice | warning | error —— 转发的最低严重度（含更严重者）
     pub min_severity: String,
     pub timeout_secs: u64,
+    /// F-webhook：HMAC-SHA256 请求签名（默认关）。密钥不入配置文件——环境变量
+    /// `AISAFEGUARD_WEBHOOK_SECRET`（最高优先）或凭据管理器（webhook-secret）。
+    /// 签名覆盖 "{timestamp}.{原始字节}"；开而不设密钥 = 丢弃不发送（不做静默降级）。
+    /// 能力边界：HMAC 只证明传输完整性，不构成可审计证据（THREAT_MODEL 证据语义）。
+    pub sign: bool,
 }
 
 impl Default for NotifyConfig {
@@ -620,7 +625,8 @@ impl Default for NotifyConfig {
             enabled: false,
             url: String::new(),
             min_severity: "warning".into(),
-            timeout_secs: 10,
+            timeout_secs: 30,
+            sign: false,
         }
     }
 }

@@ -272,6 +272,11 @@ url = ""
 min_severity = "warning"
 # 请求超时（秒）。
 timeout_secs = 10
+# HMAC-SHA256 请求签名（默认关）：覆盖 "{timestamp}.{原始字节}"，接收方同密钥
+# 重算比对 + 时间窗防重放。密钥不入配置文件——环境变量 AISAFEGUARD_WEBHOOK_SECRET
+# （最高优先）或凭据管理器 webhook-secret；开而不设密钥 = 丢弃不发送。
+# 注意：HMAC 只证明传输完整性，不构成可审计证据（见 THREAT_MODEL「证据语义」）。
+sign = false
 
 [exposure]
 # 主机暴露面自动扫描间隔（秒）；0 = 关闭（手动扫描不受影响），300-86400 = 定时扫描并入库。
