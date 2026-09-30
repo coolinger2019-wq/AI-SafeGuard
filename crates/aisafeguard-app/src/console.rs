@@ -74,6 +74,10 @@ pub trait Console: Send + Sync {
     fn delete_ai_key(&self) -> anyhow::Result<()>;
     /// 实时事件流。GUI 每帧 drain；远程模式由后台轮询线程喂数据。
     fn live_events(&self) -> Receiver<LiveEvent>;
+    /// 手动触发一轮威胁情报拉取（fire-and-forget；结果进事件流）
+    fn refresh_intel(&self) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!("情报订阅不可用"))
+    }
     /// F500 组织面板数据（只读；members/stats 仅协调者角色有值）
     fn fed_panel(&self) -> anyhow::Result<crate::engine::FedPanel> {
         Err(anyhow::anyhow!("组织面板不可用"))

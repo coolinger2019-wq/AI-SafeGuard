@@ -248,6 +248,44 @@ impl AisafeApp {
         );
 
         ui.add_space(space::M);
+        section(ui, "威胁情报订阅（外部 IOC 名单）");
+        egui::Grid::new("intel-settings")
+            .num_columns(2)
+            .spacing([14.0, space::S])
+            .show(ui, |ui| {
+                ui.label("情报订阅");
+                ui.checkbox(
+                    &mut draft.intel.enabled,
+                    "（对外网络请求，默认关；周期拉取外部名单与本机观测求交）",
+                );
+                ui.end_row();
+                ui.label("情报自动封禁");
+                ui.checkbox(
+                    &mut draft.intel.auto_block,
+                    "（仅高置信度 C2 名单；TTL 到期自动解封，内网地址永不自动封禁）",
+                );
+                ui.end_row();
+                ui.label("情报源地址");
+                ui.add(
+                    egui::TextEdit::singleline(&mut draft.intel.feed_url)
+                        .hint_text("默认 abuse.ch Feodo C2；可指向自托管/镜像源")
+                        .desired_width(360.0),
+                );
+                ui.end_row();
+            });
+        ui.horizontal(|ui| {
+            if ui.button("手动拉取一轮").clicked() {
+                match self.eng.refresh_intel() {
+                    Ok(()) => self.set_toast("情报刷新已开始（结果稍后进事件流/防火墙规则）"),
+                    Err(e) => self.set_toast(format!("刷新失败：{e}")),
+                }
+            }
+            ui.label(
+                caption("拉取间隔默认 6 小时（config.toml [intel].interval_secs）；保存后即时生效。                 组织 fed 源与 STIX 导入源永不自动封禁，仅标注。"),
+            );
+        });
+
+        ui.add_space(space::M);
         section(ui, "流量采样捕获（真实流量观测）");
         egui::Grid::new("capture-settings")
             .num_columns(2)

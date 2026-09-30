@@ -2140,6 +2140,15 @@ impl Console for EmbeddedConsole {
         self.0.version.to_string()
     }
 
+    fn refresh_intel(&self) -> anyhow::Result<()> {
+        let eng = Arc::clone(&self.0);
+        self.0.rt.spawn(async move {
+            let cfg = eng.config().intel;
+            run_intel_refresh(&eng, &cfg).await;
+        });
+        Ok(())
+    }
+
     fn config_paths(&self) -> (String, String) {
         (
             self.0.cfg_path.display().to_string(),

@@ -220,6 +220,11 @@ impl Console for RemoteConsole {
         Ok(())
     }
 
+    fn refresh_intel(&self) -> anyhow::Result<()> {
+        self.post("/api/intel/refresh")?;
+        Ok(())
+    }
+
     fn fed_panel(&self) -> anyhow::Result<crate::engine::FedPanel> {
         Ok(self.get("/api/fed/panel")?.json()?)
     }
