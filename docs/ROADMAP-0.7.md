@@ -109,6 +109,10 @@
 3. **口径修正（写进 EXPERIMENT.md）**：scan 判定结构性无载荷（0.3.4 记录）；WSL AF_PACKET
    环回双投递使计数翻倍（内网演练用 WSL 必须修正口径）；跨机时钟依赖 NTP 对表。
 
+**验收**
+- [x] 三件套交付并真实库冒烟通过（2026-10-01）：EXPERIMENT.md（四组口径/判据预注册/SOP/48h pilot 协议）；experiment-report.py（纯 stdlib 多节点报告，真实库冒烟通过，含老 schema 优雅降级——旧库自动提示升级后再采）；lateral-drill.py（第二段红队横向演练脚本，仅限自有内网，≥3 端口 open 即满足频次判定）。
+- [ ] 48h pilot 与正式实验：待第一段 VPS 部署后执行（pilot 数据不计入正式实验）。
+
 **范围（In）**
 - rule_id 落库（如上，含迁移与测试）。
 - `docs/EXPERIMENT.md`：口径先于跑动钉死——①噪声基线（第一段）：日均事件量/独立攻击者/Top 源；
