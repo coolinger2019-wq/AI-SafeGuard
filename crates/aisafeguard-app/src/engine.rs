@@ -1006,6 +1006,22 @@ impl EngineHandle {
         self.bus.publish(SecurityEvent::engine("info", msg));
         Ok(())
     }
+
+    /// config.toml 原文（Web 控制台配置编辑器，F760）。
+    pub fn config_raw(&self) -> Result<String> {
+        std::fs::read_to_string(&self.cfg_path)
+            .map_err(|e| Error::Config(format!("读取 {} 失败: {e}", self.cfg_path.display())))
+    }
+
+    /// 原文应用配置：先解析校验（非法 TOML 不落盘、不动运行态），再走 save_config
+    /// 落盘 + 热更。返回需重启生效的项名列表（空 = 全部热更）。
+    pub fn apply_config_raw(&self, raw: &str) -> Result<Vec<String>> {
+        let cfg: AppConfig = toml::from_str(raw)
+            .map_err(|e| Error::Config(format!("TOML 解析失败: {e}")))?;
+        let req = AppConfig::restart_required(&self.config(), &cfg);
+        self.save_config(cfg)?;
+        Ok(req.into_iter().map(String::from).collect())
+    }
 }
 
 /// 封禁落地：防火墙 + 记账 + 事件广播。依赖收窄成 trait/引用，便于集成测试

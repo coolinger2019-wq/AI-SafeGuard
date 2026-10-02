@@ -5,9 +5,9 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, Request, State};
-use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
+use axum::http::{HeaderMap, StatusCode, header, header::AUTHORIZATION};
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -24,7 +24,9 @@ struct AppState {
 pub async fn serve(engine: Arc<EngineHandle>) {
     let port = engine.config().api.port;
     let state = AppState { engine };
-    let app = Router::new()
+    // /api/* 走 Bearer 认证；静态控制台壳（F760）不设 token——页面本身无任何数据，
+    // 登录在页面内完成，数据请求全部带 Bearer。仍只听回环，跨机只能走 SSH 隧道。
+    let api = Router::new()
         .route("/api/status", get(status))
         .route("/api/events", get(events))
         .route("/api/rules", get(list_rules).post(add_rule))
@@ -58,13 +60,17 @@ pub async fn serve(engine: Arc<EngineHandle>) {
         .route("/api/intel", get(get_intel))
         .route("/api/intel/refresh", post(refresh_intel))
         .route("/api/config", get(get_config).post(put_config))
+        .route("/api/config/raw", get(get_config_raw).put(put_config_raw))
         .route(
             "/api/ai/key",
             get(ai_key_present).post(ai_key_set).delete(ai_key_delete),
         )
         .route("/api/ai/runs", get(ai_runs))
         .route("/api/ai/analyze", post(ai_analyze))
-        .layer(middleware::from_fn_with_state(state.clone(), auth))
+        .layer(middleware::from_fn_with_state(state.clone(), auth));
+    let app = Router::new()
+        .route("/", get(web_console))
+        .merge(api)
         .with_state(state);
 
     match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
@@ -499,6 +505,45 @@ async fn put_config(
 ) -> Response {
     match s.engine.save_config(cfg) {
         Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => err_resp(e),
+    }
+}
+
+/// Web 控制台静态壳（F760）：单文件 HTML，include_str! 内嵌，无外部依赖。
+/// 页面内不含任何数据；数据一律经页面内 Bearer token 调 /api/*。
+async fn web_console() -> Html<&'static str> {
+    Html(include_str!("web/index.html"))
+}
+
+/// config.toml 原文（文本编辑器加载用）。
+async fn get_config_raw(State(s): State<AppState>) -> Response {
+    match s.engine.config_raw() {
+        Ok(raw) => (
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            raw,
+        )
+            .into_response(),
+        Err(e) => err_resp(e),
+    }
+}
+
+/// 原文应用配置：服务端先解析校验，非法 TOML 返回 400 不落盘；
+/// 成功返回需重启项列表（空 = 全部热更）。
+async fn put_config_raw(State(s): State<AppState>, body: axum::body::Bytes) -> Response {
+    let text = match std::str::from_utf8(&body) {
+        Ok(t) => t,
+        Err(e) => {
+            return err_resp(aisafeguard_core::error::Error::Config(format!(
+                "请求体不是合法 UTF-8: {e}"
+            )));
+        }
+    };
+    match s.engine.apply_config_raw(text) {
+        Ok(restart_required) => Json(json!({
+            "ok": true,
+            "restart_required": restart_required,
+        }))
+        .into_response(),
         Err(e) => err_resp(e),
     }
 }

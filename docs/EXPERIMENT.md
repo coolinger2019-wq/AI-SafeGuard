@@ -59,24 +59,30 @@
 4. **协同面**：协调者 `fed audit <out.json>` 导成员/吊销/原始信封尾部。
 5. **取回通道**：SSH 隧道 + `--print-token` + 本地 API，或直接 scp 文件（attach 模式已被 e2e 验证）。
 
-## 三点五、远程查看节点界面（F740 配套，`--remote`）
+## 三点五、远程查看节点界面（F790 Web 控制台，`--remote` 为备选）
 
 节点的 GUI 是桌面程序，VPS 上跑的是 headless（无界面）。**远程看节点的正路 = SSH 端口
-转发 + GUI 远程控制台模式**（`aisafeguard --remote`，F740 配套能力）：
+转发 + 浏览器打开 Web 控制台**（F790）：
 
 ```bash
 # ① 本机起 SSH 隧道（保持开着）——把节点回环 API 映射到本机
 ssh -N -L 17420:127.0.0.1:7420 root@<节点IP>
-# ② 取节点 token（节点上执行；或 scp 回 /var/lib/aisafeguard/api-token）
-cat /var/lib/aisafeguard/api-token
-# ③ 本机用 GUI 远程模式连本机转发端口
-aisafeguard --remote http://127.0.0.1:17420 --token <节点token>
+# ② 浏览器打开 http://127.0.0.1:17420/ ，粘贴节点 token（首次一次，存 localStorage）
+#    token 在节点上：cat /var/lib/aisafeguard/api-token
 ```
 
-GUI 打开即该节点的完整界面（仪表盘/事件/防火墙/组织面板），数据实时来自节点 API。
+控制台三页：**仪表盘**（24h 命中/攻击者、引擎/蜜罐/防火墙/AI 状态、Top 来源，3s 自动刷新）、
+**事件**（实时表，点行展开载荷）、**配置**（直接编辑节点 config.toml 原文：服务端先校验
+再落盘，非法 TOML 拒绝不动运行态；保存即热更，需重启项会明确列出）。
 安全边界：API 永远只听节点本机回环（公网不可达），跨机访问只能经 SSH 隧道 + token；
-`--token` 值会进本机进程列表，介意可用 `--token-file <路径>`（scp 回来的 token 文件）。
-多节点 = 开多个隧道端口（17420/17431/...）+ 多个 GUI 实例，或轮流连。
+静态页面本身无数据，数据请求全部带 Bearer。
+
+- **全功能备选**：规则增删/建议审批/组织面板等操作走 egui 远程模式
+  `aisafeguard --remote http://127.0.0.1:17420 --token-file <token文件>`。
+- **多节点** = 开多个隧道端口（17420/17431/...），浏览器各开一个标签页（token 各存各的）。
+- Windows 一键入口：`scripts/asg-remote.cmd`（双击 = 起隧道 + 开浏览器；`-gui` 参数起
+  egui 全功能模式。依赖 `~/.ssh/config` 的 `asg-vps` 别名与 `~/aisafe-node.token`）。
+  SSH 连接必须走别名而非裸 IP——裸 IP 匹配不到专用密钥，且服务端 root 已禁密码登录，必被拒。
 
 ## 四、48 小时 pilot（正式起表前置）
 

@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI-SafeGuard 控制台</title>
+<style>
+  /* ui.md §8 深邃蓝 token：背景非纯黑、语义色、8pt 间距 */
+  :root {
+    --bg: #0B1220; --bg-card: #131C30; --bg-input: #0F1728; --border: #1E2A44;
+    --accent: #4A9EFF; --ok: #52C41A; --warn: #FAAD14; --danger: #FF4D4F;
+    --text: #E6EAF2; --dim: #8C93A6;
+    --mono: ui-monospace, Consolas, "Cascadia Mono", monospace;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  /* hidden 属性必须赢过任何 display 规则（#login 的 flex 曾把它盖掉） */
+  [hidden] { display: none !important; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14.5px/1.55 -apple-system, "Segoe UI", Roboto, "Noto Sans", sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 10px 24px; border-bottom: 1px solid var(--border);
+    background: var(--bg-card);
+  }
+  header h1 { font-size: 16px; font-weight: 600; }
+  header .ver { color: var(--dim); font-size: 12.5px; }
+  header .spacer { flex: 1; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .dot.ok { background: var(--ok); } .dot.err { background: var(--danger); }
+  nav { display: flex; gap: 4px; padding: 8px 24px 0; border-bottom: 1px solid var(--border); background: var(--bg-card); }
+  nav button {
+    background: none; border: none; color: var(--dim); cursor: pointer;
+    font: inherit; padding: 8px 16px; border-bottom: 2px solid transparent;
+  }
+  nav button.on { color: var(--accent); border-bottom-color: var(--accent); }
+  main { padding: 16px 24px 32px; max-width: 1200px; margin: 0 auto; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .card {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px 16px;
+  }
+  .card .k { color: var(--dim); font-size: 12.5px; }
+  .card .v { font-size: 26px; font-weight: 600; margin-top: 2px; }
+  section { margin-top: 16px; }
+  section > h2 { font-size: 15.5px; font-weight: 600; margin-bottom: 8px; }
+  table { width: 100%; border-collapse: collapse; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  th, td { text-align: left; padding: 6px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }
+  th { color: var(--dim); font-weight: 500; background: var(--bg-input); }
+  tr:last-child td { border-bottom: none; }
+  td.mono, .mono { font-family: var(--mono); font-size: 12.5px; }
+  .badge { display: inline-block; padding: 0 8px; border-radius: 4px; font-size: 11.5px; line-height: 20px; }
+  .badge.ok   { color: var(--ok);   background: rgba(82,196,26,.12); }
+  .badge.warn { color: var(--warn); background: rgba(250,173,20,.12); }
+  .badge.err  { color: var(--danger); background: rgba(255,77,79,.12); }
+  .badge.acc  { color: var(--accent); background: rgba(74,158,255,.12); }
+  button.act {
+    background: var(--accent); color: #fff; border: none; border-radius: 6px;
+    font: inherit; padding: 6px 16px; cursor: pointer;
+  }
+  button.act:active { transform: scale(.98); }
+  button.ghost { background: none; border: 1px solid var(--border); color: var(--dim); }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  /* 登录 */
+  #login { display: flex; justify-content: center; padding-top: 96px; }
+  #login .card { width: 360px; padding: 24px; }
+  #login input, #cfg-tools input {
+    width: 100%; background: var(--bg-input); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text); font: inherit; padding: 8px 12px; margin: 8px 0;
+  }
+  #login input:focus { outline: 1px solid var(--accent); }
+  /* 事件载荷展开 */
+  tr.payload td { background: var(--bg-input); }
+  tr.payload pre {
+    font-family: var(--mono); font-size: 12px; color: var(--dim);
+    white-space: pre-wrap; word-break: break-all; max-height: 240px; overflow: auto;
+  }
+  /* 配置编辑 */
+  #cfg {
+    width: 100%; min-height: 480px; resize: vertical;
+    background: var(--bg-input); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px; font-family: var(--mono); font-size: 13px; line-height: 1.5;
+    tab-size: 4;
+  }
+  #cfg:focus { outline: 1px solid var(--accent); }
+  #cfg-tools { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+  #cfg-msg { margin-top: 8px; padding: 8px 12px; border-radius: 6px; display: none; }
+  #cfg-msg.ok   { display: block; color: var(--ok);   background: rgba(82,196,26,.1); }
+  #cfg-msg.warn { display: block; color: var(--warn); background: rgba(250,173,20,.1); }
+  #cfg-msg.err  { display: block; color: var(--danger); background: rgba(255,77,79,.1); }
+  .hint { color: var(--dim); font-size: 12.5px; }
+  .toplist td { font-size: 12.5px; }
+</style>
+</head>
+<body>
+
+<div id="login" hidden>
+  <div class="card">
+    <h2 style="font-size:20px">AI-SafeGuard 控制台</h2>
+    <p class="hint" style="margin-top:4px">输入节点 API token（/var/lib/aisafeguard/api-token）</p>
+    <input id="tk" type="password" placeholder="Bearer token" autofocus>
+    <button class="act" id="tk-go" style="width:100%">连接</button>
+    <p id="tk-err" class="hint" style="color:var(--danger);margin-top:8px"></p>
+  </div>
+</div>
+
+<div id="app" hidden>
+  <header>
+    <h1>AI-SafeGuard 控制台</h1>
+    <span class="ver" id="ver"></span>
+    <span class="spacer"></span>
+    <span class="hint" id="conn"><span class="dot ok"></span></span>
+    <button class="act ghost" id="logout">退出</button>
+  </header>
+  <nav>
+    <button data-tab="dash" class="on">仪表盘</button>
+    <button data-tab="events">事件</button>
+    <button data-tab="cfg">配置</button>
+  </nav>
+  <main>
+    <div id="tab-dash">
+      <div class="cards" id="stats"></div>
+      <section>
+        <h2>引擎状态</h2>
+        <div class="cards" id="engine"></div>
+      </section>
+      <section>
+        <h2>蜜罐监听</h2>
+        <table id="listeners"></table>
+      </section>
+      <section>
+        <h2>Top 来源（24h）</h2>
+        <table class="toplist" id="topips"></table>
+      </section>
+    </div>
+
+    <div id="tab-events" hidden>
+      <p class="hint" style="margin-bottom:8px">
+        每 3 秒自动刷新，点击行展开载荷。
+        <label style="margin-left:16px"><input type="checkbox" id="ev-pause"> 暂停刷新</label>
+      </p>
+      <table id="ev"></table>
+    </div>
+
+    <div id="tab-cfg" hidden>
+      <div id="cfg-tools">
+        <button class="act" id="cfg-save">保存</button>
+        <button class="act ghost" id="cfg-reload">放弃并重新加载</button>
+        <span class="hint" id="cfg-dirty"></span>
+      </div>
+      <textarea id="cfg" spellcheck="false"></textarea>
+      <div id="cfg-msg"></div>
+      <p class="hint" style="margin-top:8px">
+        编辑的是节点上的 config.toml 原文；保存时服务端先校验解析，非法不落盘。
+        标注「热更」的项保存即生效；其余项会明确列出、需重启服务。
+      </p>
+    </div>
+  </main>
+</div>
+
+<script>
+'use strict';
+const TK_KEY = 'asg_web_token';
+const $ = (id) => document.getElementById(id);
+let token = localStorage.getItem(TK_KEY) || '';
+let evTimer = null, dashTimer = null, cfgDirty = false;
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g,
+    (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function fmtTs(ts) { return new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false }); }
+function fmtUptime(s) {
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  return (d ? d + '天 ' : '') + h + '时 ' + m + '分';
+}
+
+async function api(path, opt = {}) {
+  const r = await fetch(path, {
+    ...opt,
+    headers: { 'Authorization': 'Bearer ' + token, ...(opt.headers || {}) },
+  });
+  if (r.status === 401) { logout(); throw new Error('token 无效'); }
+  if (!r.ok) {
+    let msg = r.status;
+    try { msg = (await r.json()).error || msg; } catch (_) {}
+    throw new Error(msg);
+  }
+  return r.json();
+}
+
+function setConn(ok) {
+  $('conn').innerHTML = '<span class="dot ' + (ok ? 'ok' : 'err') + '"></span>';
+}
+
+/* ---------- 登录 ---------- */
+function showLogin() {
+  $('app').hidden = true; $('login').hidden = false;
+  stopTimers();
+}
+function enterApp() {
+  $('login').hidden = true; $('app').hidden = false;
+  refreshDash(); refreshEvents();
+  dashTimer = setInterval(refreshDash, 3000);
+  evTimer = setInterval(refreshEvents, 3000);
+}
+function logout() {
+  localStorage.removeItem(TK_KEY); token = '';
+  showLogin();
+}
+$('tk-go').onclick = async () => {
+  token = $('tk').value.trim();
+  $('tk-err').textContent = '';
+  try {
+    await api('/api/status');
+    localStorage.setItem(TK_KEY, token);
+    enterApp();
+  } catch (e) {
+    $('tk-err').textContent = '连接失败：' + e.message;
+  }
+};
+$('tk').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('tk-go').click(); });
+$('logout').onclick = logout;
+
+/* ---------- 标签页 ---------- */
+document.querySelectorAll('nav button').forEach((b) => {
+  b.onclick = () => {
+    document.querySelectorAll('nav button').forEach((x) => x.classList.toggle('on', x === b));
+    ['dash', 'events', 'cfg'].forEach((t) => { $('tab-' + t).hidden = t !== b.dataset.tab; });
+    if (b.dataset.tab === 'cfg' && !$('cfg').dataset.loaded) loadCfg();
+    if (b.dataset.tab === 'events') refreshEvents(); // 别等下个轮询周期
+  };
+});
+
+function stopTimers() { clearInterval(dashTimer); clearInterval(evTimer); }
+
+/* ---------- 仪表盘 ---------- */
+function statCard(k, v) { return '<div class="card"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>'; }
+
+async function refreshDash() {
+  let st, stats;
+  try {
+    [st, stats] = await Promise.all([api('/api/status'), api('/api/stats')]);
+    setConn(true);
+  } catch (e) { setConn(false); return; }
+
+  $('ver').textContent = 'v' + st.version;
+  $('stats').innerHTML =
+    statCard('24h 命中', st.hits_24h) +
+    statCard('24h 攻击者', st.attackers_24h) +
+    statCard('事件总数', stats.total) +
+    statCard('独立来源', stats.unique_ips) +
+    statCard('待处理建议', st.pending_proposals) +
+    statCard('生效规则', st.rule_count);
+
+  const ai = st.ai;
+  const eng = [
+    ['运行时长', fmtUptime(st.uptime_secs)],
+    ['防火墙后端', esc(st.backend) + (st.elevated ? '' : '（未提权）')],
+    ['检测快路径', st.detect_enabled ? '<span class="badge ok">开</span>' : '<span class="badge warn">关</span>'],
+    ['XDP 快速层', st.xdp.active
+      ? '<span class="badge ok">开</span> <span class="mono hint">' + esc(st.xdp.iface) + ' · 镜像 ' + st.xdp.mirrored + '</span>'
+      : '<span class="badge warn">未启用</span>'],
+    ['AI 慢路径', ai.enabled
+      ? '<span class="badge acc">' + esc(ai.model) + '</span> ' +
+        (ai.running ? '<span class="badge warn">分析中…</span>' : '<span class="badge ok">空闲</span>')
+      : '<span class="badge warn">关</span>'],
+    ['AI 自动应用', ai.enabled && ai.auto_apply
+      ? '<span class="badge warn">开 ≥' + esc(ai.auto_apply_min_severity) + '</span>'
+      : '<span class="badge ok">关（人工确认）</span>'],
+  ];
+  $('engine').innerHTML = eng.map(([k, v]) =>
+    '<div class="card"><div class="k">' + k + '</div><div class="v" style="font-size:15.5px">' + v + '</div></div>').join('');
+
+  const rows = st.listeners.map((l) =>
+    '<tr><td class="mono">' + esc(l.name) + '</td><td class="mono">' + l.port + '</td><td>' +
+    esc(l.kind) + '</td><td>' + esc(l.mode || '低交互') + '</td><td>' +
+    (l.running ? '<span class="badge ok">运行中</span>' : '<span class="badge err">未运行</span>') +
+    '</td></tr>').join('');
+  $('listeners').innerHTML =
+    '<tr><th>监听</th><th>端口</th><th>类型</th><th>交互</th><th>状态</th></tr>' +
+    (rows || '<tr><td colspan="5" class="hint">无监听</td></tr>');
+
+  const top = (stats.top_ips || []).slice(0, 8).map((t, i) =>
+    '<tr><td class="mono">' + (i + 1) + '</td><td class="mono">' + esc(t.ip) + '</td><td>' + t.hits + '</td></tr>').join('');
+  $('topips').innerHTML =
+    '<tr><th>#</th><th>来源 IP</th><th>命中</th></tr>' +
+    (top || '<tr><td colspan="3" class="hint">暂无数据</td></tr>');
+}
+
+/* ---------- 事件 ---------- */
+let lastEvId = 0;
+async function refreshEvents() {
+  if ($('ev-pause').checked || $('tab-events').hidden) return;
+  let rows;
+  try { rows = await api('/api/events?limit=100'); setConn(true); }
+  catch (e) { setConn(false); return; }
+
+  const fresh = rows.length && rows[0].id > lastEvId;
+  lastEvId = rows.length ? rows[0].id : lastEvId;
+  const body = rows.map((e) => {
+    const pay = (e.payload || '').slice(0, 2000);
+    const rid = e.rule_id ? ' <span class="badge acc">' + esc(e.rule_id) + '</span>' : '';
+    const main = '<tr data-id="' + e.id + '">' +
+      '<td class="mono hint">' + fmtTs(e.ts) + '</td>' +
+      '<td>' + esc(e.kind) + (e.listener ? ' <span class="hint">·' + esc(e.listener) + '</span>' : '') + rid + '</td>' +
+      '<td class="mono">' + esc(e.remote_ip) + (e.remote_port ? ':' + e.remote_port : '') + '</td>' +
+      '<td>' + esc(e.summary) + '</td></tr>';
+    return pay
+      ? main + '<tr class="payload" data-for="' + e.id + '" hidden><td colspan="4"><pre></pre></td></tr>'
+      : main;
+  }).join('');
+  const tbl = $('ev');
+  const stick = tbl.scrollTop + tbl.clientHeight >= tbl.scrollHeight - 40;
+  tbl.innerHTML = '<tr><th>时间</th><th>类型</th><th>来源</th><th>摘要</th></tr>' + body;
+  if (fresh && !stick) tbl.scrollIntoView();
+}
+$('ev').addEventListener('click', (e) => {
+  const tr = e.target.closest('tr[data-id]');
+  if (!tr) return;
+  const pay = document.querySelector('tr.payload[data-for="' + tr.dataset.id + '"]');
+  if (!pay) return;
+  pay.hidden = !pay.hidden;
+  if (!pay.hidden) {
+    api('/api/events?limit=100').then((rows) => {
+      const hit = rows.find((x) => String(x.id) === tr.dataset.id);
+      pay.querySelector('pre').textContent = hit ? (hit.payload || '（无载荷）') : '';
+    });
+  }
+});
+
+/* ---------- 配置 ---------- */
+async function loadCfg() {
+  const r = await fetch('/api/config/raw', { headers: { 'Authorization': 'Bearer ' + token } });
+  if (r.status === 401) return logout();
+  if (!r.ok) { showCfgMsg('err', '加载失败：HTTP ' + r.status); return; }
+  $('cfg').value = await r.text();
+  cfgDirty = false;
+  $('cfg').dataset.loaded = '1';
+  $('cfg-dirty').textContent = '';
+}
+function showCfgMsg(cls, text) {
+  const m = $('cfg-msg');
+  m.className = cls; m.textContent = text;
+}
+$('cfg-reload').onclick = () => { if (!cfgDirty || confirm('放弃未保存的修改？')) loadCfg(); };
+$('cfg').addEventListener('input', () => {
+  cfgDirty = true;
+  $('cfg-dirty').textContent = '有未保存修改';
+});
+$('cfg').addEventListener('keydown', (e) => {
+  if (e.key === 'Tab') { // 编辑器里允许 Tab 缩进
+    e.preventDefault();
+    const s = $('cfg').selectionStart;
+    $('cfg').setRangeText('    ', s, $('cfg').selectionEnd, 'end');
+    cfgDirty = true; $('cfg-dirty').textContent = '有未保存修改';
+  }
+});
+$('cfg-save').onclick = async () => {
+  $('cfg-save').disabled = true;
+  try {
+    const r = await fetch('/api/config/raw', {
+      method: 'PUT',
+      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'text/plain; charset=utf-8' },
+      body: $('cfg').value,
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      showCfgMsg('err', '保存被拒绝（未落盘）：' + (j.error || r.status));
+      return;
+    }
+    const req = j.restart_required || [];
+    cfgDirty = false;
+    $('cfg-dirty').textContent = '';
+    showCfgMsg(req.length ? 'warn' : 'ok',
+      req.length ? '已保存。以下项需重启服务生效：' + req.join('、')
+                 : '已保存并写回节点 config.toml，改动全部热更生效。');
+  } finally {
+    $('cfg-save').disabled = false;
+  }
+};
+
+/* ---------- 启动 ---------- */
+if (token) {
+  api('/api/status').then(enterApp).catch(() => {});
+} else {
+  showLogin();
+}
+</script>
+</body>
+</html>

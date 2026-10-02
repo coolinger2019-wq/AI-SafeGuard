@@ -259,3 +259,11 @@
 - **外部规格库是免费的测试官**：python-stix2 首跑即抓到 valid_until 必须严格大于 valid_from 的规格约束（同秒相等也非法）——产出"标准格式"的代码，验收标准就是用官方库解析一遍。
 - **结构性根治「漏实现」：给 trait 加方法时不写默认 Err 实现**——Console trait 的 fed 方法四次踩同一坑（fed_panel/quarantine_member/join 三件套/revoke_member 都是"覆盖了远程、漏了内嵌"），协调者本人（内嵌模式）反而用不了。**根治 = 删除默认 Err 主体，让编译器强制所有实现同步覆盖，漏写=编译错**；判断标准：默认实现若只是"返回不可用"，它就是隐形地雷而非便利。例外：确实"多数实现都合法地不支持"的能力（如 clear_xdp_map 的 Windows 侧）保留默认。
 - **跨平台端口可用性**：Windows 保留段 netsh 列表不全（os error 10013，connect 探测探不出）——选段必须真 bind 探测；固定保留用 `net stop winnat → netsh int ipv4 add excludedportrange ... store=persistent → net start winnat`（顺带清掉全部动态保留段）。
+
+## F790 Web 控制台（2026-10-03）
+
+- **WSL2 NAT 会整体断网且 `wsl --shutdown` 不一定能救**：Windows 侧正常、WSL 连 baidu 都 TCP 超时（DNS 经 10.255.255.254 反而能解析）——典型于宿主机切换网络/VPN 后。别在 WSL 网络上耗时间，海外 VPS 直连 crates.io 本来就快：**同步源码上 VPS 构建**（tar over ssh 排除 target/.git/dist）是确定性路径；1 核 2G 机器加 2G 临时 swapfile 防 OOM，rustup `--profile minimal` 不带 gcc，需先 `apt install build-essential`。
+- **WSL/cargo 镜像要预先配好**：WSL 的 `~/.cargo/config.toml` 与 Windows 侧各自独立，Windows 配了 rsproxy 不代表 WSL 有；缺它时 cargo 在 crates.io 直连上挂死（0% CPU 无 rustc 进程 = 卡网络，别等）。
+- **`[hidden]` 会被任何 display 规则盖掉**：`#login { display:flex }` 让 `hidden` 属性失效（UA 样式特异性低于 id 选择器），页面出现"两个界面叠着"。一条 `[hidden] { display:none !important }` 兜底根治。
+- **`include_str!` 是编译期内嵌**：改了 HTML 忘了重编译，"修复没生效"的假象会浪费一轮排查——改内嵌资源必须重编译再验证。
+- **远程查看的产品定式**：egui `--remote` 走隧道每步操作都是一次 RTT 往返，操作体验天然差；浏览器 + 轮询是远程看板的正解（数据端点本来就有，只缺页面）。操作类功能仍留给桌面 GUI——读写分离，不为了统一而把表单全搬进浏览器。
