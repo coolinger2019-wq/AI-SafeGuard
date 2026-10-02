@@ -257,3 +257,5 @@
 - **测试框架实例启动失败必须先注册进清理列表再 start**：start 中途失败的实例若不在 finally 名单里就泄漏成僵尸进程，占住 API 端口级联污染后续运行；清理时按 CommandLine 过滤（`--headless`），不能无差别杀进程名——用户自己的服务/GUI 同名。
 - **rcgen 证书 CN 支持 UTF-8**（UTF8String），组织名校验不必自限 ASCII；但 JSON 线上协议的规范化仍应避免浮点与转义歧义（canonical_json 只支持整数/字符串/布尔/null）。
 - **外部规格库是免费的测试官**：python-stix2 首跑即抓到 valid_until 必须严格大于 valid_from 的规格约束（同秒相等也非法）——产出"标准格式"的代码，验收标准就是用官方库解析一遍。
+- **结构性根治「漏实现」：给 trait 加方法时不写默认 Err 实现**——Console trait 的 fed 方法四次踩同一坑（fed_panel/quarantine_member/join 三件套/revoke_member 都是"覆盖了远程、漏了内嵌"），协调者本人（内嵌模式）反而用不了。**根治 = 删除默认 Err 主体，让编译器强制所有实现同步覆盖，漏写=编译错**；判断标准：默认实现若只是"返回不可用"，它就是隐形地雷而非便利。例外：确实"多数实现都合法地不支持"的能力（如 clear_xdp_map 的 Windows 侧）保留默认。
+- **跨平台端口可用性**：Windows 保留段 netsh 列表不全（os error 10013，connect 探测探不出）——选段必须真 bind 探测；固定保留用 `net stop winnat → netsh int ipv4 add excludedportrange ... store=persistent → net start winnat`（顺带清掉全部动态保留段）。
