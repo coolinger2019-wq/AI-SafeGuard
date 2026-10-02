@@ -2197,6 +2197,22 @@ impl Console for EmbeddedConsole {
         Ok(())
     }
 
+    fn fed_panel(&self) -> anyhow::Result<crate::engine::FedPanel> {
+        Ok(self.0.fed_panel())
+    }
+
+    fn quarantine_member(
+        &self,
+        node: &str,
+        lift: bool,
+        lift_fp: &str,
+        reason: &str,
+    ) -> anyhow::Result<String> {
+        self.0
+            .quarantine_member(node, lift, lift_fp, reason)
+            .map_err(anyhow::Error::msg)
+    }
+
     fn config_paths(&self) -> (String, String) {
         (
             self.0.cfg_path.display().to_string(),
