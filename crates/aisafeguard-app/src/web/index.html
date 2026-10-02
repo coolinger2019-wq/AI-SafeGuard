@@ -116,6 +116,7 @@
   <nav>
     <button data-tab="dash" class="on">仪表盘</button>
     <button data-tab="events">事件</button>
+    <button data-tab="prop">建议</button>
     <button data-tab="cfg">配置</button>
   </nav>
   <main>
@@ -138,9 +139,25 @@
     <div id="tab-events" hidden>
       <p class="hint" style="margin-bottom:8px">
         每 3 秒自动刷新，点击行展开载荷。
+        <select id="ev-kind" style="margin-left:16px"><option value="">全部类型</option></select>
         <label style="margin-left:16px"><input type="checkbox" id="ev-pause"> 暂停刷新</label>
       </p>
       <table id="ev"></table>
+    </div>
+
+    <div id="tab-prop" hidden>
+      <p class="hint" style="margin-bottom:8px">
+        AI 慢路径产出：证据 → 建议 → 人工确认。应用 = 按灰度 TTL 封禁（到期自动解封）。
+        <select id="prop-status" style="margin-left:16px">
+          <option value="">全部状态</option>
+          <option value="pending">待处理</option>
+          <option value="applied">已应用</option>
+          <option value="dismissed">已驳回</option>
+        </select>
+        <label style="margin-left:16px"><input type="checkbox" id="prop-pause"> 暂停刷新</label>
+      </p>
+      <div id="prop-msg" style="margin-bottom:8px"></div>
+      <table id="prop"></table>
     </div>
 
     <div id="tab-cfg" hidden>
@@ -164,7 +181,8 @@
 const TK_KEY = 'asg_web_token';
 const $ = (id) => document.getElementById(id);
 let token = localStorage.getItem(TK_KEY) || '';
-let evTimer = null, dashTimer = null, cfgDirty = false;
+let evTimer = null, dashTimer = null, propTimer = null, cfgDirty = false;
+let lastPropRows = [];
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g,
@@ -201,9 +219,10 @@ function showLogin() {
 }
 function enterApp() {
   $('login').hidden = true; $('app').hidden = false;
-  refreshDash(); refreshEvents();
+  refreshDash(); refreshEvents(); refreshProp();
   dashTimer = setInterval(refreshDash, 3000);
   evTimer = setInterval(refreshEvents, 3000);
+  propTimer = setInterval(refreshProp, 3000);
 }
 function logout() {
   localStorage.removeItem(TK_KEY); token = '';
@@ -227,13 +246,14 @@ $('logout').onclick = logout;
 document.querySelectorAll('nav button').forEach((b) => {
   b.onclick = () => {
     document.querySelectorAll('nav button').forEach((x) => x.classList.toggle('on', x === b));
-    ['dash', 'events', 'cfg'].forEach((t) => { $('tab-' + t).hidden = t !== b.dataset.tab; });
+    ['dash', 'events', 'prop', 'cfg'].forEach((t) => { $('tab-' + t).hidden = t !== b.dataset.tab; });
     if (b.dataset.tab === 'cfg' && !$('cfg').dataset.loaded) loadCfg();
     if (b.dataset.tab === 'events') refreshEvents(); // 别等下个轮询周期
+    if (b.dataset.tab === 'prop') refreshProp();
   };
 });
 
-function stopTimers() { clearInterval(dashTimer); clearInterval(evTimer); }
+function stopTimers() { clearInterval(dashTimer); clearInterval(evTimer); clearInterval(propTimer); }
 
 /* ---------- 仪表盘 ---------- */
 function statCard(k, v) { return '<div class="card"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>'; }
@@ -290,16 +310,28 @@ async function refreshDash() {
 }
 
 /* ---------- 事件 ---------- */
-let lastEvId = 0;
+let lastEvId = 0, evKindsKey = '';
+function syncKindFilter(rows) {
+  const kinds = [...new Set(rows.map((r) => r.kind))].sort();
+  const key = kinds.join(',');
+  if (key === evKindsKey) return;   // 选项没变化就不重建，避免打断用户正在展开的下拉
+  evKindsKey = key;
+  const sel = $('ev-kind'), cur = sel.value;
+  sel.innerHTML = '<option value="">全部类型</option>' +
+    kinds.map((k) => '<option' + (k === cur ? ' selected' : '') + '>' + esc(k) + '</option>').join('');
+}
 async function refreshEvents() {
   if ($('ev-pause').checked || $('tab-events').hidden) return;
   let rows;
   try { rows = await api('/api/events?limit=100'); setConn(true); }
   catch (e) { setConn(false); return; }
 
-  const fresh = rows.length && rows[0].id > lastEvId;
+  syncKindFilter(rows);
+  const kf = $('ev-kind').value;
+  const view = kf ? rows.filter((r) => r.kind === kf) : rows;
+  const fresh = view.length && view[0].id > lastEvId;
   lastEvId = rows.length ? rows[0].id : lastEvId;
-  const body = rows.map((e) => {
+  const body = view.map((e) => {
     const pay = (e.payload || '').slice(0, 2000);
     const rid = e.rule_id ? ' <span class="badge acc">' + esc(e.rule_id) + '</span>' : '';
     const main = '<tr data-id="' + e.id + '">' +
@@ -316,6 +348,7 @@ async function refreshEvents() {
   tbl.innerHTML = '<tr><th>时间</th><th>类型</th><th>来源</th><th>摘要</th></tr>' + body;
   if (fresh && !stick) tbl.scrollIntoView();
 }
+$('ev-kind').addEventListener('change', refreshEvents);
 $('ev').addEventListener('click', (e) => {
   const tr = e.target.closest('tr[data-id]');
   if (!tr) return;
@@ -327,6 +360,68 @@ $('ev').addEventListener('click', (e) => {
       const hit = rows.find((x) => String(x.id) === tr.dataset.id);
       pay.querySelector('pre').textContent = hit ? (hit.payload || '（无载荷）') : '';
     });
+  }
+});
+
+/* ---------- 建议 ---------- */
+function propBadge(st) {
+  return st === 'pending' ? '<span class="badge warn">待处理</span>'
+       : st === 'applied'  ? '<span class="badge ok">已应用</span>'
+       : '<span class="badge err">已驳回</span>';
+}
+async function refreshProp() {
+  if ($('prop-pause').checked || $('tab-prop').hidden) return;
+  let rows;
+  try { rows = await api('/api/proposals'); setConn(true); }
+  catch (e) { setConn(false); return; }
+  lastPropRows = rows;
+
+  const f = $('prop-status').value;
+  const view = rows.filter((p) => !f || p.status === f);
+  const body = view.map((p) => {
+    const sev = (p.severity === 'high' || p.severity === 'critical') ? 'err'
+              : p.severity === 'medium' ? 'warn' : 'acc';
+    const acts = p.status === 'pending'
+      ? '<button class="act" style="padding:2px 10px;font-size:11.5px" data-apply="' + p.id + '">应用</button> ' +
+        '<button class="act ghost" style="padding:2px 10px;font-size:11.5px" data-dismiss="' + p.id + '">驳回</button>'
+      : '';
+    const main = '<tr data-pid="' + p.id + '">' +
+      '<td class="mono hint">' + fmtTs(p.created_ts) + '</td>' +
+      '<td><span class="badge ' + sev + '">' + esc(p.severity) + '</span></td>' +
+      '<td>' + esc(p.action) + '</td>' +
+      '<td class="mono">' + esc(p.remote_ip) + (p.local_port ? ':' + p.local_port : '') + '</td>' +
+      '<td>' + esc(p.reason) + '</td>' +
+      '<td>' + propBadge(p.status) + '</td>' +
+      '<td>' + acts + '</td></tr>';
+    return main + '<tr class="payload" data-for-p="' + p.id + '" hidden><td colspan="7"><pre></pre></td></tr>';
+  }).join('');
+  $('prop').innerHTML = '<tr><th>时间</th><th>严重度</th><th>动作</th><th>目标</th><th>理由</th><th>状态</th><th>操作</th></tr>' +
+    (body || '<tr><td colspan="7" class="hint">暂无建议</td></tr>');
+}
+function showPropMsg(text) { $('prop-msg').textContent = text; }
+$('prop-status').addEventListener('change', refreshProp);
+$('prop').addEventListener('click', async (e) => {
+  const apply = e.target.closest('button[data-apply]');
+  const dismiss = e.target.closest('button[data-dismiss]');
+  if (apply || dismiss) {
+    const id = apply ? apply.dataset.apply : dismiss.dataset.dismiss;
+    if (apply && !confirm('应用建议 #' + id + '：按灰度 TTL 封禁目标 IP，到期自动解封。确认？')) return;
+    try {
+      await api('/api/proposals/' + id + (apply ? '/apply' : '/dismiss'), { method: 'POST' });
+      showPropMsg('建议 #' + id + ' 已' + (apply ? '应用（灰度封禁生效）' : '驳回') + '。');
+      refreshProp();
+    } catch (err) { showPropMsg('操作失败：' + err.message); }
+    return;
+  }
+  const tr = e.target.closest('tr[data-pid]');
+  if (!tr) return;
+  const pay = document.querySelector('tr.payload[data-for-p="' + tr.dataset.pid + '"]');
+  if (!pay) return;
+  pay.hidden = !pay.hidden;
+  if (!pay.hidden) {
+    const p = lastPropRows.find((x) => String(x.id) === tr.dataset.pid);
+    pay.querySelector('pre').textContent = p ? ((p.analysis || p.reason || '（无详情）') +
+      (p.ttl_secs ? '\n灰度时长: ' + Math.round(p.ttl_secs / 60) + ' 分钟' : '')) : '';
   }
 });
 
