@@ -267,3 +267,7 @@
 - **`[hidden]` 会被任何 display 规则盖掉**：`#login { display:flex }` 让 `hidden` 属性失效（UA 样式特异性低于 id 选择器），页面出现"两个界面叠着"。一条 `[hidden] { display:none !important }` 兜底根治。
 - **`include_str!` 是编译期内嵌**：改了 HTML 忘了重编译，"修复没生效"的假象会浪费一轮排查——改内嵌资源必须重编译再验证。
 - **远程查看的产品定式**：egui `--remote` 走隧道每步操作都是一次 RTT 往返，操作体验天然差；浏览器 + 轮询是远程看板的正解（数据端点本来就有，只缺页面）。操作类功能仍留给桌面 GUI——读写分离，不为了统一而把表单全搬进浏览器。
+
+## VPS sshd 加固被云镜像覆盖（2026-10-03）
+
+- **sshd 配置是"先到先得"（first match wins），不是后者覆盖**：同一配置项第一次出现即生效——`sshd_config.d/` 里按文件名字母序处理，云镜像自带的 `50-cloud-init.conf`（`PasswordAuthentication yes`）排在自写的 `99-asg-hardening.conf` 之前，加固的 `no` 被静默忽略，`sshd -T` 才能看出来（当时只核对了文件存在，没核对生效值）。**自写 drop-in 一律用 `00-` 前缀 + 改完必须 `sshd -T` 验生效值**，别只看文件写没写。Ubuntu 24.04 服务名是 `ssh` 不是 `sshd`（reload sshd 会报 unit not found）。
