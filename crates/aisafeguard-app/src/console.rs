@@ -94,6 +94,10 @@ pub trait Console: Send + Sync {
     fn join_import(&self, _approval_json: &str, _coord_addr: &str) -> anyhow::Result<String> {
         Err(anyhow::anyhow!("入伙向导不可用"))
     }
+    /// F740：吊销驱离（与 CLI 同一通路；立即断一切连接，重新加入需重新发证）
+    fn revoke_member(&self, _node: &str, _reason: &str) -> anyhow::Result<String> {
+        Err(anyhow::anyhow!("吊销不可用"))
+    }
     /// F500 组织面板数据（只读；members/stats 仅协调者角色有值）
     fn fed_panel(&self) -> anyhow::Result<crate::engine::FedPanel> {
         Err(anyhow::anyhow!("组织面板不可用"))

@@ -1161,6 +1161,14 @@ pub fn load_revocations(data_dir: &Path) -> std::collections::HashSet<String> {
 /// `fed revoke <fp|node> [原因]`：按指纹或节点名（读 certs/<node>.pem 算指纹）吊销。
 /// 立即生效——协调者每次连接检查该集合，不依赖证书有效期。
 pub fn cmd_revoke(data_dir: &Path, target: &str, reason: &str) -> anyhow::Result<String> {
+    let fp = do_revoke(data_dir, target, reason)?;
+    println!("✓ 已吊销 {target}（指纹 {fp}）：该证书的一切连接将被立即拒绝");
+    Ok(fp)
+}
+
+/// 吊销核心（F740：GUI 面板与 CLI 同一通路）。target = 64 位指纹或节点名。
+/// 吊销立即生效（连接级拒连，心跳也断）——与软隔离的区别：隔离留观察，吊销是驱离。
+pub fn do_revoke(data_dir: &Path, target: &str, reason: &str) -> anyhow::Result<String> {
     let fp = if target.len() == 64 && target.chars().all(|c| c.is_ascii_hexdigit()) {
         target.to_ascii_lowercase()
     } else {

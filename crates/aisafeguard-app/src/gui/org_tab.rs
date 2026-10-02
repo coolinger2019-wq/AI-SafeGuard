@@ -153,7 +153,9 @@ impl AisafeApp {
 
                     for m in &panel.members {
                         ui.label(mono_text(&m.node));
-                        let (status_text, color) = if m.status == "quarantined" {
+                        let (status_text, color) = if m.revoked {
+                            ("已吊销", danger())
+                        } else if m.status == "quarantined" {
                             ("隔离中", warn())
                         } else {
                             ("正常", accent())
@@ -174,7 +176,9 @@ impl AisafeApp {
                             m.cert_fp.get(0..16).unwrap_or(&m.cert_fp).to_string(),
                         ));
                         // 操作：与 CLI 同一 DB 通路（POST /api/fed/members/{node}/…）
-                        if m.status == "quarantined" {
+                        if m.revoked {
+                            ui.label(caption("连接已拒绝"));
+                        } else if m.status == "quarantined" {
                             ui.horizontal(|ui| {
                                 ui.add(
                                     egui::TextEdit::singleline(&mut self.org_lift_fp)
@@ -217,6 +221,37 @@ impl AisafeApp {
                                             self.refresh_cache();
                                         }
                                         Err(e) => self.set_toast(format!("隔离失败：{e}")),
+                                    }
+                                }
+                                // 吊销两步确认（驱离 = 死刑，防误点）：
+                                let confirming =
+                                    self.org_pending_revoke.as_deref() == Some(m.node.as_str());
+                                let label = if confirming {
+                                    format!("确认吊销 {}？", m.node)
+                                } else {
+                                    "吊销驱离".to_string()
+                                };
+                                let btn = egui::Button::new(RichText::new(label).color(danger()));
+                                if ui.add(btn).clicked() {
+                                    let node = m.node.clone();
+                                    if confirming {
+                                        let reason = self.org_reason.trim().to_string();
+                                        match self.eng.revoke_member(&node, &reason) {
+                                            Ok(msg) => {
+                                                self.org_pending_revoke = None;
+                                                self.set_toast(msg);
+                                                self.refresh_cache();
+                                            }
+                                            Err(e) => {
+                                                self.org_pending_revoke = None;
+                                                self.set_toast(format!("吊销失败：{e}"))
+                                            }
+                                        }
+                                    } else {
+                                        self.set_toast(format!(
+                                            "吊销 = 立即断开 {node} 的一切连接（心跳也断）。再点一次确认"
+                                        ));
+                                        self.org_pending_revoke = Some(node);
                                     }
                                 }
                             });

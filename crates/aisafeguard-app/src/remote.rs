@@ -235,6 +235,16 @@ impl Console for RemoteConsole {
         Ok(self.get("/api/fed/panel")?.json()?)
     }
 
+    fn revoke_member(&self, node: &str, reason: &str) -> anyhow::Result<String> {
+        let v: serde_json::Value = self
+            .post_json(
+                &format!("/api/fed/members/{node}/revoke"),
+                &serde_json::json!({ "reason": reason }),
+            )?
+            .json()?;
+        Ok(v["message"].as_str().unwrap_or("完成").to_string())
+    }
+
     fn join_request_create(&self, node: &str) -> anyhow::Result<(String, String)> {
         let v: serde_json::Value = self
             .post_json("/api/fed/join/request", &serde_json::json!({ "node": node }))?

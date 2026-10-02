@@ -133,6 +133,7 @@ pub struct AisafeApp {
     org_lift_fp: String,
     org_node_name: String,
     org_coord_addr: String,
+    org_pending_revoke: Option<String>,
     // 事件详情（0.5.6 F14）：选中事件的 id，详情面板从缓存按 id 取
     event_detail_id: Option<i64>,
     // 设置草稿（None = 未编辑；进入设置页时从引擎取）
@@ -223,6 +224,7 @@ impl AisafeApp {
             org_lift_fp: String::new(),
             org_node_name: String::new(),
             org_coord_addr: String::new(),
+            org_pending_revoke: None,
             event_detail_id: None,
             settings_draft: None,
             settings_page: SettingsPage::default(),

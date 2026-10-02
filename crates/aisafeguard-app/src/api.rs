@@ -47,6 +47,10 @@ pub async fn serve(engine: Arc<EngineHandle>) {
         .route("/api/xdp/clear", post(xdp_clear))
         .route("/api/fed/panel", get(fed_panel))
         .route("/api/fed/members/{node}/quarantine", post(fed_member_quarantine))
+        .route(
+            "/api/fed/members/{node}/revoke",
+            post(fed_member_revoke),
+        )
         .route("/api/fed/join/request", post(fed_join_request))
         .route("/api/fed/join/approve", post(fed_join_approve))
         .route("/api/fed/join/import", post(fed_join_import))
@@ -221,6 +225,27 @@ async fn apply_proposal(State(s): State<AppState>, Path(id): Path<i64>) -> Respo
 /// F500 组织面板数据（只读）
 async fn fed_panel(State(s): State<AppState>) -> Response {
     Json(s.engine.fed_panel()).into_response()
+}
+
+/// F740 吊销驱离（面板与 CLI 同一通路；立即断一切连接）
+#[derive(Deserialize, Default)]
+struct RevokeBody {
+    #[serde(default)]
+    reason: String,
+}
+
+async fn fed_member_revoke(
+    State(s): State<AppState>,
+    Path(node): Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    let reason = serde_json::from_slice::<RevokeBody>(&body)
+        .map(|b| b.reason)
+        .unwrap_or_default();
+    match s.engine.revoke_member(&node, &reason) {
+        Ok(msg) => Json(json!({ "ok": true, "message": msg })).into_response(),
+        Err(e) => err_resp(aisafeguard_core::error::Error::Config(e.to_string())),
+    }
 }
 
 /// F740 入伙向导：成员生成入伙申请

@@ -292,6 +292,9 @@ pub struct FedPanelMember {
     pub status: String,
     pub last_seen: i64,
     pub cert_fp: String,
+    /// F740：该成员证书是否已吊销（吊销表对照；吊销后一切连接被拒）
+    #[serde(default)]
+    pub revoked: bool,
 }
 
 /// 规则子集引擎运行状态（加载留痕 + 命中计数，GUI/API 只读展示）。
@@ -514,11 +517,16 @@ impl EngineHandle {
         let cfg = self.config();
         let now = now_ts();
         let members = if cfg.fed.role == "coordinator" {
+            let revoked: std::collections::HashSet<String> =
+                crate::fed::load_revocations(&cfg.data_dir())
+                    .into_iter()
+                    .collect();
             self.store
                 .list_fed_members()
                 .unwrap_or_default()
                 .into_iter()
                 .map(|(node, cert_fp, last_seen, status)| FedPanelMember {
+                    revoked: revoked.contains(&cert_fp),
                     node,
                     status,
                     last_seen,
@@ -562,6 +570,19 @@ impl EngineHandle {
     ) -> Result<String> {
         crate::fed::do_quarantine(&self.store, node, lift, lift_fp, reason)
             .map_err(|e| Error::Store(e.to_string()))
+    }
+
+    /// F740：吊销驱离（GUI 面板与 CLI 同一通路）。立即断该证书的一切连接
+    /// （含心跳）——与软隔离的区别：隔离留观察，吊销是驱离；重新加入需重新发证。
+    pub fn revoke_member(&self, node: &str, reason: &str) -> anyhow::Result<String> {
+        let fp = crate::fed::do_revoke(&self.config().data_dir(), node, reason)?;
+        self.bus.publish(SecurityEvent::engine(
+            "warn",
+            format!("节点 {node} 已吊销驱离（{reason}）：一切连接立即拒绝；重新加入需重新签发证书"),
+        ));
+        Ok(format!(
+            "已吊销 {node}（指纹 {fp}）：一切连接立即拒绝。重新加入需重新签发证书并删除吊销记录"
+        ))
     }
 
     // ---------- F740 入伙向导（EngineHandle 粘合） ----------
