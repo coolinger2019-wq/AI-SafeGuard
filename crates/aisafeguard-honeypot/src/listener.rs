@@ -351,6 +351,19 @@ async fn run_listener(
                 ));
                 return; // 退出任务：热启动会重拉重试
             }
+            Err(e) if e.raw_os_error() == Some(10013) => {
+                // Windows 专属：端口落在系统动态保留段（Hyper-V/winnat 随机圈走，
+                // netsh interface ipv4 show excludedportrange 可查且重启后可能变化）
+                running.store(false, Ordering::Relaxed);
+                bus.publish(SecurityEvent::engine(
+                    "error",
+                    format!(
+                        "蜜罐 [{}] 绑定 :{} 失败：端口落在 Windows 系统保留段（os error 10013）——换端口，或以管理员执行 netsh int ipv4 add excludedportrange 把该端口固定保留",
+                        l.name, l.port
+                    ),
+                ));
+                return;
+            }
             Err(e) => {
                 running.store(false, Ordering::Relaxed);
                 bus.publish(SecurityEvent::engine(
