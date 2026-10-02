@@ -340,6 +340,17 @@ async fn run_listener(
         }
         let listener = match TcpListener::bind(addr).await {
             Ok(v) => v,
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                running.store(false, Ordering::Relaxed);
+                bus.publish(SecurityEvent::engine(
+                    "error",
+                    format!(
+                        "蜜罐 [{}] 绑定 :{} 失败：端口已被占用——很可能另一个 AI-SafeGuard 实例正在运行（单机只应运行一个实例），结束另一实例后热启动或重启本程序",
+                        l.name, l.port
+                    ),
+                ));
+                return; // 退出任务：热启动会重拉重试
+            }
             Err(e) => {
                 running.store(false, Ordering::Relaxed);
                 bus.publish(SecurityEvent::engine(

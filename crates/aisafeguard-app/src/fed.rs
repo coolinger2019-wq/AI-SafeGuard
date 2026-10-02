@@ -1578,7 +1578,13 @@ pub async fn serve_coordinator(engine: Arc<EngineHandle>) -> Result<(), String> 
         .map_err(|_| format!("listen_addr 非法: {}", cfg.listen_addr))?;
     let listener = tokio::net::TcpListener::bind(addr)
         .await
-        .map_err(|e| format!("mTLS 监听 {addr} 绑定失败: {e}"))?;
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                format!("mTLS 监听 {addr} 绑定失败：端口已被占用——很可能另一个 AI-SafeGuard 协调者实例正在运行（单机只应运行一个协调者）")
+            } else {
+                format!("mTLS 监听 {addr} 绑定失败: {e}")
+            }
+        })?;
     tracing::info!("组织协同 mTLS 面已监听 {addr}");
     let app = fed_router(engine.clone());
     let (audit_bus, audit_dir) = {

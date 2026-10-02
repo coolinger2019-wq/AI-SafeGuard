@@ -68,7 +68,13 @@ pub async fn serve(engine: Arc<EngineHandle>) {
             }
         }
         Err(e) => {
-            tracing::error!("API 绑定 127.0.0.1:{port} 失败: {e}");
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                tracing::error!(
+                    "API 绑定 127.0.0.1:{port} 失败：端口已被占用——很可能另一个 AI-SafeGuard 实例正在运行（单机只应运行一个实例）"
+                );
+            } else {
+                tracing::error!("API 绑定 127.0.0.1:{port} 失败: {e}");
+            }
         }
     }
 }
