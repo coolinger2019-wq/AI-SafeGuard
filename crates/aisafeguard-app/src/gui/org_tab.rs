@@ -181,18 +181,22 @@ impl AisafeApp {
                                         .hint_text("指纹前缀 ≥16 位")
                                         .desired_width(180.0),
                                 );
-                                if ui.button("解除隔离").clicked()
-                                    && !self.org_lift_fp.trim().is_empty()
-                                {
-                                    let node = m.node.clone();
+                                if ui.button("解除隔离").clicked() {
                                     let fp = self.org_lift_fp.trim().to_string();
-                                    match self.eng.quarantine_member(&node, true, &fp, "") {
-                                        Ok(msg) => {
-                                            self.org_lift_fp.clear();
-                                            self.set_toast(msg);
-                                            self.refresh_cache();
+                                    if fp.is_empty() {
+                                        self.set_toast(
+                                            "解除需填该成员的证书指纹前缀（≥16 位）——从下表「证书指纹」列复制",
+                                        );
+                                    } else {
+                                        let node = m.node.clone();
+                                        match self.eng.quarantine_member(&node, true, &fp, "") {
+                                            Ok(msg) => {
+                                                self.org_lift_fp.clear();
+                                                self.set_toast(msg);
+                                                self.refresh_cache();
+                                            }
+                                            Err(e) => self.set_toast(format!("解除失败：{e}")),
                                         }
-                                        Err(e) => self.set_toast(format!("解除失败：{e}")),
                                     }
                                 }
                             });

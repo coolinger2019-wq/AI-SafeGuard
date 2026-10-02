@@ -1550,7 +1550,8 @@ impl Store {
     pub fn list_fed_members(&self) -> Result<Vec<(String, String, i64, String)>> {
         let conn = self.lock()?;
         let mut stmt = conn
-            .prepare("SELECT node, cert_fp, last_seen, status FROM fed_members ORDER BY last_seen DESC")
+            // 按节点名稳定排序：last_seen 排序会因心跳交替导致面板行跳动
+            .prepare("SELECT node, cert_fp, last_seen, status FROM fed_members ORDER BY node")
             .map_err(|e| Error::Store(e.to_string()))?;
         let rows = stmt
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
