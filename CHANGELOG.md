@@ -49,7 +49,12 @@
   读写 config.toml 原文；服务端先解析校验后写盘+热更，返回需重启项列表）。
   安全边界不变：静态壳无数据免 token，`/api/*` 仍
   Bearer；API 仍只听本机回环，跨机只能走 SSH 隧道。纯 vanilla JS 单文件内嵌（include_str!），
-  零前端构建链、零外部依赖（无 CDN）。**磁盘覆盖优先**：`<data_dir>/web/index.html` 存在
+  零前端构建链、零外部依赖（无 CDN）。**面板可操作**（v1.1，用户反馈驱动）：蜜罐监听
+  热启停按钮、AI 立即分析、情报立即刷新、暴露面立即扫描、`POST /api/service/restart`
+  面板重启服务（Linux systemd `--no-block`，延迟 1s 让响应先走、审计事件留痕；Windows
+  明确报错引导服务管理器）、新增防火墙页（规则来源/TTL 状态/剩余时间/原因）、Top 来源
+  IP 归属查询（第三方 ip-api.com 备用 ipwho.is，仅查询攻击者 IP，结果缓存本机）。
+  **磁盘覆盖优先**：`<data_dir>/web/index.html` 存在
   则覆盖内嵌版（开发/定制热改——改文件刷新浏览器即生效，无需重编译；删除即回归内嵌，
   发布仍是单二进制）。egui `--remote` 模式保留为全功能备选（规则/
   组织面板操作）。

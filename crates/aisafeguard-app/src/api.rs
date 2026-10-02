@@ -61,6 +61,7 @@ pub async fn serve(engine: Arc<EngineHandle>) {
         .route("/api/intel/refresh", post(refresh_intel))
         .route("/api/config", get(get_config).post(put_config))
         .route("/api/config/raw", get(get_config_raw).put(put_config_raw))
+        .route("/api/service/restart", post(service_restart))
         .route(
             "/api/ai/key",
             get(ai_key_present).post(ai_key_set).delete(ai_key_delete),
@@ -519,6 +520,31 @@ async fn web_console(State(s): State<AppState>) -> Response {
         return Html(raw).into_response();
     }
     Html(include_str!("web/index.html")).into_response()
+}
+
+/// 面板触发服务重启（F790）：Linux systemd `restart --no-block`——先落一条 warn
+/// 审计事件再执行。Windows 服务/GUI 无自重启通路，明确报错引导服务管理器。
+async fn service_restart(State(s): State<AppState>) -> Response {
+    if cfg!(windows) {
+        return err_resp(aisafeguard_core::error::Error::Config(
+            "面板重启仅支持 Linux systemd 部署；Windows 请用服务管理器重启 AISafeGuard 服务"
+                .into(),
+        ));
+    }
+    s.engine.bus.publish(aisafeguard_core::event::SecurityEvent::engine(
+        "warn",
+        "面板触发服务重启",
+    ));
+    // 延迟 1 秒再重启：让 HTTP 响应先走完（直接 restart 会和响应竞态，curl/页面只会看到断连）
+    match std::process::Command::new("sh")
+        .args(["-c", "sleep 1; systemctl restart --no-block aisafeguard.service"])
+        .spawn()
+    {
+        Ok(_) => Json(json!({ "ok": true, "message": "重启已触发，服务将在数秒内回来" })).into_response(),
+        Err(e) => err_resp(aisafeguard_core::error::Error::Config(format!(
+            "执行 systemctl 失败: {e}"
+        ))),
+    }
 }
 
 /// config.toml 原文（文本编辑器加载用）。

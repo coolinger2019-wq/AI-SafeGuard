@@ -117,6 +117,7 @@
     <button data-tab="dash" class="on">仪表盘</button>
     <button data-tab="events">事件</button>
     <button data-tab="prop">建议</button>
+    <button data-tab="fw">防火墙</button>
     <button data-tab="cfg">配置</button>
   </nav>
   <main>
@@ -131,9 +132,26 @@
         <table id="listeners"></table>
       </section>
       <section>
-        <h2>Top 来源（24h）</h2>
+        <h2>快捷操作</h2>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="act" data-op="ai">AI 立即分析</button>
+          <button class="act" data-op="intel">情报立即刷新</button>
+          <button class="act" data-op="expo">暴露面立即扫描</button>
+          <span class="hint" id="op-msg"></span>
+        </div>
+      </section>
+      <section>
+        <h2>Top 来源（24h）<span class="hint" style="font-weight:400;font-size:12px">　点「详情」查归属（第三方 ip-api.com，仅查询攻击者 IP）</span></h2>
         <table class="toplist" id="topips"></table>
       </section>
+    </div>
+
+    <div id="tab-fw" hidden>
+      <p class="hint" style="margin-bottom:8px">
+        防火墙当前生效的封禁规则（含 AI 灰度/自动封禁/手动/组织来源），每 3 秒自动刷新。
+        <label style="margin-left:16px"><input type="checkbox" id="fw-pause"> 暂停刷新</label>
+      </p>
+      <table id="fw"></table>
     </div>
 
     <div id="tab-events" hidden>
@@ -164,6 +182,7 @@
       <div id="cfg-tools">
         <button class="act" id="cfg-save">保存</button>
         <button class="act ghost" id="cfg-reload">放弃并重新加载</button>
+        <button class="act ghost" id="cfg-restart" style="color:var(--danger);border-color:var(--danger)">重启服务</button>
         <span class="hint" id="cfg-dirty"></span>
       </div>
       <textarea id="cfg" spellcheck="false"></textarea>
@@ -181,8 +200,12 @@
 const TK_KEY = 'asg_web_token';
 const $ = (id) => document.getElementById(id);
 let token = localStorage.getItem(TK_KEY) || '';
-let evTimer = null, dashTimer = null, propTimer = null, cfgDirty = false;
+let evTimer = null, dashTimer = null, propTimer = null, fwTimer = null, cfgDirty = false;
 let lastPropRows = [];
+// 展开状态跨轮询保持：重渲染时按 Set 恢复展开行（用户点开即保持，再点收起）
+const expandedEv = new Set(), expandedProp = new Set(), expandedGeo = new Set();
+// 无变化跳过重绘（防闪烁/防滚动跳变/防按钮被重建吞点击）
+const lastHtml = {};
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g,
@@ -211,6 +234,73 @@ async function api(path, opt = {}) {
 function setConn(ok) {
   $('conn').innerHTML = '<span class="dot ' + (ok ? 'ok' : 'err') + '"></span>';
 }
+// 无变化跳过重绘：防闪烁、防滚动跳变、防按钮重建吞点击
+function setHtml(key, el, html) {
+  if (lastHtml[key] === html) return;
+  lastHtml[key] = html;
+  el.innerHTML = html;
+}
+let toastIv = null;
+function toast(msg) {
+  let t = document.getElementById('asg-toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'asg-toast';
+    t.style.cssText = 'position:fixed;right:16px;bottom:16px;background:var(--bg-card);border:1px solid var(--border);padding:10px 16px;border-radius:8px;font-size:13px;z-index:9;box-shadow:0 4px 16px rgba(0,0,0,.4)';
+    document.body.appendChild(t);
+  }
+  t.textContent = msg; t.style.display = 'block';
+  clearTimeout(toastIv);
+  toastIv = setTimeout(() => { t.style.display = 'none'; }, 3000);
+}
+/* IP 归属查询（第三方 ip-api.com，备用 ipwho.is；仅查询攻击者来源 IP，结果缓存本机） */
+let geoCache = {};
+try { geoCache = JSON.parse(localStorage.getItem('asg_geo') || '{}'); } catch (_) { geoCache = {}; }
+let geoFailUntil = 0;
+function geoText(ip) {
+  const g = geoCache[ip];
+  if (!g) return '查询中…（第三方 ip-api.com）';
+  if (g.error) return '查询失败：' + g.error + '（可稍后再点一次）';
+  return '🌍 ' + (g.country || '未知') + (g.city ? ' · ' + g.city : '') +
+    '　' + (g.isp || 'ISP 未知') + (g.asn ? '（AS' + g.asn + '）' : '');
+}
+async function geoLookup(ip) {
+  const c = geoCache[ip];
+  if (c && (!c.error || Date.now() < geoFailUntil)) return c; // 失败结果缓存 60s 防连轰
+  let v;
+  try {
+    const r = await fetch('http://ip-api.com/json/' + encodeURIComponent(ip) + '?fields=status,message,country,city,isp,as&lang=zh-CN');
+    const j = await r.json();
+    if (j.status !== 'success') throw new Error(j.message || '查询失败');
+    v = { country: j.country || '', city: j.city || '', isp: j.isp || '', asn: (j.as || '').replace(/^AS/, '') };
+  } catch (e1) {
+    try {
+      const r = await fetch('https://ipwho.is/' + encodeURIComponent(ip));
+      const j = await r.json();
+      if (!j || j.success === false) throw new Error((j && j.message) || '查询失败');
+      v = { country: j.country || '', city: j.city || '', isp: (j.connection && (j.connection.org || j.connection.isp)) || '', asn: (j.connection && j.connection.asn) || '' };
+    } catch (e2) {
+      v = { error: (e1 && e1.message) || (e2 && e2.message) || '查询失败' };
+      geoFailUntil = Date.now() + 60000;
+    }
+  }
+  geoCache[ip] = v;
+  try { localStorage.setItem('asg_geo', JSON.stringify(geoCache)); } catch (_) {}
+  return v;
+}
+function fillGeo(ip) {
+  const pay = document.querySelector('tr[data-geopay="' + CSS.escape(ip) + '"] pre');
+  if (!pay) return;
+  if (geoCache[ip]) { pay.textContent = geoText(ip); return; }
+  pay.textContent = '查询中…（第三方 ipwho.is）';
+  geoLookup(ip).then(() => {
+    const p = document.querySelector('tr[data-geopay="' + CSS.escape(ip) + '"] pre');
+    if (p) p.textContent = geoText(ip);
+  }).catch((err) => {
+    const p = document.querySelector('tr[data-geopay="' + CSS.escape(ip) + '"] pre');
+    if (p) p.textContent = '查询失败：' + err.message;
+  });
+}
 
 /* ---------- 登录 ---------- */
 function showLogin() {
@@ -219,10 +309,11 @@ function showLogin() {
 }
 function enterApp() {
   $('login').hidden = true; $('app').hidden = false;
-  refreshDash(); refreshEvents(); refreshProp();
+  refreshDash(); refreshEvents(); refreshProp(); refreshFw();
   dashTimer = setInterval(refreshDash, 3000);
   evTimer = setInterval(refreshEvents, 3000);
   propTimer = setInterval(refreshProp, 3000);
+  fwTimer = setInterval(refreshFw, 3000);
 }
 function logout() {
   localStorage.removeItem(TK_KEY); token = '';
@@ -246,14 +337,15 @@ $('logout').onclick = logout;
 document.querySelectorAll('nav button').forEach((b) => {
   b.onclick = () => {
     document.querySelectorAll('nav button').forEach((x) => x.classList.toggle('on', x === b));
-    ['dash', 'events', 'prop', 'cfg'].forEach((t) => { $('tab-' + t).hidden = t !== b.dataset.tab; });
+    ['dash', 'events', 'prop', 'fw', 'cfg'].forEach((t) => { $('tab-' + t).hidden = t !== b.dataset.tab; });
     if (b.dataset.tab === 'cfg' && !$('cfg').dataset.loaded) loadCfg();
     if (b.dataset.tab === 'events') refreshEvents(); // 别等下个轮询周期
     if (b.dataset.tab === 'prop') refreshProp();
+    if (b.dataset.tab === 'fw') refreshFw();
   };
 });
 
-function stopTimers() { clearInterval(dashTimer); clearInterval(evTimer); clearInterval(propTimer); }
+function stopTimers() { clearInterval(dashTimer); clearInterval(evTimer); clearInterval(propTimer); clearInterval(fwTimer); }
 
 /* ---------- 仪表盘 ---------- */
 function statCard(k, v) { return '<div class="card"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>'; }
@@ -293,24 +385,78 @@ async function refreshDash() {
   $('engine').innerHTML = eng.map(([k, v]) =>
     '<div class="card"><div class="k">' + k + '</div><div class="v" style="font-size:15.5px">' + v + '</div></div>').join('');
 
-  const rows = st.listeners.map((l) =>
-    '<tr><td class="mono">' + esc(l.name) + '</td><td class="mono">' + l.port + '</td><td>' +
-    esc(l.kind) + '</td><td>' + esc(l.mode || '低交互') + '</td><td>' +
-    (l.running ? '<span class="badge ok">运行中</span>' : '<span class="badge err">未运行</span>') +
-    '</td></tr>').join('');
-  $('listeners').innerHTML =
-    '<tr><th>监听</th><th>端口</th><th>类型</th><th>交互</th><th>状态</th></tr>' +
-    (rows || '<tr><td colspan="5" class="hint">无监听</td></tr>');
+  const rows = st.listeners.map((l) => {
+    const act = l.running
+      ? '<button class="act ghost" style="padding:2px 10px;font-size:11.5px" data-ls="stop" data-name="' + esc(l.name) + '">停止</button>'
+      : '<button class="act" style="padding:2px 10px;font-size:11.5px" data-ls="start" data-name="' + esc(l.name) + '">启动</button>';
+    return '<tr><td class="mono">' + esc(l.name) + '</td><td class="mono">' + l.port + '</td><td>' +
+      esc(l.kind) + '</td><td>' + esc(l.mode || '低交互') + '</td><td>' +
+      (l.running ? '<span class="badge ok">运行中</span>' : '<span class="badge err">未运行</span>') +
+      '</td><td>' + act + '</td></tr>';
+  }).join('');
+  setHtml('listeners', $('listeners'),
+    '<tr><th>监听</th><th>端口</th><th>类型</th><th>交互</th><th>状态</th><th>操作</th></tr>' +
+    (rows || '<tr><td colspan="6" class="hint">无监听</td></tr>'));
 
-  const top = (stats.top_ips || []).slice(0, 8).map((t, i) =>
-    '<tr><td class="mono">' + (i + 1) + '</td><td class="mono">' + esc(t.ip) + '</td><td>' + t.hits + '</td></tr>').join('');
-  $('topips').innerHTML =
-    '<tr><th>#</th><th>来源 IP</th><th>命中</th></tr>' +
-    (top || '<tr><td colspan="3" class="hint">暂无数据</td></tr>');
+  const top = (stats.top_ips || []).slice(0, 8).map((t, i) => {
+    const open = expandedGeo.has(t.ip);
+    return '<tr><td class="mono">' + (i + 1) + '</td><td class="mono">' + esc(t.ip) + '</td><td>' + t.hits + '</td>' +
+      '<td><button class="act ghost" style="padding:2px 10px;font-size:11.5px" data-geo="' + esc(t.ip) + '">详情</button></td></tr>' +
+      '<tr class="payload" data-geopay="' + esc(t.ip) + '"' + (open ? '' : ' hidden') + '><td colspan="4"><pre></pre></td></tr>';
+  }).join('');
+  setHtml('topips', $('topips'),
+    '<tr><th>#</th><th>来源 IP</th><th>命中</th><th>归属</th></tr>' +
+    (top || '<tr><td colspan="4" class="hint">暂无数据</td></tr>'));
+  expandedGeo.forEach(fillGeo);
 }
 
+$('listeners').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-ls]');
+  if (!btn) return;
+  const name = btn.dataset.name, act = btn.dataset.ls;
+  btn.disabled = true;
+  try {
+    await api('/api/honeypot/listeners/' + encodeURIComponent(name) + '/' + act, { method: 'POST' });
+    toast((act === 'stop' ? '已停止 ' : '已启动 ') + name + '（热生效）');
+    refreshDash();
+  } catch (err) { btn.disabled = false; toast('操作失败：' + err.message); }
+});
+
+$('topips').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-geo]');
+  if (!btn) return;
+  const ip = btn.dataset.geo;
+  const pay = document.querySelector('tr[data-geopay="' + CSS.escape(ip) + '"]');
+  if (!pay) return;
+  if (expandedGeo.has(ip)) { expandedGeo.delete(ip); pay.hidden = true; return; }
+  expandedGeo.add(ip);
+  pay.hidden = false;
+  fillGeo(ip);
+});
+
+document.querySelectorAll('button[data-op]').forEach((b) => {
+  b.onclick = async () => {
+    const op = b.dataset.op;
+    b.disabled = true;
+    $('op-msg').textContent = '执行中…';
+    try {
+      if (op === 'ai') {
+        const r = await api('/api/ai/analyze', { method: 'POST' });
+        $('op-msg').textContent = (r && r.message) || '分析已开始（结果见事件与建议页）';
+      } else if (op === 'intel') {
+        await api('/api/intel/refresh', { method: 'POST' });
+        $('op-msg').textContent = '情报刷新已开始，结果见事件流';
+      } else if (op === 'expo') {
+        const r = await api('/api/exposure/scan', { method: 'POST' });
+        $('op-msg').textContent = '扫描完成：' + (r.entries ? r.entries.length : 0) + ' 个对外监听端点（详情见 GUI/接口）';
+      }
+    } catch (e2) { $('op-msg').textContent = '失败：' + e2.message; }
+    b.disabled = false;
+  };
+});
+
 /* ---------- 事件 ---------- */
-let lastEvId = 0, evKindsKey = '';
+let evKindsKey = '';
 function syncKindFilter(rows) {
   const kinds = [...new Set(rows.map((r) => r.kind))].sort();
   const key = kinds.join(',');
@@ -329,38 +475,31 @@ async function refreshEvents() {
   syncKindFilter(rows);
   const kf = $('ev-kind').value;
   const view = kf ? rows.filter((r) => r.kind === kf) : rows;
-  const fresh = view.length && view[0].id > lastEvId;
-  lastEvId = rows.length ? rows[0].id : lastEvId;
   const body = view.map((e) => {
     const pay = (e.payload || '').slice(0, 2000);
     const rid = e.rule_id ? ' <span class="badge acc">' + esc(e.rule_id) + '</span>' : '';
+    const open = expandedEv.has(e.id);
     const main = '<tr data-id="' + e.id + '">' +
       '<td class="mono hint">' + fmtTs(e.ts) + '</td>' +
       '<td>' + esc(e.kind) + (e.listener ? ' <span class="hint">·' + esc(e.listener) + '</span>' : '') + rid + '</td>' +
       '<td class="mono">' + esc(e.remote_ip) + (e.remote_port ? ':' + e.remote_port : '') + '</td>' +
       '<td>' + esc(e.summary) + '</td></tr>';
     return pay
-      ? main + '<tr class="payload" data-for="' + e.id + '" hidden><td colspan="4"><pre></pre></td></tr>'
+      ? main + '<tr class="payload" data-for="' + e.id + '"' + (open ? '' : ' hidden') + '><td colspan="4"><pre>' + esc(pay) + '</pre></td></tr>'
       : main;
   }).join('');
-  const tbl = $('ev');
-  const stick = tbl.scrollTop + tbl.clientHeight >= tbl.scrollHeight - 40;
-  tbl.innerHTML = '<tr><th>时间</th><th>类型</th><th>来源</th><th>摘要</th></tr>' + body;
-  if (fresh && !stick) tbl.scrollIntoView();
+  setHtml('ev', $('ev'), '<tr><th>时间</th><th>类型</th><th>来源</th><th>摘要</th></tr>' +
+    (body || '<tr><td colspan="4" class="hint">暂无事件</td></tr>'));
 }
 $('ev-kind').addEventListener('change', refreshEvents);
 $('ev').addEventListener('click', (e) => {
   const tr = e.target.closest('tr[data-id]');
   if (!tr) return;
-  const pay = document.querySelector('tr.payload[data-for="' + tr.dataset.id + '"]');
+  const id = Number(tr.dataset.id);
+  const pay = document.querySelector('tr.payload[data-for="' + id + '"]');
   if (!pay) return;
-  pay.hidden = !pay.hidden;
-  if (!pay.hidden) {
-    api('/api/events?limit=100').then((rows) => {
-      const hit = rows.find((x) => String(x.id) === tr.dataset.id);
-      pay.querySelector('pre').textContent = hit ? (hit.payload || '（无载荷）') : '';
-    });
-  }
+  if (expandedEv.has(id)) { expandedEv.delete(id); pay.hidden = true; }
+  else { expandedEv.add(id); pay.hidden = false; } // 展开/收起由用户决定，轮询不回收
 });
 
 /* ---------- 建议 ---------- */
@@ -393,10 +532,13 @@ async function refreshProp() {
       '<td>' + esc(p.reason) + '</td>' +
       '<td>' + propBadge(p.status) + '</td>' +
       '<td>' + acts + '</td></tr>';
-    return main + '<tr class="payload" data-for-p="' + p.id + '" hidden><td colspan="7"><pre></pre></td></tr>';
+    const detail = (p.analysis || p.reason || '（无详情）') +
+      (p.ttl_secs ? '\n灰度时长: ' + Math.round(p.ttl_secs / 60) + ' 分钟' : '');
+    const open = expandedProp.has(p.id);
+    return main + '<tr class="payload" data-for-p="' + p.id + '"' + (open ? '' : ' hidden') + '><td colspan="7"><pre>' + esc(detail) + '</pre></td></tr>';
   }).join('');
-  $('prop').innerHTML = '<tr><th>时间</th><th>严重度</th><th>动作</th><th>目标</th><th>理由</th><th>状态</th><th>操作</th></tr>' +
-    (body || '<tr><td colspan="7" class="hint">暂无建议</td></tr>');
+  setHtml('prop', $('prop'), '<tr><th>时间</th><th>严重度</th><th>动作</th><th>目标</th><th>理由</th><th>状态</th><th>操作</th></tr>' +
+    (body || '<tr><td colspan="7" class="hint">暂无建议</td></tr>'));
 }
 function showPropMsg(text) { $('prop-msg').textContent = text; }
 $('prop-status').addEventListener('change', refreshProp);
@@ -415,15 +557,30 @@ $('prop').addEventListener('click', async (e) => {
   }
   const tr = e.target.closest('tr[data-pid]');
   if (!tr) return;
-  const pay = document.querySelector('tr.payload[data-for-p="' + tr.dataset.pid + '"]');
+  const id = Number(tr.dataset.pid);
+  const pay = document.querySelector('tr.payload[data-for-p="' + id + '"]');
   if (!pay) return;
-  pay.hidden = !pay.hidden;
-  if (!pay.hidden) {
-    const p = lastPropRows.find((x) => String(x.id) === tr.dataset.pid);
-    pay.querySelector('pre').textContent = p ? ((p.analysis || p.reason || '（无详情）') +
-      (p.ttl_secs ? '\n灰度时长: ' + Math.round(p.ttl_secs / 60) + ' 分钟' : '')) : '';
-  }
+  if (expandedProp.has(id)) { expandedProp.delete(id); pay.hidden = true; }
+  else { expandedProp.add(id); pay.hidden = false; } // 点开保持展开，轮询不回收
 });
+
+/* ---------- 防火墙 ---------- */
+async function refreshFw() {
+  if ($('fw-pause').checked || $('tab-fw').hidden) return;
+  let rows;
+  try { rows = await api('/api/rules'); setConn(true); }
+  catch (e) { setConn(false); return; }
+  const badgeOf = { trial: 'warn', engine: 'acc', manual: 'ok', promoted: 'ok' };
+  const body = rows.map((r) =>
+    '<tr>' +
+    '<td class="mono">' + esc(r.remote_ip) + (r.local_port ? ':' + r.local_port : '') + '</td>' +
+    '<td>' + esc(r.direction) + ' / ' + esc(r.protocol) + '</td>' +
+    '<td>' + esc(r.source || '') + (r.tag ? ' <span class="badge acc">' + esc(r.tag) + '</span>' : '') + '</td>' +
+    '<td><span class="badge ' + (badgeOf[r.ttl_state] || 'acc') + '">' + esc(r.ttl_state) + '</span> <span class="hint">' + esc(r.ttl_text) + '</span></td>' +
+    '<td>' + esc(r.reason_summary) + '</td></tr>').join('');
+  setHtml('fw', $('fw'), '<tr><th>目标</th><th>方向/协议</th><th>来源</th><th>TTL</th><th>原因</th></tr>' +
+    (body || '<tr><td colspan="5" class="hint">当前无封禁规则</td></tr>'));
+}
 
 /* ---------- 配置 ---------- */
 async function loadCfg() {
@@ -440,6 +597,16 @@ function showCfgMsg(cls, text) {
   m.className = cls; m.textContent = text;
 }
 $('cfg-reload').onclick = () => { if (!cfgDirty || confirm('放弃未保存的修改？')) loadCfg(); };
+$('cfg-restart').onclick = async () => {
+  if (!confirm('重启节点上的 aisafeguard 服务？重启期间防护中断数秒，确定继续？')) return;
+  try {
+    await api('/api/service/restart', { method: 'POST' });
+    showCfgMsg('warn', '重启已触发，等待服务恢复（约 5-10 秒）…');
+    const iv = setInterval(async () => {
+      try { await api('/api/status'); clearInterval(iv); location.reload(); } catch (_) {}
+    }, 2500);
+  } catch (e) { showCfgMsg('err', '重启失败：' + e.message); }
+};
 $('cfg').addEventListener('input', () => {
   cfgDirty = true;
   $('cfg-dirty').textContent = '有未保存修改';
