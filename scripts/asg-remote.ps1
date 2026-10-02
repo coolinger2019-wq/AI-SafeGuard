@@ -30,6 +30,8 @@ if ($args -contains '-gui') {
 } else {
     # Web console: tunnel stays up (browser needs it); closing the tab is enough,
     # stale tunnels get reused next time.
+    # First login needs the token - put it in the clipboard so it is a plain paste.
+    (Get-Content $tokenFile -Raw).Trim() | Set-Clipboard
     Start-Process $url
-    Write-Host "Console opened at $url (tunnel kept running; rerun anytime - it reuses the tunnel)"
+    Write-Host "Console opened at $url (token is in your clipboard - Ctrl+V to log in, remembered after that)"
 }
