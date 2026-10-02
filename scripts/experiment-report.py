@@ -100,7 +100,7 @@ def node_section(label, path, days):
             out.append("".join(f"\n- {rid} × {n}" for rid, n in per_rule))
         else:
             out.append("\n- （无带 rule_id 的检测——确认起跑时间晚于 0.7 升级）")
-        out.append(f"\n- 无 rule_id 的 detection：{empty_rule}（升级前旧数据）")
+        out.append(f"\n- 无 rule_id 的 detection：{empty_rule}（频次检测本就无规则 ID——签名检测才携带）")
     else:
         out.append("- **库 schema 早于 0.7（缺 rule_id 列）**：升级节点后此节才有数据，"
                    "正式实验必须在升级后的库上采集")
