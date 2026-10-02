@@ -2270,6 +2270,26 @@ impl Console for EmbeddedConsole {
         Ok(self.0.fed_panel())
     }
 
+    fn join_request_create(&self, node: &str) -> anyhow::Result<(String, String)> {
+        self.0.join_request_create(node)
+    }
+
+    fn join_approval_process(
+        &self,
+        request_json: &str,
+        coord_addr: &str,
+    ) -> anyhow::Result<(String, String)> {
+        self.0.join_approval_process(request_json, coord_addr)
+    }
+
+    fn join_import(&self, approval_json: &str, coord_addr: &str) -> anyhow::Result<String> {
+        self.0.join_import(approval_json, coord_addr)
+    }
+
+    fn revoke_member(&self, node: &str, reason: &str) -> anyhow::Result<String> {
+        self.0.revoke_member(node, reason)
+    }
+
     fn quarantine_member(
         &self,
         node: &str,
