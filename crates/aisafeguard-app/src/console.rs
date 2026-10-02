@@ -78,6 +78,22 @@ pub trait Console: Send + Sync {
     fn refresh_intel(&self) -> anyhow::Result<()> {
         Err(anyhow::anyhow!("情报订阅不可用"))
     }
+    /// F740 入伙向导：成员侧生成入伙申请 → 返回 (申请 JSON, 公钥指纹)
+    fn join_request_create(&self, _node: &str) -> anyhow::Result<(String, String)> {
+        Err(anyhow::anyhow!("入伙向导不可用"))
+    }
+    /// F740 入伙向导：协调者处理申请 → 返回 (批准包 JSON, 节点名)
+    fn join_approval_process(
+        &self,
+        _request_json: &str,
+        _coord_addr: &str,
+    ) -> anyhow::Result<(String, String)> {
+        Err(anyhow::anyhow!("入伙向导不可用"))
+    }
+    /// F740 入伙向导：成员导入批准包（证书落位 + [fed] 配置自动写入）
+    fn join_import(&self, _approval_json: &str, _coord_addr: &str) -> anyhow::Result<String> {
+        Err(anyhow::anyhow!("入伙向导不可用"))
+    }
     /// F500 组织面板数据（只读；members/stats 仅协调者角色有值）
     fn fed_panel(&self) -> anyhow::Result<crate::engine::FedPanel> {
         Err(anyhow::anyhow!("组织面板不可用"))

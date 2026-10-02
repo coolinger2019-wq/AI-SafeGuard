@@ -564,6 +564,54 @@ impl EngineHandle {
             .map_err(|e| Error::Store(e.to_string()))
     }
 
+    // ---------- F740 入伙向导（EngineHandle 粘合） ----------
+
+    pub fn join_request_create(&self, node: &str) -> anyhow::Result<(String, String)> {
+        crate::fed::join_request_create(&self.config().data_dir(), node)
+    }
+
+    pub fn join_approval_process(
+        &self,
+        request_json: &str,
+        coord_addr: &str,
+    ) -> anyhow::Result<(String, String)> {
+        crate::fed::join_approval_process(&self.config().data_dir(), request_json, coord_addr)
+    }
+
+    /// 成员导入批准包：证书落位 + config.toml [fed] 段自动写入 + 热生效
+    /// （agent 任务每轮读配置，无需重启即自动连接协调者）。
+    pub fn join_import(&self, approval_json: &str, coord_addr: &str) -> anyhow::Result<String> {
+        {
+            let cfg = self.config();
+            if cfg.fed.enabled && cfg.fed.role != "off" {
+                anyhow::bail!(
+                    "本节点已加入组织（[fed].enabled，角色 {}）——退出组织后再导入新批准包",
+                    cfg.fed.role
+                );
+            }
+        }
+        let imported = crate::fed::join_import_prep(
+            &self.config().data_dir(),
+            approval_json,
+            coord_addr,
+        )?;
+        let mut cfg = self.config();
+        cfg.fed.enabled = true;
+        cfg.fed.role = "agent".into();
+        cfg.fed.node = imported.node.clone();
+        cfg.fed.coordinator = coord_addr.trim().to_string();
+        cfg.save(&self.cfg_path)?;
+        *self.cfg.write().expect("配置锁中毒") = cfg;
+        self.bus.publish(SecurityEvent::engine(
+            "info",
+            format!(
+                "已加入组织：{} → {}（自动连接中；GUI「组织」页可查看成员状态）",
+                imported.node, coord_addr
+            ),
+        ));
+        Ok(imported.message)
+    }
+
     pub fn stats_24h(&self) -> Result<StatsSummary> {
         self.store.stats_since(now_ts() - 86400)
     }

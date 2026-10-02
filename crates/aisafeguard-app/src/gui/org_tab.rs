@@ -16,13 +16,79 @@ impl AisafeApp {
         };
 
         if !panel.enabled || panel.role == "off" {
-            section(ui, "未加入组织");
+            section(ui, "加入组织（向导）");
             ui.label(body_text(
-                "本节点未启用组织协同。在 config.toml 的 [fed] 段配置角色与证书后加入组织：\n\
-                 · 协调者：fed init-ca 创建组织 → fed issue-cert 为各节点发证\n\
-                 · 成员：role = \"agent\"，coordinator 指向协调者地址\n\
-                 详见 docs/FEDERATION.md",
+                "三步入伙：①生成本机入伙申请 → ②把申请文件交给组织管理员批准 → ③导入批准包，自动入伙。\n\
+                 私钥全程留在本机，任何文件都不含秘密。也可走命令行/手动配置（docs/FEDERATION.md）。",
             ));
+            ui.add_space(space::S);
+            egui::Grid::new("join-wizard")
+                .num_columns(2)
+                .spacing([14.0, space::S])
+                .show(ui, |ui| {
+                    ui.label("本机节点名");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.org_node_name)
+                            .hint_text("如 office-pc（字母数字_-）")
+                            .desired_width(240.0),
+                    );
+                    ui.end_row();
+                    ui.label("协调者地址");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.org_coord_addr)
+                            .hint_text("如 https://192.168.1.10:7421")
+                            .desired_width(240.0),
+                    );
+                    ui.end_row();
+                });
+            ui.horizontal(|ui| {
+                if ui.button("① 生成入伙申请").clicked() {
+                    let node = self.org_node_name.trim().to_string();
+                    if node.is_empty() {
+                        self.set_toast("先填本机节点名");
+                    } else {
+                        match self.eng.join_request_create(&node) {
+                            Ok((request_json, fp)) => {
+                                let path = rfd::FileDialog::new()
+                                    .set_file_name(format!("入伙申请-{node}.json"))
+                                    .save_file();
+                                match path {
+                                    Some(p) => {
+                                        let _ = std::fs::write(&p, request_json);
+                                        self.set_toast(format!(
+                                            "申请已保存（公钥指纹 {}…），交给管理员批准",
+                                            fp.get(0..16).unwrap_or(&fp)
+                                        ));
+                                    }
+                                    None => self.set_toast("已取消保存"),
+                                }
+                            }
+                            Err(e) => self.set_toast(format!("生成申请失败：{e}")),
+                        }
+                    }
+                }
+                ui.label(caption("① 的文件交给管理员，拿回「批准包」后："));
+            });
+            ui.horizontal(|ui| {
+                if ui.button("③ 导入批准包").clicked()
+                    && let Some(p) = rfd::FileDialog::new().pick_file()
+                {
+                    match std::fs::read_to_string(&p) {
+                        Ok(approval_json) => {
+                            let addr = self.org_coord_addr.trim().to_string();
+                            match self.eng.join_import(&approval_json, &addr) {
+                                Ok(msg) => {
+                                    self.set_toast(msg);
+                                    self.refresh_cache();
+                                }
+                                Err(e) => self.set_toast(format!("导入失败：{e}")),
+                            }
+                        }
+                        Err(e) => self.set_toast(format!("读取批准包失败：{e}")),
+                    }
+                }
+                ui.label(caption("导入后本机自动连接协调者（无需重启）"));
+            });
             return;
         }
 
@@ -154,6 +220,48 @@ impl AisafeApp {
                         ui.end_row();
                     }
                 });
+            ui.add_space(space::M);
+        }
+
+        // F740 协调者：处理成员入伙申请（仅协调者角色显示）
+        if panel.role == "coordinator" {
+            section(ui, "处理入伙申请");
+            ui.horizontal(|ui| {
+                if ui.button("选择成员的申请文件…").clicked()
+                    && let Some(p) = rfd::FileDialog::new().pick_file()
+                {
+                    match std::fs::read_to_string(&p) {
+                        Ok(request_json) => {
+                            let addr = self.org_coord_addr.trim().to_string();
+                            match self.eng.join_approval_process(&request_json, &addr) {
+                                Ok((approval_json, node)) => {
+                                    let path = rfd::FileDialog::new()
+                                        .set_file_name(format!("批准包-{node}.json"))
+                                        .save_file();
+                                    match path {
+                                        Some(sp) => {
+                                            let _ = std::fs::write(&sp, approval_json);
+                                            self.set_toast(format!(
+                                                "已批准 {node}：批准包已保存，回传给成员导入"
+                                            ));
+                                            self.refresh_cache();
+                                        }
+                                        None => self.set_toast("已取消保存"),
+                                    }
+                                }
+                                Err(e) => self.set_toast(format!("批准失败：{e}")),
+                            }
+                        }
+                        Err(e) => self.set_toast(format!("读取申请文件失败：{e}")),
+                    }
+                }
+                ui.label(caption("成员连接本机用地址（填局域网可达地址）："));
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.org_coord_addr)
+                        .hint_text("如 https://192.168.1.10:7421")
+                        .desired_width(240.0),
+                );
+            });
             ui.add_space(space::M);
         }
 

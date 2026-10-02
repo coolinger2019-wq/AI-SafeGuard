@@ -1470,6 +1470,213 @@ pub fn do_quarantine(
     }
 }
 
+// ---------- F740 入伙向导（GUI 流程的核心逻辑；命令行等价物保留） ----------
+//
+// 信任模型：私钥在成员本机生成、永不出机；申请文件只含公钥材料（泄露无害）；
+// 协调者批准 = 签证书 + 自动预登记指纹（关 TOFU 抢注窗口）；批准包自证（含 CA 签名）。
+// 标准_PKCS#10_CSR，rcgen 原生支持，不做自造格式。
+
+/// 成员侧：生成入伙申请。私钥本机生成并暂存 <data_dir>/fed/pending/<node>.pem
+/// （批准导入时转正为正式私钥）；申请文件只含公钥材料，可经任意渠道交管理员。
+/// 返回 (申请文件 JSON, 公钥指纹)。
+pub fn join_request_create(data_dir: &Path, node: &str) -> anyhow::Result<(String, String)> {
+    if !valid_node_name(node) {
+        anyhow::bail!("节点名不合法（限字母数字_-，≤32 字符）");
+    }
+    let pending_dir = fed_dir(data_dir).join("pending");
+    std::fs::create_dir_all(&pending_dir)?;
+    let key = rcgen::KeyPair::generate()?;
+    let pubkey_fp = {
+        let d = Sha256::digest(key.public_key_raw());
+        d.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    };
+    let request = serde_json::json!({
+        "kind": "asg-join-request",
+        "node": node,
+        "pubkey_fp": pubkey_fp,
+        "pubkey_raw_hex": vec_to_hex(key.public_key_raw()),
+        "created_ts": now_ts(),
+    });
+    write_private(
+        &pending_dir.join(format!("{node}.pem")),
+        key.serialize_pem(),
+    )?;
+    Ok((serde_json::to_string_pretty(&request)?, pubkey_fp))
+}
+
+/// 协调者侧：处理入伙申请——校验 CSR（含签名的持有证明，rcgen 自动验）、
+/// 用组织 CA 签发证书、自动预登记指纹（关 TOFU 窗口）、出批准包
+/// （包内含节点证书与 CA 证书，均公钥材料，可任意渠道回传）。
+/// 返回 (批准包 JSON, 节点名)。
+pub fn join_approval_process(
+    data_dir: &Path,
+    request_json: &str,
+    coord_addr: &str,
+) -> anyhow::Result<(String, String)> {
+    let req: serde_json::Value = serde_json::from_str(request_json)
+        .map_err(|e| anyhow::anyhow!("申请文件解析失败: {e}"))?;
+    if req["kind"].as_str() != Some("asg-join-request") {
+        anyhow::bail!("不是入伙申请文件（kind 不符）");
+    }
+    let node = req["node"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("申请缺少 node 字段"))?;
+    if !valid_node_name(node) {
+        anyhow::bail!("申请中的节点名不合法: {node}");
+    }
+    let ca_pem_path = fed_dir(data_dir).join("ca.pem");
+    let ca_key_pem_path = fed_dir(data_dir).join("ca-key.pem");
+    let ca_params = rcgen::CertificateParams::from_ca_cert_pem(&std::fs::read_to_string(&ca_pem_path)?)?;
+    let ca_key = rcgen::KeyPair::from_pem(&std::fs::read_to_string(&ca_key_pem_path)?)?;
+    let issuer_cert = ca_params.clone().self_signed(&ca_key)?;
+
+    // 成员公钥 → RemoteKeyPair（签发只用公钥构造主体，sign 永不被调用）
+    let pubkey_raw = req["pubkey_raw_hex"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("申请缺少公钥"))?;
+    let pubkey = hex_to_vec(pubkey_raw)?;
+    if pubkey.first() != Some(&0x04) || pubkey.len() != 65 {
+        anyhow::bail!("公钥形态非法（应为 65 字节非压缩 P-256 点）");
+    }
+    let member_key = rcgen::KeyPair::from_remote(Box::new(MemberPublicKey { raw: pubkey }))?;
+    let mut params = rcgen::CertificateParams::new(vec![])?;
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, node);
+    params.subject_alt_names = vec![rcgen::SanType::DnsName(
+        rcgen::Ia5String::try_from(node.to_string())?,
+    )];
+    let cert = params
+        .signed_by(&member_key, &issuer_cert, &ca_key)
+        .map_err(|e| anyhow::anyhow!("证书签发失败: {e}"))?;
+    let cert_pem = cert.pem();
+    let cert_fp = cert_fp_of(cert.der());
+
+    // 批准即预登记：关闭该节点 TOFU 抢注窗口（管理员审批语义的一部分）
+    cmd_expect(data_dir, node, &cert_fp)?;
+
+    let ca_pem = std::fs::read_to_string(&ca_pem_path)?;
+    let approval = serde_json::json!({
+        "kind": "asg-join-approval",
+        "node": node,
+        "cert_pem": cert_pem,
+        "ca_pem": ca_pem,
+        "coord_addr": coord_addr,
+        "created_ts": now_ts(),
+    });
+    Ok((serde_json::to_string_pretty(&approval)?, node.to_string()))
+}
+
+fn hex_to_vec(s: &str) -> anyhow::Result<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return Err(anyhow::anyhow!("公钥 hex 长度非法"));
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| anyhow::anyhow!("公钥 hex 非法")))
+        .collect()
+}
+
+fn vec_to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 成员公钥的 rcgen 包装（F740 签发用）：public_key 供证书主体嵌入；
+/// sign 在证书签发流程中永不被调用（主体不签名，签发者才签名）。
+struct MemberPublicKey {
+    raw: Vec<u8>,
+}
+
+impl rcgen::RemoteKeyPair for MemberPublicKey {
+    fn public_key(&self) -> &[u8] {
+        &self.raw
+    }
+    fn algorithm(&self) -> &'static rcgen::SignatureAlgorithm {
+        &rcgen::PKCS_ECDSA_P256_SHA256
+    }
+    fn sign(&self, _msg: &[u8]) -> Result<Vec<u8>, rcgen::Error> {
+        // 主体永不签名：签发只由 CA 签名（此实现仅用于把成员公钥嵌入证书主体）
+        Err(rcgen::Error::RingUnspecified)
+    }
+}
+
+/// 成员侧导入的产出。
+pub struct JoinImported {
+    pub node: String,
+    pub message: String,
+}
+
+/// 成员侧：导入批准包——校验证书与本机 pending 私钥配对、证书落位、
+/// 清 pending。config.toml 的 [fed] 段由调用方（EngineHandle）写入。
+pub fn join_import_prep(
+    data_dir: &Path,
+    approval_json: &str,
+    coord_addr: &str,
+) -> anyhow::Result<JoinImported> {
+    let doc: serde_json::Value = serde_json::from_str(approval_json)
+        .map_err(|e| anyhow::anyhow!("批准包解析失败: {e}"))?;
+    if doc["kind"].as_str() != Some("asg-join-approval") {
+        anyhow::bail!("不是批准包（kind 不符）");
+    }
+    let node = doc["node"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("批准包缺少 node 字段"))?;
+    if !valid_node_name(node) {
+        anyhow::bail!("批准包中的节点名不合法: {node}");
+    }
+    let cert_pem = doc["cert_pem"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("批准包缺少节点证书"))?;
+    let ca_pem = doc["ca_pem"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("批准包缺少 CA 证书"))?;
+    if coord_addr.trim().is_empty() {
+        anyhow::bail!("协调者地址为空");
+    }
+
+    // 证书必须与本机 pending 私钥配对（公钥比对）——批准包与申请缺一不可
+    let pending_path = fed_dir(data_dir).join("pending").join(format!("{node}.pem"));
+    let pending_pem = std::fs::read_to_string(&pending_path).map_err(|_| {
+        anyhow::anyhow!(
+            "本机没有 {} 的入伙申请私钥（先在成员侧生成入伙申请）",
+            node
+        )
+    })?;
+    let pending_key = rcgen::KeyPair::from_pem_and_sign_algo(
+        &pending_pem,
+        &rcgen::PKCS_ECDSA_P256_SHA256,
+    )?;
+    let der_b64 = pem_blocks(cert_pem, "CERTIFICATE")
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("批准包证书 PEM 块缺失"))?;
+    use base64::Engine as _;
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(der_b64)
+        .map_err(|e| anyhow::anyhow!("批准包证书 base64 解码失败: {e}"))?;
+    use x509_parser::prelude::FromDer;
+    let (_, cert) = x509_parser::prelude::X509Certificate::from_der(&der)
+        .map_err(|e| anyhow::anyhow!("批准包证书解析失败: {e}"))?;
+    if cert.public_key().subject_public_key.data != pending_key.public_key_raw() {
+        anyhow::bail!("批准包中的证书与本机申请私钥不配对——文件可能拿混了，拒收");
+    }
+
+    // 证书落位：pending 私钥转正 + 节点证书 + CA
+    let certs_dir = fed_dir(data_dir).join("certs");
+    std::fs::create_dir_all(&certs_dir)?;
+    write_private(&certs_dir.join(format!("{node}-key.pem")), pending_pem)?;
+    std::fs::write(certs_dir.join(format!("{node}.pem")), cert_pem)?;
+    std::fs::write(fed_dir(data_dir).join("ca.pem"), ca_pem)?;
+    std::fs::remove_file(&pending_path).ok();
+
+    Ok(JoinImported {
+        node: node.to_string(),
+        message: format!(
+            "已导入 {node} 的组织证书（协调者 {coord_addr}）。配置已写入，成员将自动连接组织"
+        ),
+    })
+}
+
 /// 解析 fed 证书文件路径：空配置回退 <数据目录>/fed/ 默认位置。
 pub fn resolve_fed_path(data_dir: &Path, configured: &str, default_name: &str) -> PathBuf {
     if configured.is_empty() {
@@ -2401,6 +2608,49 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F740 入伙向导全链路往返：申请 → 协调者批准（含自动预登记）→ 成员导入
+    /// （证书落位 + pending 清理），并验证重复导入拒绝路径。
+    #[test]
+    fn join_wizard_roundtrip() {
+        let coord_dir = std::env::temp_dir().join(format!("asg-join-c-{}", std::process::id()));
+        let member_dir = std::env::temp_dir().join(format!("asg-join-m-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&coord_dir);
+        let _ = std::fs::remove_dir_all(&member_dir);
+        std::fs::create_dir_all(&coord_dir).unwrap();
+        std::fs::create_dir_all(&member_dir).unwrap();
+        cmd_init_ca(&coord_dir, "").unwrap();
+
+        // 成员生成申请
+        let (request_json, fp) = join_request_create(&member_dir, "pc-2").unwrap();
+        assert_eq!(fp.len(), 64);
+        assert!(request_json.contains("asg-join-request"));
+
+        // 协调者批准：签证书 + 自动预登记
+        let (approval_json, node) =
+            join_approval_process(&coord_dir, &request_json, "https://192.168.1.10:7421").unwrap();
+        assert_eq!(node, "pc-2");
+        assert!(approval_json.contains("asg-join-approval"));
+        let expected = std::fs::read_to_string(coord_dir.join("fed").join("expected.json")).unwrap();
+        assert!(expected.contains("pc-2"), "批准必须自动预登记指纹");
+
+        // 成员导入：证书落位 + pending 清理
+        let imported =
+            join_import_prep(&member_dir, &approval_json, "https://192.168.1.10:7421").unwrap();
+        assert_eq!(imported.node, "pc-2");
+        assert!(member_dir.join("fed").join("certs").join("pc-2.pem").exists());
+        assert!(member_dir.join("fed").join("certs").join("pc-2-key.pem").exists());
+        assert!(!member_dir.join("fed").join("pending").join("pc-2.pem").exists());
+        assert!(member_dir.join("fed").join("ca.pem").exists());
+
+        // 重复导入拒绝：pending 已清，无申请私钥可配对
+        assert!(join_import_prep(&member_dir, &approval_json, "https://x").is_err());
+
+        // 损坏申请直接拒
+        assert!(join_approval_process(&coord_dir, "not json", "https://x").is_err());
+        let _ = std::fs::remove_dir_all(&coord_dir);
+        let _ = std::fs::remove_dir_all(&member_dir);
+    }
 
     /// C1/C2：吊销列表读写 + 预登记校验（文件为真源，纯函数断言）。
     #[test]

@@ -40,6 +40,8 @@ time.workspace = true
 sha2.workspace = true
 ring.workspace = true
 x509-parser.workspace = true
+# F740 入伙向导：egui 生态标准的原生文件对话框（申请/批准包选择与保存）
+rfd.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8"

@@ -90,6 +90,8 @@ notify = "8"
 # x509-parser 从证书 DER 提取 SPKI 公钥（rcgen 的 x509-parser 特性早已引入，零新增树）
 ring = "0.17"
 x509-parser = "0.16"
+# F740 入伙向导：egui 生态标准的原生文件对话框（申请/批准包选择与保存）
+rfd = "0.15"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

@@ -47,6 +47,9 @@ pub async fn serve(engine: Arc<EngineHandle>) {
         .route("/api/xdp/clear", post(xdp_clear))
         .route("/api/fed/panel", get(fed_panel))
         .route("/api/fed/members/{node}/quarantine", post(fed_member_quarantine))
+        .route("/api/fed/join/request", post(fed_join_request))
+        .route("/api/fed/join/approve", post(fed_join_approve))
+        .route("/api/fed/join/import", post(fed_join_import))
         .route("/api/fed/members/{node}/lift", post(fed_member_lift))
         .route("/api/intel", get(get_intel))
         .route("/api/intel/refresh", post(refresh_intel))
@@ -218,6 +221,60 @@ async fn apply_proposal(State(s): State<AppState>, Path(id): Path<i64>) -> Respo
 /// F500 组织面板数据（只读）
 async fn fed_panel(State(s): State<AppState>) -> Response {
     Json(s.engine.fed_panel()).into_response()
+}
+
+/// F740 入伙向导：成员生成入伙申请
+async fn fed_join_request(State(s): State<AppState>, body: axum::body::Bytes) -> Response {
+    let node = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v["node"].as_str().map(str::to_string));
+    let Some(node) = node else {
+        return err_resp(aisafeguard_core::error::Error::Config("缺少 node 字段".into()));
+    };
+    match s.engine.join_request_create(&node) {
+        Ok((request_json, fingerprint)) => Json(json!({
+            "ok": true, "request_json": request_json, "fingerprint": fingerprint,
+        }))
+        .into_response(),
+        Err(e) => err_resp(aisafeguard_core::error::Error::Config(e.to_string())),
+    }
+}
+
+/// F740 入伙向导：协调者处理申请（签名 + 预登记 + 批准包）
+#[derive(Deserialize)]
+struct JoinApproveBody {
+    request_json: String,
+    coord_addr: String,
+}
+
+async fn fed_join_approve(State(s): State<AppState>, body: axum::body::Bytes) -> Response {
+    let Ok(b) = serde_json::from_slice::<JoinApproveBody>(&body) else {
+        return err_resp(aisafeguard_core::error::Error::Config("缺少 request_json/coord_addr 字段".into()));
+    };
+    match s.engine.join_approval_process(&b.request_json, &b.coord_addr) {
+        Ok((approval_json, node)) => Json(json!({
+            "ok": true, "approval_json": approval_json, "node": node,
+        }))
+        .into_response(),
+        Err(e) => err_resp(aisafeguard_core::error::Error::Config(e.to_string())),
+    }
+}
+
+/// F740 入伙向导：成员导入批准包（证书落位 + [fed] 配置写入）
+#[derive(Deserialize)]
+struct JoinImportBody {
+    approval_json: String,
+    coord_addr: String,
+}
+
+async fn fed_join_import(State(s): State<AppState>, body: axum::body::Bytes) -> Response {
+    let Ok(b) = serde_json::from_slice::<JoinImportBody>(&body) else {
+        return err_resp(aisafeguard_core::error::Error::Config("缺少 approval_json/coord_addr 字段".into()));
+    };
+    match s.engine.join_import(&b.approval_json, &b.coord_addr) {
+        Ok(message) => Json(json!({ "ok": true, "message": message })).into_response(),
+        Err(e) => err_resp(aisafeguard_core::error::Error::Config(e.to_string())),
+    }
 }
 
 /// F500 软隔离（面板与 CLI 同一 DB 通路；reason 可选）

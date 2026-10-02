@@ -235,6 +235,43 @@ impl Console for RemoteConsole {
         Ok(self.get("/api/fed/panel")?.json()?)
     }
 
+    fn join_request_create(&self, node: &str) -> anyhow::Result<(String, String)> {
+        let v: serde_json::Value = self
+            .post_json("/api/fed/join/request", &serde_json::json!({ "node": node }))?
+            .json()?;
+        Ok((
+            v["request_json"].as_str().unwrap_or_default().to_string(),
+            v["fingerprint"].as_str().unwrap_or_default().to_string(),
+        ))
+    }
+
+    fn join_approval_process(
+        &self,
+        request_json: &str,
+        coord_addr: &str,
+    ) -> anyhow::Result<(String, String)> {
+        let v: serde_json::Value = self
+            .post_json(
+                "/api/fed/join/approve",
+                &serde_json::json!({ "request_json": request_json, "coord_addr": coord_addr }),
+            )?
+            .json()?;
+        Ok((
+            v["approval_json"].as_str().unwrap_or_default().to_string(),
+            v["node"].as_str().unwrap_or_default().to_string(),
+        ))
+    }
+
+    fn join_import(&self, approval_json: &str, coord_addr: &str) -> anyhow::Result<String> {
+        let v: serde_json::Value = self
+            .post_json(
+                "/api/fed/join/import",
+                &serde_json::json!({ "approval_json": approval_json, "coord_addr": coord_addr }),
+            )?
+            .json()?;
+        Ok(v["message"].as_str().unwrap_or("完成").to_string())
+    }
+
     fn quarantine_member(
         &self,
         node: &str,
