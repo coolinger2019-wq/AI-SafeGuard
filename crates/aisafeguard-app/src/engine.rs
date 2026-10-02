@@ -1013,13 +1013,25 @@ impl EngineHandle {
             .map_err(|e| Error::Config(format!("读取 {} 失败: {e}", self.cfg_path.display())))
     }
 
-    /// 原文应用配置：先解析校验（非法 TOML 不落盘、不动运行态），再走 save_config
-    /// 落盘 + 热更。返回需重启生效的项名列表（空 = 全部热更）。
+    /// 原文应用配置：先解析校验（非法 TOML 不落盘、不动运行态），再落盘 + 热更。
+    /// 写盘走 toml_edit 保留原文注释与排版（F790：配置文件自带字段说明，编辑不丢），
+    /// 运行态推进与 save_config 相同。返回需重启生效的项名列表（空 = 全部热更）。
     pub fn apply_config_raw(&self, raw: &str) -> Result<Vec<String>> {
         let cfg: AppConfig = toml::from_str(raw)
             .map_err(|e| Error::Config(format!("TOML 解析失败: {e}")))?;
+        let doc: toml_edit::DocumentMut = raw
+            .parse()
+            .map_err(|e| Error::Config(format!("TOML 解析失败: {e}")))?;
         let req = AppConfig::restart_required(&self.config(), &cfg);
-        self.save_config(cfg)?;
+        std::fs::write(&self.cfg_path, doc.to_string())
+            .map_err(|e| Error::Config(format!("写入配置失败: {e}")))?;
+        *self.cfg.write().expect("配置锁中毒") = cfg;
+        let msg = if req.is_empty() {
+            "配置已保存（改动全部热更生效，无需重启）".to_string()
+        } else {
+            format!("配置已保存；以下需重启生效：{}", req.join("、"))
+        };
+        self.bus.publish(SecurityEvent::engine("info", msg));
         Ok(req.into_iter().map(String::from).collect())
     }
 }

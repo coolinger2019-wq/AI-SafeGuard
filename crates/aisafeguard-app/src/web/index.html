@@ -202,6 +202,7 @@ const $ = (id) => document.getElementById(id);
 let token = localStorage.getItem(TK_KEY) || '';
 let evTimer = null, dashTimer = null, propTimer = null, fwTimer = null, cfgDirty = false;
 let lastPropRows = [];
+let blockedIps = new Set(); // 已封禁 IP（来自 /api/rules），用于历史数据标注
 // 展开状态跨轮询保持：重渲染时按 Set 恢复展开行（用户点开即保持，再点收起）
 const expandedEv = new Set(), expandedProp = new Set(), expandedGeo = new Set();
 // 无变化跳过重绘（防闪烁/防滚动跳变/防按钮被重建吞点击）
@@ -351,11 +352,13 @@ function stopTimers() { clearInterval(dashTimer); clearInterval(evTimer); clearI
 function statCard(k, v) { return '<div class="card"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>'; }
 
 async function refreshDash() {
-  let st, stats;
+  let st, stats, rules = [];
   try {
     [st, stats] = await Promise.all([api('/api/status'), api('/api/stats')]);
     setConn(true);
   } catch (e) { setConn(false); return; }
+  try { rules = await api('/api/rules'); } catch (_) {}
+  blockedIps = new Set(rules.map((r) => r.remote_ip));
 
   $('ver').textContent = 'v' + st.version;
   $('stats').innerHTML =
@@ -400,7 +403,9 @@ async function refreshDash() {
 
   const top = (stats.top_ips || []).slice(0, 8).map((t, i) => {
     const open = expandedGeo.has(t.ip);
-    return '<tr><td class="mono">' + (i + 1) + '</td><td class="mono">' + esc(t.ip) + '</td><td>' + t.hits + '</td>' +
+    const blocked = blockedIps.has(t.ip);
+    return '<tr><td class="mono">' + (i + 1) + '</td><td class="mono">' + esc(t.ip) +
+      (blocked ? ' <span class="badge ok">已封禁</span>' : '') + '</td><td>' + t.hits + '</td>' +
       '<td><button class="act ghost" style="padding:2px 10px;font-size:11.5px" data-geo="' + esc(t.ip) + '">详情</button></td></tr>' +
       '<tr class="payload" data-geopay="' + esc(t.ip) + '"' + (open ? '' : ' hidden') + '><td colspan="4"><pre></pre></td></tr>';
   }).join('');
@@ -482,7 +487,8 @@ async function refreshEvents() {
     const main = '<tr data-id="' + e.id + '">' +
       '<td class="mono hint">' + fmtTs(e.ts) + '</td>' +
       '<td>' + esc(e.kind) + (e.listener ? ' <span class="hint">·' + esc(e.listener) + '</span>' : '') + rid + '</td>' +
-      '<td class="mono">' + esc(e.remote_ip) + (e.remote_port ? ':' + e.remote_port : '') + '</td>' +
+      '<td class="mono">' + esc(e.remote_ip) + (e.remote_port ? ':' + e.remote_port : '') +
+      (blockedIps.has(e.remote_ip) ? ' <span class="badge ok">已封禁</span>' : '') + '</td>' +
       '<td>' + esc(e.summary) + '</td></tr>';
     return pay
       ? main + '<tr class="payload" data-for="' + e.id + '"' + (open ? '' : ' hidden') + '><td colspan="4"><pre>' + esc(pay) + '</pre></td></tr>'
@@ -530,7 +536,8 @@ async function refreshProp() {
       '<td>' + esc(p.action) + '</td>' +
       '<td class="mono">' + esc(p.remote_ip) + (p.local_port ? ':' + p.local_port : '') + '</td>' +
       '<td>' + esc(p.reason) + '</td>' +
-      '<td>' + propBadge(p.status) + '</td>' +
+      '<td>' + propBadge(p.status) +
+      (p.status === 'pending' && blockedIps.has(p.remote_ip) ? ' <span class="badge ok" title="该 IP 已有生效封禁规则，本条建议疑似重复产出">同目标已封禁</span>' : '') + '</td>' +
       '<td>' + acts + '</td></tr>';
     const detail = (p.analysis || p.reason || '（无详情）') +
       (p.ttl_secs ? '\n灰度时长: ' + Math.round(p.ttl_secs / 60) + ' 分钟' : '');
