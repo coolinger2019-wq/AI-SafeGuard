@@ -203,13 +203,22 @@ impl AisafeApp {
                                         }
                                     }
                                 }
+                                // 隔离中的成员可吊销（确认失陷后的处决动作）
+                                if ui
+                                    .add(
+                                        egui::Button::new(RichText::new("吊销驱离").color(danger())),
+                                    )
+                                    .clicked()
+                                {
+                                    self.org_pending_revoke = Some(m.node.clone());
+                                }
                             });
                         } else {
                             ui.horizontal(|ui| {
                                 ui.add(
                                     egui::TextEdit::singleline(&mut self.org_reason)
                                         .hint_text("隔离原因（可选）")
-                                        .desired_width(150.0),
+                                        .desired_width(180.0),
                                 );
                                 if ui.button("软隔离").clicked() {
                                     let node = m.node.clone();
@@ -223,15 +232,13 @@ impl AisafeApp {
                                         Err(e) => self.set_toast(format!("隔离失败：{e}")),
                                     }
                                 }
-                                // 吊销驱离（严肃性设计）：仅隔离中的成员可吊销——
-                                // 先冷冻观察、确认失陷再处决；未隔离时按钮灰置
+                                // 吊销驱离（严肃性设计）：正常成员灰置——
+                                // 先冷冻观察、确认失陷再处决
                                 let resp = ui.add_enabled(
-                                    m.status == "quarantined",
+                                    false,
                                     egui::Button::new("吊销驱离"),
                                 );
-                                if m.status != "quarantined" {
-                                    resp.on_hover_text("先「软隔离」观察，确认后再吊销驱离");
-                                }
+                                resp.on_hover_text("先「软隔离」观察，确认后再吊销驱离");
                             });
                         }
                         ui.end_row();
