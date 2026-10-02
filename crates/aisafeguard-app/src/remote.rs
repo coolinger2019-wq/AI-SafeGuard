@@ -52,12 +52,18 @@ pub fn probe_service() -> Option<RemoteConsole> {
 
 impl RemoteConsole {
     pub fn new(port: u16, token: String) -> Self {
+        Self::with_base(format!("http://127.0.0.1:{port}"), token)
+    }
+
+    /// F740：连接任意节点的远程控制台（配合 SSH 端口转发——API 只听节点本机回环，
+    /// 跨机访问的正路是 `ssh -N -L 本机端口:127.0.0.1:7420 节点` 后连本机端口）。
+    pub fn with_base(base: String, token: String) -> Self {
         Self {
             http: Client::builder()
                 .timeout(Duration::from_secs(10))
                 .build()
                 .expect("HTTP client 构建失败"),
-            base: format!("http://127.0.0.1:{port}"),
+            base: base.trim_end_matches('/').to_string(),
             token,
         }
     }

@@ -59,6 +59,25 @@
 4. **协同面**：协调者 `fed audit <out.json>` 导成员/吊销/原始信封尾部。
 5. **取回通道**：SSH 隧道 + `--print-token` + 本地 API，或直接 scp 文件（attach 模式已被 e2e 验证）。
 
+## 三点五、远程查看节点界面（F740 配套，`--remote`）
+
+节点的 GUI 是桌面程序，VPS 上跑的是 headless（无界面）。**远程看节点的正路 = SSH 端口
+转发 + GUI 远程控制台模式**（`aisafeguard --remote`，F740 配套能力）：
+
+```bash
+# ① 本机起 SSH 隧道（保持开着）——把节点回环 API 映射到本机
+ssh -N -L 17420:127.0.0.1:7420 root@<节点IP>
+# ② 取节点 token（节点上执行；或 scp 回 /var/lib/aisafeguard/api-token）
+cat /var/lib/aisafeguard/api-token
+# ③ 本机用 GUI 远程模式连本机转发端口
+aisafeguard --remote http://127.0.0.1:17420 --token <节点token>
+```
+
+GUI 打开即该节点的完整界面（仪表盘/事件/防火墙/组织面板），数据实时来自节点 API。
+安全边界：API 永远只听节点本机回环（公网不可达），跨机访问只能经 SSH 隧道 + token；
+`--token` 值会进本机进程列表，介意可用 `--token-file <路径>`（scp 回来的 token 文件）。
+多节点 = 开多个隧道端口（17420/17431/...）+ 多个 GUI 实例，或轮流连。
+
 ## 四、48 小时 pilot（正式起表前置）
 
 正式计时前，第一段节点先跑 48h 并出完整报告，验证**管线本身**：

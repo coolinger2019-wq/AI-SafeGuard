@@ -108,6 +108,10 @@ fn main() -> anyhow::Result<()> {
     let mut command: Option<(String, Option<String>)> = None;
     let mut fed_sans: Vec<String> = Vec::new();
     let mut audit_format = String::from("json");
+    // F740：GUI 远程控制台——连接任意节点的 API（配合 SSH 端口转发）
+    let mut remote_url: Option<String> = None;
+    let mut remote_token: Option<String> = None;
+    let mut remote_token_file: Option<PathBuf> = None;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -265,6 +269,38 @@ fn main() -> anyhow::Result<()> {
                     Some(v) if v == "json" || v == "stix" => audit_format = v.clone(),
                     _ => {
                         eprintln!("--format 需要一个值（json | stix）");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--remote" => {
+                i += 1;
+                match args.get(i) {
+                    Some(u) if u.starts_with("http://") || u.starts_with("https://") => {
+                        remote_url = Some(u.clone())
+                    }
+                    _ => {
+                        eprintln!("--remote 需要一个 http(s):// 地址（如 http://127.0.0.1:17420）");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--token" => {
+                i += 1;
+                match args.get(i) {
+                    Some(t) if !t.trim().is_empty() => remote_token = Some(t.trim().to_string()),
+                    _ => {
+                        eprintln!("--token 需要一个非空值");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--token-file" => {
+                i += 1;
+                match args.get(i) {
+                    Some(f) => remote_token_file = Some(PathBuf::from(f)),
+                    None => {
+                        eprintln!("--token-file 需要一个路径");
                         std::process::exit(2);
                     }
                 }
@@ -493,10 +529,25 @@ fn main() -> anyhow::Result<()> {
         bundle.engine.honeypot.stop();
         Ok(())
     } else {
-        // GUI：已提权 → 内嵌引擎；未提权 → 优先连接提权服务；
+        // GUI：显式 --remote → 连任意节点 API（SSH 隧道场景，最高优先）；
+        // 已提权 → 内嵌引擎；未提权 → 优先连接提权服务；
         // 无服务 → 自动弹 UAC 请求管理员权限（拒绝则未提权内嵌回退，防火墙功能受限）
-        let elevated = aisafeguard_firewall::create_backend().is_elevated();
-        let console: Arc<dyn Console> = if elevated {
+        let console: Arc<dyn Console> = if let Some(url) = remote_url.clone() {
+            let token = match (remote_token.clone(), remote_token_file.clone()) {
+                (Some(t), _) => t,
+                (None, Some(f)) => std::fs::read_to_string(&f)
+                    .map(|s| s.trim().to_string())
+                    .map_err(|e| anyhow::anyhow!("读取 {} 失败: {e}", f.display()))?,
+                (None, None) => {
+                    anyhow::bail!("--remote 需要 --token <值> 或 --token-file <路径> 提供节点 token")
+                }
+            };
+            let rc = remote::RemoteConsole::with_base(url.clone(), token);
+            rc.status()
+                .map_err(|e| anyhow::anyhow!("远程节点 {url} 不可达: {e}"))?;
+            println!("远程控制台模式：{url}");
+            Arc::new(rc)
+        } else if aisafeguard_firewall::create_backend().is_elevated() {
             let (cfg, cfg_path) = resolve_cfg(cfg_path, data_dir)?;
             println!("内嵌引擎模式（管理员）");
             embedded_console(cfg, cfg_path)?
