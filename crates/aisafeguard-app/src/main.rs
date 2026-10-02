@@ -156,10 +156,16 @@ fn main() -> anyhow::Result<()> {
                 i += 1;
                 match args.get(i).map(|s| s.as_str()) {
                     Some("init-ca") => {
-                        // 可选位置参数：组织名（fed init-ca [组织名]）。
-                        // 读 i+1 不再手动推进——循环尾部的 i += 1 负责越过它
-                        i += 1;
-                        let org = args.get(i).cloned();
+                        // 可选位置参数：组织名（fed init-ca [组织名]）。下一 token
+                        // 以 -- 开头 = 全局 flag，完全不推进 i、留给主循环处理
+                        // （修复 fed init-ca --data-dir X 的 flag 被吃掉/越过问题）
+                        let org = match args.get(i + 1) {
+                            Some(a) if !a.starts_with("--") => {
+                                i += 1;
+                                Some(a.clone())
+                            }
+                            _ => None,
+                        };
                         command = Some(("fed-init-ca".into(), org));
                     }
                     Some("issue-cert") => {

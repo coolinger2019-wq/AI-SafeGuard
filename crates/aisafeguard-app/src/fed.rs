@@ -248,7 +248,7 @@ fn check_member(state: &FedState, node: &str, fp: &str) -> Result<(), Response> 
         return Err((StatusCode::UNAUTHORIZED, "缺少客户端证书").into_response());
     }
     // 预登记校验（0.4.0 C2）：已预登记节点关闭 TOFU 抢注窗口
-    let data_dir = state.engine.config().general.data_dir.clone();
+    let data_dir = state.engine.config().data_dir();
     if !expected_ok(&load_expected(&data_dir), node, fp) {
         state.engine.bus.publish(SecurityEvent::engine(
             "warn",
@@ -402,7 +402,7 @@ fn gate_envelope(state: &FedState, peer: &FedPeer, body: &Bytes) -> Result<Gate,
     {
         state.stats.quarantined.fetch_add(1, Ordering::Relaxed);
         // 审计通道保留：隔离期消息仍留原始信封（可离线验签取证）
-        append_audit_log(&state.engine.config().general.data_dir, &env, now);
+        append_audit_log(&state.engine.config().data_dir(), &env, now);
         return Err(err_status(
             StatusCode::FORBIDDEN,
             "节点已被软隔离（心跳与审计保留，事件/建议通道暂停）；解除：协调者侧 fed quarantine <node> --lift <指纹前缀>",
@@ -620,7 +620,7 @@ async fn fed_events(
     }
     // 拍板决议②：协调者不再把节点事件写进自己的 events 表——原始签名信封进
     // 有界审计日志（可离线验签），观测进内存印证窗口
-    append_audit_log(&state.engine.config().general.data_dir, &env, now);
+    append_audit_log(&state.engine.config().data_dir(), &env, now);
     // 观测 → 印证评估；新产出的组织事件进广播环 + 协调者事件流（GUI 可见）
     let mut emitted: Vec<OrgCorroboration> = Vec::new();
     for obs in observations_of(&env.node, &filtered) {
@@ -938,7 +938,7 @@ async fn fed_reports(
     if payload.len() > 100 {
         return err("单次回流最多 100 条");
     }
-    append_audit_log(&state.engine.config().general.data_dir, &env, now_ts());
+    append_audit_log(&state.engine.config().data_dir(), &env, now_ts());
     let threshold = state.engine.config().fed.org_adoption_percent.clamp(1, 100);
     let mut accepted = 0usize;
     // 触发的推荐升级先收集再广播（不持锁推 feed/总线）
@@ -1550,7 +1550,7 @@ fn read_pem_private_key(path: &Path) -> Result<rustls::pki_types::PrivateKeyDer<
 /// 材料缺失/非法时返回 Err，由调用方降级留痕（不影响引擎其余功能）。
 pub async fn serve_coordinator(engine: Arc<EngineHandle>) -> Result<(), String> {
     let cfg = engine.config().fed;
-    let data_dir = engine.config().general.data_dir.clone();
+    let data_dir = engine.config().data_dir();
     let ca_path = resolve_fed_path(&data_dir, &cfg.ca_path, "ca.pem");
     let (cert_path, key_path) =
         resolve_node_pair(&data_dir, &cfg.cert_path, &cfg.key_path, &cfg.node);
@@ -1583,7 +1583,7 @@ pub async fn serve_coordinator(engine: Arc<EngineHandle>) -> Result<(), String> 
     let app = fed_router(engine.clone());
     let (audit_bus, audit_dir) = {
         let eng = engine.clone();
-        (eng.bus.clone(), eng.config().general.data_dir.clone())
+        (eng.bus.clone(), eng.config().data_dir())
     };
 
     loop {
@@ -1651,7 +1651,7 @@ struct PushEvent {
 /// agent 的 mTLS HTTP 客户端：携带本节点证书（clientAuth）+ 组织 CA 验证协调者。
 fn build_agent_client(eng: &EngineHandle) -> Result<reqwest::Client, String> {
     let cfg = eng.config().fed;
-    let data_dir = eng.config().general.data_dir.clone();
+    let data_dir = eng.config().data_dir();
     let ca_path = resolve_fed_path(&data_dir, &cfg.ca_path, "ca.pem");
     let (cert_path, key_path) =
         resolve_node_pair(&data_dir, &cfg.cert_path, &cfg.key_path, &cfg.node);
@@ -1805,7 +1805,7 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
                 match build_agent_client(&eng) {
                     Ok(c) => {
                         let key_path = {
-                            let data_dir = eng.config().general.data_dir.clone();
+                            let data_dir = eng.config().data_dir();
                             let (_, key_path) =
                                 resolve_node_pair(&data_dir, &cfg.cert_path, &cfg.key_path, &cfg.node);
                             key_path
