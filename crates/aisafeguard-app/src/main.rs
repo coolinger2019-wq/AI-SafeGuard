@@ -187,16 +187,21 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                     Some("revoke") => {
+                        // target + 可选原因（非 flag 位置参数）：原因后仍可跟 --data-dir 等 flag
                         i += 1;
-                        match args.get(i) {
-                            Some(target) => {
-                                command = Some(("fed-revoke".into(), Some(target.clone())))
-                            }
-                            None => {
-                                eprintln!("用法: aisafeguard fed revoke <节点名|指纹> [原因]");
-                                std::process::exit(2);
-                            }
+                        let Some(target) = args.get(i).cloned() else {
+                            eprintln!("用法: aisafeguard fed revoke <节点名|指纹> [原因]");
+                            std::process::exit(2);
+                        };
+                        let mut payload = target.clone();
+                        if let Some(next) = args.get(i + 1)
+                            && !next.starts_with("--")
+                        {
+                            payload.push('\u{1}');
+                            payload.push_str(next);
+                            i += 1;
                         }
+                        command = Some(("fed-revoke".into(), Some(payload)));
                     }
                     Some("quarantine") => {
                         i += 1;
@@ -424,15 +429,16 @@ fn main() -> anyhow::Result<()> {
                 );
             }
             "fed-revoke" => {
-                let Some(target) = arg else {
+                let Some(joined) = arg else {
                     eprintln!("用法: aisafeguard fed revoke <节点名|指纹> [原因]");
                     std::process::exit(2);
                 };
-                let reason = fed_sans.into_iter().next().unwrap_or_default();
+                let (target, reason) =
+                    joined.split_once('\u{1}').unwrap_or((joined.as_str(), ""));
                 return match fed::cmd_revoke(
                     &resolve_cfg(cfg_path, data_dir)?.0.data_dir(),
-                    &target,
-                    &reason,
+                    target,
+                    reason,
                 ) {
                     Ok(fp) => {
                         println!("✓ 已吊销 {fp}（协调者立即拒绝其连接）");

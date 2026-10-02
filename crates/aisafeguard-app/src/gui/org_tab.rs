@@ -223,36 +223,14 @@ impl AisafeApp {
                                         Err(e) => self.set_toast(format!("隔离失败：{e}")),
                                     }
                                 }
-                                // 吊销两步确认（驱离 = 死刑，防误点）：
-                                let confirming =
-                                    self.org_pending_revoke.as_deref() == Some(m.node.as_str());
-                                let label = if confirming {
-                                    format!("确认吊销 {}？", m.node)
-                                } else {
-                                    "吊销驱离".to_string()
-                                };
-                                let btn = egui::Button::new(RichText::new(label).color(danger()));
-                                if ui.add(btn).clicked() {
-                                    let node = m.node.clone();
-                                    if confirming {
-                                        let reason = self.org_reason.trim().to_string();
-                                        match self.eng.revoke_member(&node, &reason) {
-                                            Ok(msg) => {
-                                                self.org_pending_revoke = None;
-                                                self.set_toast(msg);
-                                                self.refresh_cache();
-                                            }
-                                            Err(e) => {
-                                                self.org_pending_revoke = None;
-                                                self.set_toast(format!("吊销失败：{e}"))
-                                            }
-                                        }
-                                    } else {
-                                        self.set_toast(format!(
-                                            "吊销 = 立即断开 {node} 的一切连接（心跳也断）。再点一次确认"
-                                        ));
-                                        self.org_pending_revoke = Some(node);
-                                    }
+                                // 吊销驱离（严肃性设计）：仅隔离中的成员可吊销——
+                                // 先冷冻观察、确认失陷再处决；未隔离时按钮灰置
+                                let resp = ui.add_enabled(
+                                    m.status == "quarantined",
+                                    egui::Button::new("吊销驱离"),
+                                );
+                                if m.status != "quarantined" {
+                                    resp.on_hover_text("先「软隔离」观察，确认后再吊销驱离");
                                 }
                             });
                         }
@@ -352,8 +330,63 @@ impl AisafeApp {
 
         ui.add_space(space::M);
         ui.label(caption(
-            "红线：面板只读；仅隔离/解除可操作（与 CLI 同通路，隔离保留心跳与审计）。\
+            "红线：面板只读；仅隔离/解除/吊销可操作（与 CLI 同通路，隔离保留心跳与审计）。\
              印证事件证据链跨节点跳转视图在 0.6 收口批提供。",
         ));
+
+        // F740 吊销确认弹窗（org_pending_revoke 挂起时渲染为模态覆盖层）
+        if let Some(node) = self.org_pending_revoke.clone() {
+            let mut confirmed = false;
+            let mut cancelled = false;
+            egui::Modal::new(egui::Id::new("revoke-confirm")).show(ui.ctx(), |ui| {
+                ui.label(
+                    RichText::new(format!("确认吊销驱离 {node}？"))
+                        .size(type_scale::TITLE)
+                        .strong()
+                        .color(danger()),
+                );
+                ui.add_space(space::S);
+                ui.label(body_text(
+                    "立即断开该成员的一切连接（含心跳）——不可自动撤销。\n\
+                     重新加入组织需重新签发证书并手工删除吊销记录。",
+                ));
+                ui.add_space(space::S);
+                ui.horizontal(|ui| {
+                    ui.label("原因");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.org_reason)
+                            .hint_text("吊销原因（建议填写）")
+                            .desired_width(260.0),
+                    );
+                });
+                ui.add_space(space::S);
+                ui.horizontal(|ui| {
+                    if ui.button("取消").clicked() {
+                        cancelled = true;
+                    }
+                    if ui
+                        .add(egui::Button::new(
+                            RichText::new("确认吊销驱离").color(danger()).strong(),
+                        ))
+                        .clicked()
+                    {
+                        confirmed = true;
+                    }
+                });
+            });
+            if confirmed || cancelled {
+                self.org_pending_revoke = None;
+            }
+            if confirmed {
+                let reason = self.org_reason.trim().to_string();
+                match self.eng.revoke_member(&node, &reason) {
+                    Ok(msg) => {
+                        self.set_toast(msg);
+                        self.refresh_cache();
+                    }
+                    Err(e) => self.set_toast(format!("吊销失败：{e}")),
+                }
+            }
+        }
     }
 }
