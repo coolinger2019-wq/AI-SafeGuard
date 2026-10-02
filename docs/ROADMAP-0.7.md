@@ -226,8 +226,10 @@
 
 > **F790 状态（0.7.x）**：已实现——`GET/PUT /api/config/raw`（engine: config_raw/
 > apply_config_raw，非法 TOML 400 不落盘）；路由拆分（静态 `/` 免 token + `/api/*` 保留
-> auth 中间层）；`crates/aisafeguard-app/src/web/index.html` 三标签页；Windows 本地
-> e2e（curl 全矩阵 + 浏览器三页截图）验证通过。部署：节点侧构建（WSL NAT 断网，见 LESSONS）。
+> auth 中间层）；`crates/aisafeguard-app/src/web/index.html` 四标签页（仪表盘/事件/建议/配置，
+> 事件类型筛选 + 建议应用/驳回走既有灰度语义）；**磁盘覆盖优先**（`<data_dir>/web/index.html`
+> 存在则覆盖内嵌版——开发热改零编译，删除回归内嵌保持单二进制发布）；Windows 本地
+> e2e（curl 全矩阵 + 浏览器截图验证）通过，节点已部署。构建：节点侧构建（WSL NAT 断网，见 LESSONS）。
 
 ---
 

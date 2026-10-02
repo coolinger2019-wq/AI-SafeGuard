@@ -509,10 +509,16 @@ async fn put_config(
     }
 }
 
-/// Web 控制台静态壳（F760）：单文件 HTML，include_str! 内嵌，无外部依赖。
+/// Web 控制台静态壳（F790）：单文件 HTML，include_str! 内嵌，无外部依赖。
+/// 磁盘优先：`<data_dir>/web/index.html` 存在则覆盖内嵌版（开发热改，改完刷新浏览器
+/// 即生效、删除该文件即回归内嵌），保证发布仍是单二进制且页面版本与 API 必然匹配。
 /// 页面内不含任何数据；数据一律经页面内 Bearer token 调 /api/*。
-async fn web_console() -> Html<&'static str> {
-    Html(include_str!("web/index.html"))
+async fn web_console(State(s): State<AppState>) -> Response {
+    let override_path = s.engine.config().data_dir().join("web").join("index.html");
+    if let Ok(raw) = std::fs::read_to_string(&override_path) {
+        return Html(raw).into_response();
+    }
+    Html(include_str!("web/index.html")).into_response()
 }
 
 /// config.toml 原文（文本编辑器加载用）。
