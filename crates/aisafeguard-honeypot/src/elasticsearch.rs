@@ -165,6 +165,7 @@ pub(crate) fn route(
                 let body_lower = body_clean.to_ascii_lowercase();
                 let ghost = if body_lower.contains("script") || body_lower.contains("painless") {
                     Some(GhostVerdict {
+                        kind: "es_ghost".into(),
                         threat: "critical".into(),
                         evidence: format!("ES 脚本注入利用尝试（{index}）: {body_clean}"),
                     })
@@ -192,6 +193,7 @@ pub(crate) fn route(
                     .unwrap_or_default(),
                     label: format!("write {path}"),
                     ghost: Some(GhostVerdict {
+                        kind: "es_ghost".into(),
                         threat: "high".into(),
                         evidence: format!("ES 数据写入（{method} {path}）: {body_clean}"),
                     }),

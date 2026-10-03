@@ -195,4 +195,24 @@ mod tests {
         assert!(parse_x224_cr(b"not rdp data at all!").is_none());
         assert!(parse_x224_cr(&[0x03, 0x00]).is_none());
     }
+
+    /// 线上探针字节复现（探针把 li 位置写成了 0xe0 的畸形结构）——
+    /// 按 F794b② 约定：检测向量逐字节钉住。
+    #[test]
+    fn probe_exact_live_bytes() {
+        let cr: Vec<u8> = [
+            0x03u8, 0x00, 0x00, 0x2e, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ]
+        .into_iter()
+        .chain(b"Cookie: mstshash=kali-probe\r\n".iter().copied())
+        .chain([0x01u8, 0x00, 0x08, 0x00, 0x03, 0x00, 0x00, 0x00])
+        .collect();
+        let hello = parse_x224_cr(&cr).expect("探针结构应解析");
+        assert_eq!(hello.mstshash.as_deref(), Some("kali-probe"));
+        assert_eq!(
+            hello.requested_protocols,
+            Some(0x3),
+            "neg 应在畸形 li 下仍被识别"
+        );
+    }
 }

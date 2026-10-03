@@ -39,11 +39,12 @@ User=root
 # 最小权限（0.4.0 A2）：白名单式授权 + 禁止提权。
 #   CAP_NET_ADMIN —— nftables 封禁（inet aisafeguard 表）
 #   CAP_NET_RAW   —— AF_PACKET 采样捕获（[detect.capture].enabled=true 才需要）
-#   两个能力都不用（仅蜜罐+API，且蜜罐端口>1024）时可将 AmbientCapabilities
-#   整行删除，服务降级为无特权运行（捕获/封禁功能自动降级并留事件）。
+#   CAP_BPF/CAP_PERFMON —— XDP 快速层附加（[xdp].enabled=true 才需要）
+#   CAP_NET_BIND_SERVICE —— 蜜罐绑定特权端口（如 SMB 445；全部端口>1024 且未开
+#   捕获/XDP 时可将对应项从两行中删除，服务降级为最小能力运行）。
 #   进一步收权可改 User= 为专用低权用户（需 chown /var/lib/aisafeguard）。
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_BPF CAP_PERFMON CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_BPF CAP_PERFMON CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
 
 [Install]

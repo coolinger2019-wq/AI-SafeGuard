@@ -140,6 +140,7 @@ pub(crate) fn route(
                 body: serde_json::to_vec(&json!({"Id": id, "Warnings": []})).unwrap_or_default(),
                 label: "containers/create".into(),
                 ghost: Some(GhostVerdict {
+                    kind: "docker_ghost".into(),
                     threat: "critical".into(),
                     evidence: format!("Docker API 容器创建请求（镜像部署 TTP）: {body_clean}"),
                 }),
@@ -154,6 +155,7 @@ pub(crate) fn route(
                     .unwrap_or_default(),
                 label: "containers/exec".into(),
                 ghost: Some(GhostVerdict {
+                    kind: "docker_ghost".into(),
                     threat: "critical".into(),
                     evidence: format!("Docker API exec 创建（容器内执行命令）: {body_clean}"),
                 }),

@@ -570,7 +570,7 @@ async fn handle_conn(
     if let Some(g) = ghost {
         bus.publish(SecurityEvent::Detection {
             ts: now_ts(),
-            kind: "mcp_ghost".into(),
+            kind: g.kind,
             src_ip: remote_ip.clone(),
             confidence: "high".into(),
             severity: g.threat,

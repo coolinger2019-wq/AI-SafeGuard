@@ -228,6 +228,7 @@ fn call_tool_result(params: &Value, canary: Option<&CanaryState>) -> (Value, Opt
     // 定罪信息：参数清洗后进证据串（TTP 主体是「调了什么工具、传了什么参数」）
     let args_clean = sanitize(args.to_string().as_bytes(), 400);
     let ghost = GhostVerdict {
+        kind: "mcp_ghost".into(),
         threat: (*threat).into(),
         evidence: format!(
             "MCP 幽灵工具调用: {name_match} ({category}/{threat}) 参数: {args_clean}"

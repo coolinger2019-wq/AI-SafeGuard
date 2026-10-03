@@ -54,6 +54,8 @@ pub(crate) const MAX_PAYLOAD: usize = 2048;
 /// Detection 事件（快路径已定罪层，接 auto_apply 证据门控）。
 #[derive(Clone)]
 pub(crate) struct GhostVerdict {
+    /// Detection kind（mcp_ghost / docker_ghost / es_ghost…）
+    pub kind: String,
     /// 定级（critical/high，来自协议侧语义）→ Detection severity
     pub threat: String,
     /// 定罪证据串：动作、参数、目标全在内（已清洗）
