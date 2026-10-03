@@ -25,9 +25,12 @@ T0=$(date +%s)
 
 stage_fmt() {
     echo "== [fmt] rustfmt --check"
-    cargo fmt --all -- --check 2>&1 | head -40
-    # fmt 首轮为报告性检查（存量未格式化不拦门），全绿后升格为门禁
-    RESULT[fmt]="report"
+    if cargo fmt --all -- --check >/dev/null 2>&1; then
+        RESULT[fmt]=OK
+    else
+        cargo fmt --all -- --check 2>&1 | grep -E "^Diff in" | head -10
+        RESULT[fmt]=FAIL
+    fi
 }
 
 stage_clippy() {
