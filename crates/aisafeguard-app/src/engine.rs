@@ -1898,6 +1898,28 @@ pub fn spawn_capture_task(eng: &Arc<EngineHandle>) {
     }
 }
 
+/// 两条规则是否落在同一防火墙元素上（F793）：同来源 IP + 同方向 + 粒度交叠。
+/// nftables/XDP 的封禁元素按（方向, IP, 粒度）键控：IP 级（无端口）与端口级是
+/// 不同集合；端口级需同端口且协议有交集（any 与 tcp/udp 同端口共享拼接集合）。
+/// 元素共享的后端上，先到期规则的删除会连带拆掉后到期规则的封禁——解封任务
+/// 据此跳过防火墙删除、只清记账，封禁实际生效期 = 同元素规则的叠加最大值。
+fn same_element(a: &aisafeguard_store::RuleRow, b: &aisafeguard_store::RuleRow) -> bool {
+    if a.remote_ip.is_empty() || a.remote_ip != b.remote_ip || a.direction != b.direction {
+        return false;
+    }
+    match (a.local_port, b.local_port) {
+        (None, None) => true,
+        (Some(_), None) | (None, Some(_)) => false,
+        (Some(pa), Some(pb)) => {
+            pa == pb
+                && match (a.protocol.as_str(), b.protocol.as_str()) {
+                    ("any", _) | (_, "any") => true,
+                    (x, y) => x == y,
+                }
+        }
+    }
+}
+
 /// TTL 到期自动解封：每 60 秒扫一次到期规则，移除防火墙规则并留痕。
 pub fn spawn_expiry_janitor(eng: &Arc<EngineHandle>) {
     let eng = Arc::clone(eng);
@@ -1909,6 +1931,20 @@ pub fn spawn_expiry_janitor(eng: &Arc<EngineHandle>) {
             ticker.tick().await;
             let Ok(expired) = eng.store.expired_rules(now_ts()) else {
                 continue;
+            };
+            if expired.is_empty() {
+                continue;
+            }
+            // F793 元素共享语义：同元素还有别的活跃规则时，跳过防火墙删除
+            //（只清记账）——封禁实际生效期 = 同元素规则的叠加最大值，而不是
+            // 最早到期时间。本批到期的行不能作为「仍有覆盖」的依据。
+            let shared = eng.firewall.removes_shared_element();
+            let expired_ids: std::collections::HashSet<i64> =
+                expired.iter().map(|r| r.id).collect();
+            let active = if shared {
+                eng.store.list_rules().unwrap_or_default()
+            } else {
+                Vec::new()
             };
             for row in expired {
                 let name = row.name.clone();
@@ -1924,10 +1960,24 @@ pub fn spawn_expiry_janitor(eng: &Arc<EngineHandle>) {
                     note: row.note.clone(),
                     tag: row.tag.clone(),
                 };
+                let covered = shared
+                    && active
+                        .iter()
+                        .any(|r| r.enabled && !expired_ids.contains(&r.id) && same_element(r, &row));
+                let _ = eng.store.delete_rule(row.id);
+                if covered {
+                    eng.bus.publish(SecurityEvent::engine(
+                        "info",
+                        format!(
+                            "TTL 到期，{name}（{}）解除记账——同元素封禁仍由其他活跃规则覆盖，防火墙元素保留",
+                            row.remote_ip
+                        ),
+                    ));
+                    continue;
+                }
                 if let Err(e) = eng.firewall.remove(&name, &spec) {
                     tracing::warn!("解封规则 {name} 失败: {e}");
                 }
-                let _ = eng.store.delete_rule(row.id);
                 eng.bus.publish(SecurityEvent::FirewallRuleRemoved {
                     ts: now_ts(),
                     name: name.clone(),
@@ -2747,6 +2797,45 @@ pub(crate) fn apply_intel_source(
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    /// F793 同元素判定：同 IP+方向+粒度交叠才共享元素；IP 级与端口级互不干扰。
+    #[test]
+    fn same_element_matches_ip_direction_and_scope() {
+        let rule = |ip: &str, dir: &str, proto: &str, port: Option<u16>| {
+            aisafeguard_store::RuleRow {
+                id: 0,
+                created_ts: 0,
+                name: String::new(),
+                direction: dir.into(),
+                protocol: proto.into(),
+                remote_ip: ip.into(),
+                local_port: port,
+                origin: String::new(),
+                enabled: true,
+                note: String::new(),
+                expires_ts: Some(0),
+                tag: String::new(),
+                promoted: false,
+            }
+        };
+        let a = rule("1.2.3.4", "in", "any", None);
+        // 同 IP 同方向 IP 级 → 同元素（协议不同不分裂 IP 级元素）
+        assert!(same_element(&a, &rule("1.2.3.4", "in", "any", None)));
+        assert!(same_element(&a, &rule("1.2.3.4", "in", "tcp", None)));
+        // IP 级 vs 端口级 = 不同集合
+        assert!(!same_element(&a, &rule("1.2.3.4", "in", "tcp", Some(2222))));
+        // 不同 IP / 不同方向
+        assert!(!same_element(&a, &rule("5.6.7.8", "in", "any", None)));
+        assert!(!same_element(&a, &rule("1.2.3.4", "out", "any", None)));
+        // 端口级：同端口且协议有交集（any 与 tcp/udp 共享拼接集合）
+        let t = rule("1.2.3.4", "in", "tcp", Some(8081));
+        assert!(same_element(&t, &rule("1.2.3.4", "in", "tcp", Some(8081))));
+        assert!(same_element(&t, &rule("1.2.3.4", "in", "any", Some(8081))));
+        assert!(!same_element(&t, &rule("1.2.3.4", "in", "udp", Some(8081))));
+        assert!(!same_element(&t, &rule("1.2.3.4", "in", "tcp", Some(8082))));
+        // 空 IP 的规则不构成覆盖
+        assert!(!same_element(&rule("", "in", "any", None), &a));
+    }
 
     /// auto_apply 证据门控（F791 补全）：三层证据/豁免/日限额的完整分支覆盖。
     #[test]

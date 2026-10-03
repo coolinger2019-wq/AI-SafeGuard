@@ -308,6 +308,10 @@ impl Firewall for CompositeFirewall {
         }
     }
 
+    fn removes_shared_element(&self) -> bool {
+        true
+    }
+
     fn is_elevated(&self) -> bool {
         self.base.is_elevated()
     }

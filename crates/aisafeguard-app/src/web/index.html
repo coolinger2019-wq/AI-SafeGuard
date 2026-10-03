@@ -240,7 +240,7 @@ const $ = (id) => document.getElementById(id);
 let token = localStorage.getItem(TK_KEY) || '';
 let evTimer = null, dashTimer = null, propTimer = null, fwTimer = null, cfgDirty = false;
 let lastPropRows = [];
-let blockedIps = new Set(); // 已封禁 IP（来自 /api/rules），用于历史数据标注
+let blockInfo = new Map(); // 已封禁 IP → 徽标口径规则行（剩余最长/无期限优先，来自 /api/rules）
 // 展开状态跨轮询保持：重渲染时按 Set 恢复展开行（用户点开即保持，再点收起）
 const expandedEv = new Set(), expandedProp = new Set(), expandedGeo = new Set();
 // 无变化跳过重绘（防闪烁/防滚动跳变/防按钮被重建吞点击）
@@ -387,6 +387,17 @@ document.querySelectorAll('nav button').forEach((b) => {
 function stopTimers() { clearInterval(dashTimer); clearInterval(evTimer); clearInterval(propTimer); clearInterval(fwTimer); }
 
 /* ---------- 仪表盘 ---------- */
+// 已封禁徽标（F793 配套）：带来源与剩余时间——「同目标已封禁」不再是无来源的
+// 恒等标注，人工判断「该驳回还是该应用延长」时看得到压着的规则还剩多久
+const ORIGIN_SHORT = { engine: '检测引擎', ai: 'AI灰度', intel: '情报', manual: '人工', org: '组织' };
+function blockBadge(ip) {
+  const r = blockInfo.get(ip);
+  if (!r) return '';
+  const label = ORIGIN_SHORT[r.origin] || r.source || r.origin;
+  const left = r.expires_ts ? Math.round((r.expires_ts - Date.now() / 1000) / 60) : null;
+  const when = left == null ? '无期限' : left > 0 ? '剩' + left + '分' : '即将到期';
+  return ' <span class="badge ok" title="' + esc(r.ttl_text || '') + '">已封禁·' + esc(label) + ' ' + when + '</span>';
+}
 function statCard(k, v) { return '<div class="card"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>'; }
 
 async function refreshDash() {
@@ -396,7 +407,15 @@ async function refreshDash() {
     setConn(true);
   } catch (e) { setConn(false); return; }
   try { rules = await api('/api/rules'); } catch (_) {}
-  blockedIps = new Set(rules.map((r) => r.remote_ip));
+  blockInfo = new Map();
+  for (const r of rules) {
+    if (!r.remote_ip) continue;
+    const cur = blockInfo.get(r.remote_ip);
+    const better = !cur
+      || (r.expires_ts == null && cur.expires_ts != null)
+      || (r.expires_ts != null && cur.expires_ts != null && r.expires_ts > cur.expires_ts);
+    if (better) blockInfo.set(r.remote_ip, r);
+  }
 
   $('ver').textContent = 'v' + st.version;
   $('stats').innerHTML =
@@ -441,9 +460,8 @@ async function refreshDash() {
 
   const top = (stats.top_ips || []).slice(0, 8).map((t, i) => {
     const open = expandedGeo.has(t.ip);
-    const blocked = blockedIps.has(t.ip);
     return '<tr><td class="mono">' + (i + 1) + '</td><td class="mono">' + esc(t.ip) +
-      (blocked ? ' <span class="badge ok">已封禁</span>' : '') + '</td><td>' + t.hits + '</td>' +
+      blockBadge(t.ip) + '</td><td>' + t.hits + '</td>' +
       '<td><button class="act ghost" style="padding:2px 10px;font-size:11.5px" data-geo="' + esc(t.ip) + '">详情</button></td></tr>' +
       '<tr class="payload" data-geopay="' + esc(t.ip) + '"' + (open ? '' : ' hidden') + '><td colspan="4"><pre></pre></td></tr>';
   }).join('');
@@ -526,7 +544,7 @@ async function refreshEvents() {
       '<td class="mono hint">' + fmtTs(e.ts) + '</td>' +
       '<td>' + esc(e.kind) + (e.listener ? ' <span class="hint">·' + esc(e.listener) + '</span>' : '') + rid + '</td>' +
       '<td class="mono">' + esc(e.remote_ip) + (e.remote_port ? ':' + e.remote_port : '') +
-      (blockedIps.has(e.remote_ip) ? ' <span class="badge ok">已封禁</span>' : '') + '</td>' +
+      blockBadge(e.remote_ip) + '</td>' +
       '<td>' + esc(e.summary) + '</td></tr>';
     return pay
       ? main + '<tr class="payload" data-for="' + e.id + '"' + (open ? '' : ' hidden') + '><td colspan="4"><pre>' + esc(pay) + '</pre></td></tr>'
@@ -575,7 +593,7 @@ async function refreshProp() {
       '<td class="mono">' + esc(p.remote_ip) + (p.local_port ? ':' + p.local_port : '') + '</td>' +
       '<td>' + esc(p.reason) + '</td>' +
       '<td>' + propBadge(p.status) +
-      (p.status === 'pending' && blockedIps.has(p.remote_ip) ? ' <span class="badge ok" title="该 IP 已有生效封禁规则，本条建议疑似重复产出">同目标已封禁</span>' : '') + '</td>' +
+      (p.status === 'pending' ? blockBadge(p.remote_ip) : '') + '</td>' +
       '<td>' + acts + '</td></tr>';
     const detail = (p.analysis || p.reason || '（无详情）') +
       (p.ttl_secs ? '\n灰度时长: ' + Math.round(p.ttl_secs / 60) + ' 分钟' : '');

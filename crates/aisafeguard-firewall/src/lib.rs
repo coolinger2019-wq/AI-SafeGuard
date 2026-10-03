@@ -113,6 +113,15 @@ pub trait Firewall: Send + Sync {
     fn resync(&self, _specs: &[BlockSpec]) -> Result<()> {
         Ok(())
     }
+
+    /// 元素共享语义（F793）：本后端的封禁是否落在按 IP/粒度键控的共享元素上
+    /// （nftables 集合元素 / XDP map 表项）。同元素多条规则共存时，解封任务
+    /// 若按「先到期先删」执行，会连带拆掉后到期规则的封禁——引擎据此决定
+    /// 跳过防火墙删除、只清记账。按规则名删除的后端（Windows COM）互不
+    /// 影响，恒 false。
+    fn removes_shared_element(&self) -> bool {
+        false
+    }
 }
 
 /// 创建当前平台的后端。
@@ -619,6 +628,10 @@ impl Default for NftablesBackend {
 impl Firewall for NftablesBackend {
     fn backend(&self) -> &'static str {
         "nftables"
+    }
+
+    fn removes_shared_element(&self) -> bool {
+        true
     }
 
     fn is_elevated(&self) -> bool {
