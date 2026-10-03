@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use aisafeguard_ai::AiClient;
-use aisafeguard_core::config::{AppConfig, DetectConfig};
+use aisafeguard_core::config::{AiConfig, AppConfig, DetectConfig};
 use aisafeguard_core::error::{Error, Result};
 use aisafeguard_core::event::{EventBus, SecurityEvent};
 use aisafeguard_core::{now_ts, secrets};
@@ -2243,6 +2243,7 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                         && severity_ok
                         && quorum_ok
                         && (ignore_fp || !fp_suppressed)
+                        && auto_apply_guard_ok(&eng.store, &cfg.ai, &p.remote_ip, now_ts())
                         && eng.apply_proposal(pid).is_ok()
                     {
                         auto_applied += 1;
@@ -2265,6 +2266,41 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
         },
         Err(e) => analysis_failed(eng, &cfg.ai.model, &e.to_string()),
     }
+}
+
+/// auto_apply 证据门控（F791 补全，2026-10-03 用户拍板）：AI 只提名，本机证据
+/// 决定是否自动应用。三道检查全部通过才放行，任一不过留灰度人工审批：
+/// ①运营者豁免——清单内 IP 永不自动应用；目标无法解析为 IP 按不可信处理。
+/// ②日限额——滚动 24h 内 origin=ai 规则数达上限即暂停（0 = 不限）。
+/// ③证据广度——快路径已定罪（24h 内 ≥1 次 detection，频次规则确定性产出；
+///   「多信号」蜜罐命中叠加检测亦在此层）或情报命中（可自动封禁的高置信条目
+///   在库且该 IP 被观测到主动行为）。仅蜜罐命中无检测 = 单信号，不自动应用。
+fn auto_apply_guard_ok(store: &Store, ai: &AiConfig, remote_ip: &str, now: i64) -> bool {
+    // ① 豁免：解析失败的豁免条目忽略；目标解析失败 = 不放行
+    let Ok(ip) = remote_ip.parse::<std::net::IpAddr>() else {
+        return false;
+    };
+    let exempt = ai
+        .auto_apply_exempt_ips
+        .iter()
+        .filter_map(|s| s.parse::<std::net::IpAddr>().ok())
+        .any(|e| e == ip);
+    if exempt {
+        return false;
+    }
+    // ② 日限额
+    let cap = ai.auto_apply_max_per_day as i64;
+    if cap > 0 && store.ai_rules_since(now - 86_400).unwrap_or(cap) >= cap {
+        return false;
+    }
+    // ③ 证据广度
+    let Ok((honey, det)) = store.evidence_breadth(remote_ip, now - 86_400) else {
+        return false;
+    };
+    if det >= 1 {
+        return true;
+    }
+    honey >= 1 && store.intel_auto_block_hit(remote_ip, now).unwrap_or(false)
 }
 
 fn analysis_failed(eng: &EngineHandle, model: &str, msg: &str) {
@@ -2708,6 +2744,106 @@ pub(crate) fn apply_intel_source(
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    /// auto_apply 证据门控（F791 补全）：三层证据/豁免/日限额的完整分支覆盖。
+    #[test]
+    fn auto_apply_guard_requires_evidence_exemption_and_cap() {
+        let dir = std::env::temp_dir().join(format!("asg-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("临时目录");
+        let store = Store::open(&dir.join("t.db")).expect("临时库");
+        let now = now_ts();
+        let ai = AiConfig {
+            auto_apply: true,
+            ..Default::default()
+        };
+        let honeypot_hit = |ip: &str| SecurityEvent::HoneypotHit {
+            ts: now,
+            listener: "http".into(),
+            kind: "http".into(),
+            port: 8081,
+            remote_ip: ip.into(),
+            remote_port: 44444,
+            summary: "GET / HTTP/1.1".into(),
+            payload: String::new(),
+            http_hint: None,
+            interaction: None,
+        };
+        let detection = |ip: &str| SecurityEvent::Detection {
+            ts: now,
+            kind: "bruteforce".into(),
+            src_ip: ip.into(),
+            confidence: "high".into(),
+            severity: "medium".into(),
+            evidence: "60 秒内命中 10 次".into(),
+            rule_id: None,
+            http_hint: None,
+            tls_fingerprint: None,
+            tls_ja4: None,
+        };
+
+        // 单信号（仅蜜罐命中、无检测、无情报）：留灰度，不放行
+        for _ in 0..3 {
+            store.insert_event(&honeypot_hit("1.2.3.4")).unwrap();
+        }
+        assert!(!auto_apply_guard_ok(&store, &ai, "1.2.3.4", now));
+
+        // 快路径已定罪（≥1 detection）放行——含多信号情形
+        store.insert_event(&detection("1.2.3.4")).unwrap();
+        assert!(auto_apply_guard_ok(&store, &ai, "1.2.3.4", now));
+
+        // 情报命中：可自动封禁条目在库但零观测不放行；被观测到即放行
+        store
+            .upsert_intel(&[(
+                "feodo_c2".into(),
+                "c2".into(),
+                "5.6.7.8".into(),
+                "high".into(),
+                now,
+                now + 86_400,
+                true,
+            )])
+            .unwrap();
+        assert!(!auto_apply_guard_ok(&store, &ai, "5.6.7.8", now), "在库零观测不放行");
+        store.insert_event(&honeypot_hit("5.6.7.8")).unwrap();
+        assert!(auto_apply_guard_ok(&store, &ai, "5.6.7.8", now));
+
+        // 运营者豁免：清单内 IP 即使有检测也不放行（人工批准不受此限）
+        let ai_exempt = AiConfig {
+            auto_apply_exempt_ips: vec!["1.2.3.4".into()],
+            ..Default::default()
+        };
+        assert!(!auto_apply_guard_ok(&store, &ai_exempt, "1.2.3.4", now));
+
+        // 日限额：24h 内 origin=ai 规则数达上限暂停（人工批准同占额）；0 = 不限
+        for i in 0..ai.auto_apply_max_per_day {
+            store
+                .insert_rule(
+                    &format!("blk-guard-{i}"),
+                    "in",
+                    "any",
+                    "9.9.9.9",
+                    None,
+                    "ai",
+                    "",
+                    "",
+                    Some(now + 3600),
+                )
+                .unwrap();
+        }
+        store.insert_event(&detection("2.2.2.2")).unwrap();
+        assert!(!auto_apply_guard_ok(&store, &ai, "2.2.2.2", now), "达限额不放行");
+        let ai_uncapped = AiConfig {
+            auto_apply_max_per_day: 0,
+            ..Default::default()
+        };
+        assert!(auto_apply_guard_ok(&store, &ai_uncapped, "2.2.2.2", now));
+
+        // 目标无法解析为 IP：按不可信处理，不放行
+        assert!(!auto_apply_guard_ok(&store, &ai, "not-an-ip", now));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// 记录调用参数的假防火墙：单机上真实流量源必是内网/回环（会被保护拦下），
     /// 封禁分支只有靠注入假后端才能在测试里确定性地走到。

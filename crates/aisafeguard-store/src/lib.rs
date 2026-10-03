@@ -1098,6 +1098,51 @@ impl Store {
         Ok(hit != 0)
     }
 
+    // ---------- auto_apply 证据门控（F791 补全，2026-10-03 用户拍板） ----------
+
+    /// 证据广度：该来源 IP 近窗口内的蜜罐命中数与快路径检测数。
+    /// auto_apply 的门控输入——仅蜜罐命中（单信号）不足以免审批，分层见 engine 侧。
+    pub fn evidence_breadth(&self, remote_ip: &str, since_ts: i64) -> Result<(i64, i64)> {
+        self.lock()?
+            .query_row(
+                "SELECT
+                   COALESCE(SUM(CASE WHEN kind = 'honeypot_hit' THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN kind = 'detection'    THEN 1 ELSE 0 END), 0)
+                 FROM events WHERE remote_ip = ?1 AND ts >= ?2 AND remote_ip != ''",
+                params![remote_ip, since_ts],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .map_err(|e| Error::Store(e.to_string()))
+    }
+
+    /// 该 IP 是否为「允许自动封禁的源」的在库情报条目（且未过期）——情报命中层。
+    pub fn intel_auto_block_hit(&self, value: &str, now: i64) -> Result<bool> {
+        let n: i64 = self
+            .lock()?
+            .query_row(
+                "SELECT COUNT(*) FROM intel
+                 WHERE value = ?1 AND auto_block = 1 AND expires_ts > ?2",
+                params![value, now],
+                |r| r.get(0),
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(n > 0)
+    }
+
+    /// 近窗口内 origin=ai 的规则数——auto_apply 日限额的计数口径。含人工批准的
+    /// AI 建议：限额约束的是 AI 规则的总 churn（人工批准也占额），不是某一类来源。
+    pub fn ai_rules_since(&self, since_ts: i64) -> Result<i64> {
+        let n: i64 = self
+            .lock()?
+            .query_row(
+                "SELECT COUNT(*) FROM rules WHERE origin = 'ai' AND created_ts >= ?1",
+                params![since_ts],
+                |r| r.get(0),
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(n)
+    }
+
     // ---------- F300 组织事件账本 ----------
 
     pub fn insert_org_event(

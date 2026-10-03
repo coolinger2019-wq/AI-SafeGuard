@@ -152,6 +152,12 @@ model = "glm-4.7"
 auto_apply = false
 # 自动应用生效的最低严重度：low | medium | high | critical。
 auto_apply_min_severity = "high"
+# 运营者豁免清单：清单内 IP 的建议永不自动应用（人工批准不受限）。填管理/运维
+# 出口 IP——操作者误碰蜜罐产生的建议不该把操作者自己封出去。精确 IP 匹配。
+auto_apply_exempt_ips = []
+# 日限额：滚动 24h 内 AI 来源防火墙规则数达到上限即暂停自动应用（0 = 不限），
+# 防模型异常输出打爆防火墙。
+auto_apply_max_per_day = 20
 # 自动分析间隔（秒），30-86400。热更。
 analyze_interval_secs = 900
 # 单条 payload 上送给 LLM 的最大字符数（40-2000，控制上送量）。热更。

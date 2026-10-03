@@ -281,6 +281,14 @@ pub struct AiConfig {
     /// 达到该档及以上的 AI 建议自动应用不再受误报抑制约束；空 = 不忽略（默认）。
     /// 仅作用于 auto_apply——检测器快路径的自动封禁始终尊重抑制。
     pub fp_ignore_min_severity: String,
+    /// auto_apply 运营者豁免清单（F791 补全）：清单内 IP 的建议永不自动应用，
+    /// 人工批准不受限。用途：管理/运维出口 IP——操作者误碰蜜罐产生的建议
+    /// 不该把操作者自己封出去。精确 IP 匹配，解析失败的条目忽略。
+    pub auto_apply_exempt_ips: Vec<String>,
+    /// auto_apply 日限额：滚动 24h 内 origin=ai 的防火墙规则数达到上限即暂停
+    /// 自动应用（0 = 不限）。约束 AI 规则总 churn（人工批准的 AI 建议同占额），
+    /// 防模型异常输出打爆防火墙。
+    pub auto_apply_max_per_day: u32,
     /// 灰度执行：AI 建议应用时的默认封禁时长（秒，AI 未给 ttl_secs 时使用）。
     /// AI 判断是概率性的——应用即短 TTL 试运行，到期自动解封，人工确认后转正。
     pub trial_ttl_secs: u64,
@@ -298,6 +306,8 @@ impl Default for AiConfig {
             fp_ignore_min_severity: String::new(),
             auto_apply: false,
             auto_apply_min_severity: "high".into(),
+            auto_apply_exempt_ips: Vec::new(),
+            auto_apply_max_per_day: 20,
             analyze_interval_secs: 900,
             max_snippet_chars: 200,
             trial_ttl_secs: 900,
@@ -1010,9 +1020,11 @@ mod tests {
         assert_eq!(cfg.honeypot.fingerprint.ssh_banner, "SSH-2.0-OpenSSH_9.6");
         assert_eq!(cfg.honeypot.fingerprint.mysql_version, "8.0.36");
         assert_eq!(cfg.honeypot.fingerprint.http_server, "nginx");
-        // AI 默认人工确认
+        // AI 默认人工确认；豁免清单默认空、日限额默认 20（F791 护栏默认安全）
         assert!(!cfg.ai.enabled);
         assert!(!cfg.ai.auto_apply);
+        assert!(cfg.ai.auto_apply_exempt_ips.is_empty());
+        assert_eq!(cfg.ai.auto_apply_max_per_day, 20);
     }
 
     /// F710 多源模型：新格式解析、旧单源字段拒绝（无兼容层）、源校验。
