@@ -32,8 +32,21 @@ pub(crate) use theme::{
     purple, section_title, space, text as text_color, text_dim, title, toast_bg, toast_text, warn,
 };
 
-/// 监听表协议枚举（H130 基础校验的合法取值；未知 kind 运行时按 generic 处理）
-pub(crate) const LISTENER_KINDS: [&str; 6] = ["ssh", "http", "telnet", "generic", "mysql", "redis"];
+/// 监听表协议枚举（H130 基础校验的合法取值；未知 kind 运行时按 generic 处理）。
+/// F791/F794 新协议随批次加入——GUI 与后端 kind 集合必须同步（H150 教训）。
+pub(crate) const LISTENER_KINDS: [&str; 11] = [
+    "ssh",
+    "http",
+    "telnet",
+    "generic",
+    "mysql",
+    "redis",
+    "mcp",
+    "smb",
+    "rdp",
+    "docker",
+    "elasticsearch",
+];
 
 /// kind 原始值 → 显示名（蜜罐页卡片 / 监听表编辑器共用）
 pub(crate) fn kind_display(kind: &str) -> &str {
@@ -44,6 +57,11 @@ pub(crate) fn kind_display(kind: &str) -> &str {
         "generic" => "Generic",
         "mysql" => "MySQL",
         "redis" => "Redis",
+        "mcp" => "MCP",
+        "smb" => "SMB",
+        "rdp" => "RDP",
+        "docker" => "Docker API",
+        "elasticsearch" => "Elasticsearch",
         other => other,
     }
 }

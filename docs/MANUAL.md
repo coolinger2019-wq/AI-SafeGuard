@@ -90,6 +90,20 @@ AI-SafeGuard 是一台装在你自己电脑上的**终端入侵诱捕与自动�
 
 「设置 → 蜜罐 → 监听表」点「+ 添加监听器」，默认就是一行 MySQL（3307）；把协议换成 Redis、改个不冲突的端口，保存重启。「蜜罐」页会出现新卡片。mysql/redis 不在默认监听表里，属于显式开启。
 
+### 新协议蜜罐（MCP / SMB / RDP / Docker API / Elasticsearch）
+
+监听表编辑器的「协议」下拉里有全部 11 种协议。常见端口参考（都可改；绑定 <1024 的特权端口需要服务带 CAP_NET_BIND_SERVICE，Linux 默认 unit 已带）：
+
+| 协议 | 典型端口 | 抓什么 |
+|---|---|---|
+| MCP | 8000 | 针对 AI 工具服务的探测；调用诱饵工具（execute_command/get_credentials 等）的参数即攻击 TTP，直接定罪 |
+| SMB | 445 | Windows 内网横向（凭据投递）；NTLMSSP 认证里的 user/domain/主机名/NTLMv2 被记录后拒绝 |
+| RDP | 3389 | 远程桌面探测；连接请求里的客户端自报主机名（mstshash）被记录 |
+| Docker API | 2375 | 恶意镜像部署入口；创建容器/执行 exec 的完整配置被记录并定罪 |
+| Elasticsearch | 9200 | 数据写入与脚本注入利用尝试定罪；集群名内嵌水印 |
+
+以上协议默认关闭，显式配置一行即开启。诱饵内容是编译内置的合成形态（集群名/容器 ID 内嵌 canary 水印，可被 canary-decode 归因）；逐协议的自检边界见 docs/ANTI-DETECTION.md。想要行业化 Web 假站，用 scripts/ai-templates.py 离线生成模板（见下节）。
+
 ### 放置蜜饵（canary）
 
 「设置 → 蜜罐 → 蜜饵 canary」勾选启用：HTTP 蜜罐会开始内置 `/backup.zip`、`/id_rsa` 等诱饵资源，谁下载谁就会留下带水印的事件。想埋文件系统蜜饵（谁读文件谁告警），在 `config.toml` 的 `[honeypot.canary].fs_paths` 里写绝对路径（仅 Linux）。诱饵内容里的水印 token，外传后用 `aisafeguard canary-decode <token>` 可还原来源节点与投放时间。

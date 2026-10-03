@@ -20,7 +20,7 @@
 | api.enabled | true | ✅ 通道页 | 📄 | 📖 快速上手 | |
 | api.port | 7420 | ✅ 通道页 | 📄 | 📖 | |
 | honeypot.enabled | true | ✅ 蜜罐页 | 📄 | 📖 界面导览 | |
-| honeypot.listeners[].{name,port,kind,enabled} | 4 行 | ✅ 蜜罐页监听表编辑器 | 📄 | 📖 增加监听器 | H130 补 GUI；mysql/redis 由此进入可见范围 |
+| honeypot.listeners[].{name,port,kind,enabled} | 默认 4 行（示例覆盖 mysql/redis/mcp/smb/rdp/docker/elasticsearch） | ✅ 蜜罐页监听表编辑器（kind 下拉 11 种） | 📄 | 📖 增加监听器 | H130 补 GUI；F791/F794 新协议随批次进下拉与手册 |
 | honeypot.shell.enabled | false | ✅ 蜜罐页 | 📄 | 📖 开启假 Shell | H130 补 GUI |
 | honeypot.shell.telnet_enabled | false | ✅ 蜜罐页 | 📄 | 📖 | |
 | honeypot.shell.username / hostname | deploy / debian-11 | ✅ 蜜罐页 | 📄 | 📖 | |
