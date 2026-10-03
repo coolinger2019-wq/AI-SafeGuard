@@ -28,6 +28,35 @@ pub(crate) struct Type3Info {
     pub ntlmv2: String,
 }
 
+/// SMB1 COM_NEGOTIATE（0x72）方言列表解析（F794 补丁）：仍在对 445 说 SMB1 的
+/// 客户端不少见，方言列表（LANMAN1.0/LM1.2X002 等）是客户端工具指纹。
+/// msg = NBSS(4) + SMB1 头(32) + WordCount(1) + ByteCount(2) + [0x02 + null 结尾名]×N。
+pub(crate) fn parse_smb1_dialects(msg: &[u8]) -> Vec<String> {
+    if msg.len() < 39 || msg[4..8] != [0xFF, b'S', b'M', b'B'] || msg[8] != 0x72 {
+        return Vec::new();
+    }
+    let byte_count = u16le(msg, 37) as usize;
+    let end = (39 + byte_count).min(msg.len());
+    let mut out = Vec::new();
+    let mut i = 39;
+    while i < end && out.len() < 8 {
+        if msg[i] != 0x02 {
+            break;
+        }
+        i += 1;
+        let start = i;
+        while i < end && msg[i] != 0x00 {
+            i += 1;
+        }
+        let name = sanitize(&msg[start..i], 32);
+        if !name.is_empty() {
+            out.push(name);
+        }
+        i += 1; // 跳过结尾 NUL
+    }
+    out
+}
+
 fn utf16le(bytes: &[u8]) -> String {
     let (pairs, _) = bytes.as_chunks::<2>();
     String::from_utf16_lossy(
@@ -189,6 +218,13 @@ fn filetime_now() -> i64 {
     (secs + 11_644_473_600) * 10_000_000
 }
 
+/// NBSS 头 + 负载拼回完整消息（SMB1 方言解析的输入形态）
+fn nbss_head(head: [u8; 4], payload: &[u8]) -> Vec<u8> {
+    let mut msg = head.to_vec();
+    msg.extend_from_slice(payload);
+    msg
+}
+
 fn wrap_nbss(smb: &[u8]) -> Vec<u8> {
     let mut out = vec![0x00, 0x00];
     out.extend_from_slice(&(smb.len() as u16).to_be_bytes());
@@ -202,17 +238,41 @@ pub(crate) async fn smb_session(s: &mut TcpStream) -> std::io::Result<SessionOut
     let mut steps = Vec::new();
     let mut payloads: Vec<String> = Vec::new();
     let mut creds: Vec<String> = Vec::new();
+    // 首包超时/断开 = 纯端口探测（445 的多数流量），不落「非 SMB」误导标注
+    let mut quiet = false;
 
     'outer: for _ in 0..8 {
         // NBSS 头：type(0)=flags(0)=len u16 BE
         let mut nb = [0u8; 4];
         match tokio::time::timeout(Duration::from_secs(10), s.read_exact(&mut nb)).await {
             Ok(Ok(_)) => {}
-            _ => break,
+            _ => {
+                quiet = steps.is_empty();
+                break;
+            }
         }
         let len = u16::from_be_bytes([nb[2], nb[3]]) as usize;
-        if nb[0] != 0x00 || !(64..=16_384).contains(&len) {
+        if nb[0] != 0x00 || len > 16_384 {
             break;
+        }
+        if len < 64 {
+            // SMB2 头最小 64：短消息常见为 SMB1 协商（FF SMB 0x72）——记录方言后收场
+            let mut msg = vec![0u8; len];
+            if len > 0 {
+                s.read_exact(&mut msg).await?;
+            }
+            payloads.push(sanitize(&msg, MAX_PAYLOAD));
+            let dialects = parse_smb1_dialects(&nbss_head(nb, &msg));
+            let label = if dialects.is_empty() {
+                "smb1_short(未识别)".to_string()
+            } else {
+                format!("smb1_negotiate(方言 {})", dialects.join(","))
+            };
+            steps.push(aisafeguard_core::event::ShellStep {
+                command: label,
+                response: "no-reply(低交互)".into(),
+            });
+            break 'outer;
         }
         let mut msg = vec![0u8; len];
         if s.read_exact(&mut msg).await.is_err() {
@@ -328,7 +388,9 @@ pub(crate) async fn smb_session(s: &mut TcpStream) -> std::io::Result<SessionOut
         }
     }
 
-    let summary = if steps.is_empty() {
+    let summary = if quiet {
+        "连接建立后未发送数据（疑似端口扫描）".into()
+    } else if steps.is_empty() {
         "非 SMB/NBSS 数据".into()
     } else {
         let labels: Vec<String> = steps.iter().map(|x| x.command.clone()).collect();
@@ -353,6 +415,40 @@ pub(crate) async fn smb_session(s: &mut TcpStream) -> std::io::Result<SessionOut
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SMB1 方言解析（F794 补丁）字节级断言：魔数 FF 53 4D 42 = ffSMB 的转义形态，
+    /// 命令 0x72，方言项 = 0x02 + 名字 + 0x00。
+    #[test]
+    fn smb1_dialects_parsed_from_negotiate() {
+        let mut msg = Vec::new();
+        msg.extend_from_slice(&[0x00, 0x00]);           // NBSS type/flags
+        msg.extend_from_slice(&0u16.to_be_bytes());     // len 占位后填
+        msg.extend_from_slice(&[0xFF, 0x53, 0x4D, 0x42]); // SMB1 魔数（FF SMB）
+        msg.extend_from_slice(&[0x72, 0x00, 0x00, 0x00, 0x00]); // COM_NEGOTIATE + 状态
+        msg.extend_from_slice(&[0u8; 23]);              // 头部其余（flags2/pid/tid/mid）
+        let dialects: [&[u8]; 3] = [b"LANMAN1.0", b"LM1.2X002", b"NT LM 0.12"];
+        let mut bytes_area = Vec::new();
+        for d in dialects {
+            bytes_area.push(0x02);
+            bytes_area.extend_from_slice(d);
+            bytes_area.push(0x00);
+        }
+        msg.extend_from_slice(&[0x00]);                 // WordCount = 0
+        msg.extend_from_slice(&(bytes_area.len() as u16).to_le_bytes());
+        msg.extend_from_slice(&bytes_area);
+        let len = (msg.len() - 4) as u16;
+        msg[2..4].copy_from_slice(&len.to_be_bytes());
+
+        let parsed = parse_smb1_dialects(&msg);
+        assert_eq!(parsed, vec!["LANMAN1.0", "LM1.2X002", "NT LM 0.12"]);
+        // 非 SMB1（SMB2 魔数/其他命令）不误判
+        let mut smb2ish = msg.clone();
+        smb2ish[4..8].copy_from_slice(&[0xFE, b'S', b'M', b'B']);
+        assert!(parse_smb1_dialects(&smb2ish).is_empty());
+        let mut other_cmd = msg.clone();
+        other_cmd[8] = 0x73;
+        assert!(parse_smb1_dialects(&other_cmd).is_empty());
+    }
 
     #[test]
     fn type2_challenge_structure_roundtrip() {
