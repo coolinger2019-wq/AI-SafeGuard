@@ -89,6 +89,16 @@
   #cfg-msg.ok   { display: block; color: var(--ok);   background: rgba(82,196,26,.1); }
   #cfg-msg.warn { display: block; color: var(--warn); background: rgba(250,173,20,.1); }
   #cfg-msg.err  { display: block; color: var(--danger); background: rgba(255,77,79,.1); }
+  /* AI 自动处置策略卡片 */
+  #pol-card input[type="text"], #pol-card input[type="number"], #pol-card select {
+    background: var(--bg-input); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 8px; font-size: 12.5px;
+  }
+  #pol-card input:focus, #pol-card select:focus { outline: 1px solid var(--accent); }
+  #pol-msg { margin-top: 8px; padding: 8px 12px; border-radius: 6px; display: none; }
+  #pol-msg.ok   { display: block; color: var(--ok);   background: rgba(82,196,26,.1); }
+  #pol-msg.warn { display: block; color: var(--warn); background: rgba(250,173,20,.1); }
+  #pol-msg.err  { display: block; color: var(--danger); background: rgba(255,77,79,.1); }
   .hint { color: var(--dim); font-size: 12.5px; }
   .toplist td { font-size: 12.5px; }
 </style>
@@ -164,6 +174,28 @@
     </div>
 
     <div id="tab-prop" hidden>
+      <div class="card" id="pol-card" style="margin-bottom:10px">
+        <div class="k">AI 自动处置策略 —— 满足证据门控才自动灰度封禁（到期自动解封）：
+        快路径已定罪（24h 内有检测命中）或情报命中；仅蜜罐命中留人工确认。保存即热更。</div>
+        <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-top:10px">
+          <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="pol-auto"> 自动应用</label>
+          <label style="display:flex;align-items:center;gap:6px">最低严重度
+            <select id="pol-sev">
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="critical">critical</option>
+            </select></label>
+          <label style="display:flex;align-items:center;gap:6px">日限额
+            <input type="number" id="pol-cap" min="0" max="100000" step="1" style="width:76px"> 条/24h
+            <span class="hint">0=不限；攻击强度高（扫描洪水期）调高，平日 10-20</span></label>
+          <label style="display:flex;align-items:center;gap:6px">豁免清单
+            <input type="text" id="pol-exempt" placeholder="运营/管理出口 IP，逗号分隔" style="width:230px">
+            <span class="hint">永不自动应用</span></label>
+          <button class="act" id="pol-save">保存策略</button>
+        </div>
+        <div id="pol-msg"></div>
+      </div>
       <p class="hint" style="margin-bottom:8px">
         AI 慢路径产出：证据 → 建议 → 人工确认。应用 = 按灰度 TTL 封禁（到期自动解封）。
         <select id="prop-status" style="margin-left:16px">
@@ -310,7 +342,7 @@ function showLogin() {
 }
 function enterApp() {
   $('login').hidden = true; $('app').hidden = false;
-  refreshDash(); refreshEvents(); refreshProp(); refreshFw();
+  refreshDash(); refreshEvents(); refreshProp(); refreshFw(); loadPolicy();
   dashTimer = setInterval(refreshDash, 3000);
   evTimer = setInterval(refreshEvents, 3000);
   propTimer = setInterval(refreshProp, 3000);
@@ -648,6 +680,76 @@ $('cfg-save').onclick = async () => {
   } finally {
     $('cfg-save').disabled = false;
   }
+};
+
+/* ---------- AI 自动处置策略（建议页卡片直调 [ai] 四字段：经 config/raw 校验落盘，热更） ---------- */
+function aiRawField(raw, key) {
+  const m = raw.match(new RegExp('^[ \\t]*' + key + '[ \\t]*=[ \\t]*([^\\r\\n]*)', 'm'));
+  return m ? m[1].trim() : null;
+}
+// [ai] 段内 upsert 单字段：已有行整行替换（该行行内注释被替换，块注释不动）；
+// 缺失则锚点插入（min_severity 行后 → [ai] 段头后 → 文件尾新建 [ai]）
+function upsertAiField(raw, key, valueExpr) {
+  const line = key + ' = ' + valueExpr;
+  const re = new RegExp('^[ \\t]*' + key + '[ \\t]*=[^\\r\\n]*$', 'm');
+  if (re.test(raw)) return raw.replace(re, line);
+  const anchor = raw.match(/^[ \\t]*auto_apply_min_severity[ \\t]*=[^\\r\\n]*$/m);
+  if (anchor) return raw.replace(anchor[0], anchor[0] + '\n' + line);
+  const sec = raw.match(/^\[ai\][^\r\n]*$/m);
+  if (sec) return raw.replace(sec[0], sec[0] + '\n' + line);
+  return raw + '\n[ai]\n' + line + '\n';
+}
+function parseExempt(v) {
+  const inner = (v || '').match(/\[([^\]]*)\]/);
+  if (!inner) return [];
+  return [...inner[1].matchAll(/"([^"]*)"/g)].map((m) => m[1]);
+}
+function showPolMsg(cls, text) { const m = $('pol-msg'); m.className = cls; m.textContent = text; }
+async function loadPolicy() {
+  try {
+    const r = await fetch('/api/config/raw', { headers: { 'Authorization': 'Bearer ' + token } });
+    if (r.status === 401) return logout();
+    if (!r.ok) return;
+    const raw = await r.text();
+    $('pol-auto').checked = aiRawField(raw, 'auto_apply') === 'true';
+    $('pol-sev').value = (aiRawField(raw, 'auto_apply_min_severity') || '"high"').replace(/"/g, '') || 'high';
+    const cap = parseInt(aiRawField(raw, 'auto_apply_max_per_day'), 10);
+    $('pol-cap').value = Number.isFinite(cap) ? cap : 20;
+    $('pol-exempt').value = parseExempt(aiRawField(raw, 'auto_apply_exempt_ips')).join(', ');
+  } catch (_) { /* 策略卡加载失败不打断主流程，保存时服务端仍会校验 */ }
+}
+$('pol-save').onclick = async () => {
+  const cap = parseInt($('pol-cap').value, 10);
+  if (!(cap >= 0)) return showPolMsg('err', '日限额须为 ≥0 的整数（0 = 不限）');
+  const exempt = $('pol-exempt').value.split(/[,\uFF0C\n]+/).map((s) => s.trim()).filter(Boolean);
+  const bad = exempt.find((s) => !/^[0-9a-fA-F.:]+$/.test(s));
+  if (bad) return showPolMsg('err', '豁免清单含可疑条目（须为 IP）：' + bad);
+  $('pol-save').disabled = true;
+  try {
+    // 每次保存都重新读服务端原文再改：避免覆盖其他入口（配置页/CLI）刚写入的内容
+    const r0 = await fetch('/api/config/raw', { headers: { 'Authorization': 'Bearer ' + token } });
+    if (r0.status === 401) return logout();
+    if (!r0.ok) return showPolMsg('err', '读取当前配置失败：HTTP ' + r0.status);
+    let raw = await r0.text();
+    raw = upsertAiField(raw, 'auto_apply', String($('pol-auto').checked));
+    raw = upsertAiField(raw, 'auto_apply_min_severity', '"' + $('pol-sev').value + '"');
+    raw = upsertAiField(raw, 'auto_apply_max_per_day', String(cap));
+    raw = upsertAiField(raw, 'auto_apply_exempt_ips', '[' + exempt.map((s) => '"' + s + '"').join(', ') + ']');
+    const r = await fetch('/api/config/raw', {
+      method: 'PUT',
+      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'text/plain; charset=utf-8' },
+      body: raw,
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) return showPolMsg('err', '保存被拒绝（未落盘）：' + (j.error || r.status));
+    const req = j.restart_required || [];
+    showPolMsg(req.length ? 'warn' : 'ok', req.length
+      ? '已保存。以下项需重启服务生效：' + req.join('、')
+      : '策略已保存并热更生效（自动应用' + ($('pol-auto').checked ? '开' : '关')
+        + '，严重度 ≥' + $('pol-sev').value + '，日限额 ' + cap + '，豁免 ' + exempt.length + ' 条）');
+    if ($('cfg').dataset.loaded && !cfgDirty) loadCfg(); // 配置编辑器已加载则重载，防旧文本回写
+  } catch (e) { showPolMsg('err', '保存失败：' + e.message); }
+  finally { $('pol-save').disabled = false; }
 };
 
 /* ---------- 启动 ---------- */
