@@ -17,7 +17,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
 use crate::canary::CanaryState;
-use crate::{sanitize, SessionOutcome, MAX_PAYLOAD};
+use crate::{sanitize, GhostVerdict, SessionOutcome, MAX_PAYLOAD};
 
 /// 假服务身份（合成；与 [honeypot.fingerprint] banner 同哲学：固定、可配置前不改）
 const SERVER_NAME: &str = "ops-internal-tools";
@@ -67,17 +67,6 @@ const DECOY_TOOLS: &[(&str, &str, &str, &str, &str)] = &[
     ),
 ];
 
-/// tools/call 命中诱饵工具的定罪信息（F792a②）：对假服务器调用已知诱饵工具 =
-/// 确定性攻击证据（零误报逻辑与 HoneyMCP「合法 agent 不会调幽灵工具」同构）。
-/// listener 侧据此产出 Detection 事件（kind=mcp_ghost, confidence=high）。
-#[derive(Clone)]
-pub(crate) struct GhostCall {
-    /// 定级（critical/high/medium，来自诱饵表 threat 列）→ Detection severity
-    pub threat: String,
-    /// 定罪证据串：工具、分类、参数全在内
-    pub evidence: String,
-}
-
 fn decoy_by_name(
     name: &str,
 ) -> Option<&'static (&'static str, &'static str, &'static str, &'static str, &'static str)> {
@@ -106,7 +95,7 @@ pub(crate) struct McpHttpResponse {
     /// 交互步标签（initialize / tools/call:read_file / malformed / sse-endpoint）
     pub label: String,
     /// 幽灵工具定罪（F792a②：tools/call 命中诱饵工具时 Some）
-    pub ghost: Option<GhostCall>,
+    pub ghost: Option<GhostVerdict>,
     /// SSE 端点事件后直接断连
     pub close: bool,
 }
@@ -114,7 +103,7 @@ pub(crate) struct McpHttpResponse {
 /// 一条 JSON-RPC 消息的处理结果。
 pub(crate) enum RpcOutcome {
     /// 请求 → 响应 JSON + 方法标签 + 幽灵工具定罪（tools/call 命中诱饵时 Some）
-    Reply(Value, String, Option<GhostCall>),
+    Reply(Value, String, Option<GhostVerdict>),
     /// 通知（notifications/*）→ 无响应（HTTP 202）+ 方法标签
     NoReply(String),
 }
@@ -215,7 +204,7 @@ fn tools_value() -> Value {
     json!(tools)
 }
 
-fn call_tool_result(params: &Value, canary: Option<&CanaryState>) -> (Value, Option<GhostCall>) {
+fn call_tool_result(params: &Value, canary: Option<&CanaryState>) -> (Value, Option<GhostVerdict>) {
     let Some(name) = params.get("name").and_then(|n| n.as_str()) else {
         return (
             json!({
@@ -238,7 +227,7 @@ fn call_tool_result(params: &Value, canary: Option<&CanaryState>) -> (Value, Opt
     };
     // 定罪信息：参数清洗后进证据串（TTP 主体是「调了什么工具、传了什么参数」）
     let args_clean = sanitize(args.to_string().as_bytes(), 400);
-    let ghost = GhostCall {
+    let ghost = GhostVerdict {
         threat: (*threat).into(),
         evidence: format!(
             "MCP 幽灵工具调用: {name_match} ({category}/{threat}) 参数: {args_clean}"
@@ -427,10 +416,10 @@ fn render(resp: &McpHttpResponse) -> Vec<u8> {
 pub(crate) async fn mcp_session(
     s: &mut TcpStream,
     canary: Option<&CanaryState>,
-) -> std::io::Result<(SessionOutcome, Option<GhostCall>)> {
+) -> std::io::Result<(SessionOutcome, Option<GhostVerdict>)> {
     let mut steps = Vec::new();
     let mut payloads: Vec<String> = Vec::new();
-    let mut ghost_out: Option<GhostCall> = None;
+    let mut ghost_out: Option<GhostVerdict> = None;
     let mut hint = None;
 
     for _ in 0..8 {

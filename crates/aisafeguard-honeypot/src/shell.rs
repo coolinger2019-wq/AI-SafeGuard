@@ -137,13 +137,15 @@ struct ShellShared {
 pub(crate) async fn ssh_shell_session(
     stream: tokio::net::TcpStream,
     rt: Arc<ShellRuntime>,
+    canary: Option<&crate::canary::CanaryState>,
 ) -> SessionOutcome {
     let shared = Arc::new(ShellShared {
         session: Mutex::new(ShellSession::new(
             rt.username.clone(),
             rt.hostname.clone(),
             rt.max_commands,
-        )),
+        )
+        .with_decoys(ShellSession::build_decoys(canary, &rt.username))),
         line: Mutex::new(String::new()),
         auth_user: Mutex::new(String::new()),
         auth_pw: Mutex::new(String::new()),
@@ -258,9 +260,11 @@ pub(crate) fn strip_iac(bytes: &[u8]) -> Vec<u8> {
 pub(crate) async fn telnet_shell_session(
     mut stream: tokio::net::TcpStream,
     rt: Arc<ShellRuntime>,
+    canary: Option<&crate::canary::CanaryState>,
 ) -> SessionOutcome {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut shell = ShellSession::new(rt.username.clone(), rt.hostname.clone(), rt.max_commands);
+    let mut shell = ShellSession::new(rt.username.clone(), rt.hostname.clone(), rt.max_commands)
+        .with_decoys(ShellSession::build_decoys(canary, &rt.username));
     let mut line_buf: Vec<u8> = Vec::new();
     let mut raw = vec![0u8; 2048];
 
@@ -518,6 +522,8 @@ pub struct ShellSession {
     max_commands: usize,
     history: Vec<String>,
     steps: Vec<ShellStep>,
+    /// 蜜饵文件（Honeybits，F794b③）：路径 → 带水印内容的合成文件，cat 先查此表
+    decoys: std::collections::HashMap<String, String>,
 }
 
 impl ShellSession {
@@ -528,7 +534,49 @@ impl ShellSession {
             max_commands,
             history: Vec::new(),
             steps: Vec::new(),
+            decoys: std::collections::HashMap::new(),
         }
+    }
+
+    /// 挂载蜜饵文件（Honeybits，F794b③）：canary 水印内嵌敏感值形态的合成数据，
+    /// .bash_history 充当面包屑引导攻击者走向蜜饵文件。
+    pub fn with_decoys(mut self, decoys: Vec<(String, String)>) -> Self {
+        self.decoys = decoys.into_iter().collect();
+        self
+    }
+
+    /// 构造蜜饵文件表：canary 可用时敏感值内嵌水印（外泄使用即归因），
+    /// 无 canary 时用固定显式合成值（红线：不得被当真实数据引用）。
+    pub(crate) fn build_decoys(canary: Option<&crate::canary::CanaryState>, user: &str) -> Vec<(String, String)> {
+        let (app_key, db_pass, api_key) = match canary.and_then(|c| c.token("shell/env")) {
+            Some(t) => (format!("base64:{t}"), t.clone(), t.clone()),
+            None => (
+                "base64:SYNTHETIC-DECOY".into(),
+                "SYNTHETIC-DECOY".into(),
+                "SYNTHETIC-DECOY".into(),
+            ),
+        };
+        let env_path = format!("/home/{user}/.env");
+        let hist_path = format!("/home/{user}/.bash_history");
+        let cfg_path = format!("/home/{user}/app/config.yml");
+        vec![
+            (
+                env_path.clone(),
+                format!("APP_KEY={app_key}\nDB_PASSWORD={db_pass}\nREDIS_URL=redis://:{db_pass}@127.0.0.1:6379\n"),
+            ),
+            (
+                cfg_path.clone(),
+                format!("database:\n  host: db-internal.prod\n  password: \"{db_pass}\"\napi:\n  key: {api_key}\n"),
+            ),
+            (
+                hist_path,
+                format!("cat /home/{user}/.env\ncd app && ./deploy.sh restart\nmysql -h db-internal.prod -u svc_app -p\nscp backup.tgz deploy@backup-internal:/srv/\ncat {cfg_path}\n"),
+            ),
+            (
+                format!("/home/{user}/notes.txt"),
+                "deployment notes (synthetic decoy content)\n".to_string(),
+            ),
+        ]
     }
 
     /// 假 prompt：`user@host:~$ `（用户名/主机名可配，模板参数化归 0.5.11 H300）
@@ -636,10 +684,12 @@ impl ShellSession {
         let listing: Option<Vec<String>> = if path == home {
             Some(vec![
                 ".bash_history".into(),
+                ".env".into(),
                 ".profile".into(),
                 ".ssh".into(),
                 "app".into(),
                 "logs".into(),
+                "notes.txt".into(),
             ])
         } else if path == "/home" {
             Some(vec![self.user.clone()])
@@ -657,6 +707,10 @@ impl ShellSession {
             // 真实 cat 无操作数时等待 stdin；行模式下以静默对应
             return String::new();
         };
+        // F794b③：蜜饵文件优先（带水印的合成敏感文件——Honeybits 面包屑的落点）
+        if let Some(content) = self.decoys.get(path) {
+            return content.clone();
+        }
         match cat_file(path, &self.host) {
             Some(content) => content.to_string(),
             None => format!("cat: {path}: No such file or directory"),
@@ -804,6 +858,41 @@ fn netstat_snapshot() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F794b③ 字节级断言（协作约定）：蜜饵 .env 的换行是真实 0x0A（源码内
+    /// 0x5C 0x6E 转义在编译期解析），前缀字节与水印内嵌逐项核对。
+    #[test]
+    fn decoy_env_bytes_and_watermark() {
+        let decoys = ShellSession::build_decoys(None, "deploy");
+        let (_, env) = decoys
+            .iter()
+            .find(|(p, _)| p.ends_with("/.env"))
+            .expect("应含 .env 蜜饵");
+        assert_eq!(&env.as_bytes()[..8], b"APP_KEY=");
+        assert!(env.as_bytes().contains(&0x0A), "换行应为已解析的 0x0A");
+        assert!(
+            !env.as_bytes().windows(2).any(|w| w == [0x5C, 0x6E]),
+            "内容不得残留源码层转义序列（0x5C 0x6E）"
+        );
+        assert!(env.contains("DB_PASSWORD=SYNTHETIC-DECOY"));
+        // bash_history 是 Honeybits 面包屑：引导到 .env 与 config.yml
+        let (_, hist) = decoys
+            .iter()
+            .find(|(p, _)| p.ends_with("/.bash_history"))
+            .expect("应含 .bash_history 蜜饵");
+        assert!(hist.contains(".env") && hist.contains("config.yml"));
+    }
+
+    /// with_decoys 后 cat 蜜饵文件走水印内容，未挂载路径回落静态虚拟文件系统
+    #[test]
+    fn cat_hits_decoys_first() {
+        let decoys = ShellSession::build_decoys(None, "deploy");
+        let mut s = session().with_decoys(decoys);
+        let env = s.handle_line("cat /home/deploy/.env").unwrap_reply();
+        assert!(env.contains("SYNTHETIC-DECOY"), "实际: {env}");
+        let passwd = s.handle_line("cat /etc/passwd").unwrap_reply();
+        assert!(passwd.contains("deploy:x:1000"), "静态虚拟文件系统不受影响: {passwd}");
+    }
 
     fn session() -> ShellSession {
         ShellSession::new("deploy", "debian-11", 50)

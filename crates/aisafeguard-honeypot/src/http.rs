@@ -487,6 +487,104 @@ pub(crate) async fn read_body(
     }
 }
 
+/// HTTP-JSON 蜜罐会话骨架（F794：Docker API / Elasticsearch 共用）：keep-alive
+/// 流水最多 8 轮，每轮交给协议自己的路由函数。交互步逐请求记录、载荷含脱敏
+/// 请求头 + 请求体，幽灵定罪透传给 listener。
+pub(crate) struct JsonRoute {
+    pub status: &'static str,
+    pub ctype: &'static str,
+    pub body: Vec<u8>,
+    pub label: String,
+    pub ghost: Option<crate::GhostVerdict>,
+}
+
+pub(crate) async fn http_json_session(
+    s: &mut TcpStream,
+    canary: Option<&crate::canary::CanaryState>,
+    proto_label: &str,
+    route: impl Fn(&str, &str, &[u8], Option<&crate::canary::CanaryState>) -> JsonRoute,
+) -> std::io::Result<(SessionOutcome, Option<crate::GhostVerdict>)> {
+    let mut steps = Vec::new();
+    let mut payloads: Vec<String> = Vec::new();
+    let mut ghost_out: Option<crate::GhostVerdict> = None;
+    let mut hint = None;
+    for _ in 0..8 {
+        let mut buf = read_http_request(s).await?;
+        if buf.is_empty() {
+            break;
+        }
+        let head_text = String::from_utf8_lossy(&buf).to_string();
+        let h = l7::parse_http_hint(&head_text);
+        let method = h.as_ref().map(|h| h.method.clone()).unwrap_or_default();
+        let path = h.as_ref().map(|h| h.path.clone()).unwrap_or_default();
+        if hint.is_none() {
+            hint = h;
+        }
+        let mut body: Vec<u8> = Vec::new();
+        if (method == "POST" || method == "PUT")
+            && let Some(start) = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
+        {
+            read_body(s, &mut buf, start, &head_text).await;
+            body = buf[start..].to_vec();
+        }
+        if method.is_empty() {
+            payloads.push(crate::sanitize(&buf, MAX_PAYLOAD));
+            break;
+        }
+        let resp = route(&method, &path, &body, canary);
+        if ghost_out.is_none() {
+            ghost_out = resp.ghost.clone();
+        }
+        let mut text = crate::redact_secrets(&head_text);
+        if method == "POST" || method == "PUT" {
+            text.push('\n');
+            text.push_str(&String::from_utf8_lossy(&body));
+        }
+        payloads.push(crate::sanitize(text.as_bytes(), MAX_PAYLOAD));
+        steps.push(aisafeguard_core::event::ShellStep {
+            command: resp.label.clone(),
+            response: format!(
+                "{} {} ({}B)",
+                resp.status.trim_end_matches("\r\n"),
+                resp.ctype,
+                resp.body.len()
+            ),
+        });
+        let head = format!(
+            "{}Content-Type: {}\r\nContent-Length: {}\r\n\r\n",
+            resp.status,
+            resp.ctype,
+            resp.body.len()
+        );
+        let mut out = head.into_bytes();
+        out.extend_from_slice(&resp.body);
+        s.write_all(&out).await?;
+    }
+    let summary = if steps.is_empty() {
+        let first = payloads.first().cloned().unwrap_or_default();
+        crate::request_summary(&first, "非 HTTP 数据")
+    } else {
+        let labels: Vec<String> = steps.iter().map(|x| x.command.clone()).collect();
+        let joined = labels.join(" → ");
+        let mut sm = format!("{proto_label} 会话({} 步): {}", labels.len(), joined);
+        if sm.chars().count() > 160 {
+            sm = sm.chars().take(157).collect::<String>() + "...";
+        }
+        sm
+    };
+    let interaction = (!steps.is_empty()).then_some(steps);
+    Ok((
+        SessionOutcome {
+            summary,
+            payload: payloads.join("\n"),
+            http_hint: hint,
+            interaction,
+            credentials: Vec::new(),
+        },
+        ghost_out,
+    ))
+}
+
 /// HTTP 头部是否已完整收到（\r\n\r\n）或超出上限——供读循环与模糊测试共用。
 pub fn http_request_complete(buf: &[u8]) -> bool {
     buf.windows(4).any(|w| w == b"\r\n\r\n") || buf.len() >= 8192

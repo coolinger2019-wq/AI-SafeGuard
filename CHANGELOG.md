@@ -96,6 +96,20 @@
   攻击者仍在活动的被补上（summary 显示「回扫补应用 N 条」）；fed:* 组织建议
   走自身四关管线不在此列。新鲜建议与回扫共用同一套政策判定函数。
 
+### 新增（续六）
+
+- **F794 蜜罐面对标扩展**（对标 awesome-honeypots 全清单，五条筛选标准见
+  ROADMAP-0.7）：**P0 四协议**——SMB2 蜜罐（445，NTLMSSP 挑战 + type3 解析捕获
+  user/domain/workstation/NTLMv2 后 LOGON_FAILURE 拒绝）、RDP 蜜罐（3389，X.224
+  协商 + mstshash 客户端自报捕获）、Docker Engine API 蜜罐（2375，合成集群形态，
+  容器创建/exec 的请求体即 TTP、ghost 定罪零误报）、Elasticsearch 蜜罐（9200，
+  canary 集群名/UUID、写入与脚本注入定罪）；**P1 四技巧**——跨协议载荷签名全域
+  定罪（`${jndi:` 及混淆变体，Log4Pot 思路，kind=payload_signature）、反蜜罐检测
+  自检表（docs/ANTI-DETECTION.md）、假 Shell 蜜饵文件仿真（.env/config.yml/
+  .bash_history 面包屑引导至 canary 水印文件，Honeybits 思路）、AI 预生成模板脚本
+  （scripts/ai-templates.py，离线批量生成落 H300 模板目录，数据面零 LLM 依赖）。
+  全部接入既有凭证/canary/ghost/AI 管线；默认关，显式配置开启。
+
 ## [0.6.0] - 2026-09-30
 
 0.6「多机协同完全体」：回答「多台机器看到同一个攻击者时，组织比我单个人更确信」。

@@ -82,6 +82,29 @@ enabled = true
 # kind = "mcp"
 # enabled = true
 
+# F794a 新协议蜜罐（默认关，显式开启）：SMB/RDP=Windows 内网横向主通道，
+# Docker API=恶意镜像部署入口（创建容器的配置即 TTP），ES=公网高频扫描+内网开发机。
+# [[honeypot.listeners]]
+# name = "smb"
+# port = 445
+# kind = "smb"
+# enabled = true
+# [[honeypot.listeners]]
+# name = "rdp"
+# port = 3389
+# kind = "rdp"
+# enabled = true
+# [[honeypot.listeners]]
+# name = "docker"
+# port = 2375
+# kind = "docker"
+# enabled = true
+# [[honeypot.listeners]]
+# name = "elasticsearch"
+# port = 9200
+# kind = "elasticsearch"
+# enabled = true
+
 [honeypot.shell]
 # SSH 假 Shell（中交互）：开启后 ssh 监听器认证通过即进入命令仿真会话，
 # 逐命令留痕进事件。白名单命令返回仿真结果，永不执行真实命令。

@@ -291,6 +291,49 @@ HoneyMCP 是「给真实 MCP server 的工具清单混入幽灵工具」的**内
 
 ---
 
+## 提案批次：蜜罐面对标扩展（F794，2026-10-03 调研 awesome-honeypots，**待用户拍板**）
+
+### 对标方法与筛选标准
+
+对照 paralax/awesome-honeypots 全清单（约 200 项），按产品定位过滤五条：①内网终端真实
+攻击面（Windows: SMB/RDP；开发机: Docker/ES）；②公网实验节点高频扫描端口（数据价值）；
+③单二进制 Rust 低交互可实现（session 框架/凭证采集/canary/ghost 定罪全现成，新协议=
+一个 session 函数）；④喂 AI/情报管道的 TTP 价值；⑤与既有机制耦合红利。不追协议广度
+（qeeqbox 25 种不学），不做高交互容器/LXC（与单二进制哲学冲突）、客户端蜜罐、蜜网
+管理平台（我们的事件库+控制台+AI 已覆盖其数据分析类目的）。
+
+### F794a 新协议蜜罐（P0，各 S~M）
+
+- **SMB 蜜罐（445）**——Windows 内网横向第一通道：NBSS+SMB2 negotiate/session 假响应，
+  NTLM 挑战捕获进凭证库（与 credential_spray 闭环）。参考 HoneySMB。
+- **RDP 蜜罐（3389）**——X.224 协商 + ClientInfo 凭证捕获。参考 pyrdp/rdppot。
+- **Docker API 蜜罐（2375）**——2024-2026 最热入侵路径：GET /version /containers/json
+  假清单，POST /containers/create 记录攻击者容器配置（TTP）→ ghost 定罪。复用 http 框架。
+- **Elasticsearch 蜜罐（9200）**——集群信息（canary 集群名）+ 假索引 + CVE 利用尝试
+  （CVE-2014-3120 类）ghost 定罪。
+
+### F794b 技巧增强（P1）
+
+- **跨协议载荷签名**：全域扫 `${jndi:`（Log4Pot）/webshell 特征 → Detection 定罪（S）。
+- **反蜜罐检测自检**：对照 honeydet/kippo_detect 已知签名逐条核对协议栈与指纹（S）。
+- **假 Shell 文件仿真**（Honeybits 思路）：ls/cat 假 .env/.bash_history/蜜饵文件，
+  引导攻击者走到 canary（M，扩白名单仿真层）。
+- **AI 预生成响应库**（galah 思路改造）：AI 离线批量生成逼真 Web 响应落缓存，运行时
+  零 LLM 依赖（M）。
+
+### P2 候选（不排期）
+
+Postgres/MongoDB、SMTP、UDP 反射类（NTP/SSDP）、K8s API、IoT TR-069、ICS（不符合定位）。
+
+> **F794 状态（2026-10-03 用户拍板全量实施）**：已实现——P0 四协议（smb/rdp/docker/
+> elasticsearch，kind 分派 + canary + ghost 定罪接入既有管线，SMB 含 NTLMSSP 挑战/
+> type3 凭证捕获后 LOGON_FAILURE 拒绝）+ P1 四项（jndi 跨协议全域定罪 kind=
+> payload_signature；docs/ANTI-DETECTION.md 自检表；假 Shell 蜜饵文件 .env/config.yml/
+> .bash_history 面包屑引导；scripts/ai-templates.py 离线 AI 生成模板）。SMB 3.1.1 方言、
+> RDP ClientInfo 深捕记为增强项。反检测自检对照 docs/ANTI-DETECTION.md 维护。
+
+---
+
 ## 跨任务红线汇总（0.7 全批次适用）
 
 1. 0.6 全部红线不变：内网/回环永不自动封；跨节点建议而非命令；AI 不自动处置；凭证材料不出节点；`forbid(unsafe_code)`。

@@ -10,12 +10,16 @@
 
 mod canary;
 mod cred;
+mod docker;
+mod elasticsearch;
 mod http;
 mod listener;
 mod mcp;
 mod mysql;
 mod protocol;
+mod rdp;
 mod redis;
+mod smb;
 pub mod shell;
 mod templates;
 
@@ -44,6 +48,17 @@ pub(crate) struct SessionOutcome {
 
 pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const MAX_PAYLOAD: usize = 2048;
+
+/// 幽灵调用定罪（F792a②/F794）：对假服务的攻击性操作 = 确定性攻击证据
+/// （调用已知诱饵工具 / 创建容器 / 注入脚本——零误报），listener 据此产出
+/// Detection 事件（快路径已定罪层，接 auto_apply 证据门控）。
+#[derive(Clone)]
+pub(crate) struct GhostVerdict {
+    /// 定级（critical/high，来自协议侧语义）→ Detection severity
+    pub threat: String,
+    /// 定罪证据串：动作、参数、目标全在内（已清洗）
+    pub evidence: String,
+}
 
 /// 攻击者输入永远当不可信数据：lossy UTF-8、去控制字符（C0+C1+DEL）、截断。
 pub fn sanitize(bytes: &[u8], max_chars: usize) -> String {
