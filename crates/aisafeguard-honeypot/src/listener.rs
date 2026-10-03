@@ -465,6 +465,7 @@ async fn handle_conn(
 
     // ssh/telnet 假 Shell 启用时流被仿真层消费（提前取端口）;其余按 &mut 读一包。
     // banner 解析顺序（H300/H320）：模板覆盖 > [honeypot.fingerprint] 全局默认
+    let mut ghost: Option<mcp::GhostCall> = None;
     let result: std::io::Result<SessionOutcome> = match kind.as_str() {
         "ssh" if ctx.shell.as_ref().is_some_and(|rt| rt.ssh_config.is_some()) => {
             let rt = ctx.shell.clone().expect("守卫已判 Some");
@@ -488,7 +489,13 @@ async fn handle_conn(
                 .await
         }
         // F791：MCP 蜜罐（JSON-RPC / Streamable HTTP + 旧 SSE 传输）
-        "mcp" => mcp::mcp_session(&mut stream, ctx.canary.as_deref()).await,
+        "mcp" => match mcp::mcp_session(&mut stream, ctx.canary.as_deref()).await {
+            Ok((outcome, g)) => {
+                ghost = g;
+                Ok(outcome)
+            }
+            Err(e) => Err(e),
+        },
         "telnet" => protocol::telnet_session(&mut stream, &ctx.fp.telnet_greeting).await,
         "mysql" => mysql::mysql_session(&mut stream, &ctx.fp.mysql_version).await,
         "redis" => redis::redis_session(&mut stream).await,
@@ -516,6 +523,23 @@ async fn handle_conn(
             }
         }
     };
+
+    // F792a②：幽灵工具定罪 → Detection 事件（零误报证据：调假服务器的已知诱饵
+    // 工具即攻击）。进快路径证据面——auto_apply 证据门控的「快路径已定罪」层。
+    if let Some(g) = ghost {
+        bus.publish(SecurityEvent::Detection {
+            ts: now_ts(),
+            kind: "mcp_ghost".into(),
+            src_ip: remote_ip.clone(),
+            confidence: "high".into(),
+            severity: g.threat,
+            evidence: g.evidence,
+            rule_id: None,
+            http_hint: outcome.http_hint.clone(),
+            tls_fingerprint: None,
+            tls_ja4: None,
+        });
+    }
 
     // 凭证采集（0.5.10 H200）：[honeypot.credentials].enabled 门控；口令明文只到
     // 本函数为止——先 argon2id 加盐哈希，再进事件（事件与落盘表面只见哈希）

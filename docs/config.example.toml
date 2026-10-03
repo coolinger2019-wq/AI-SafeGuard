@@ -158,6 +158,11 @@ auto_apply_exempt_ips = []
 # 日限额：滚动 24h 内 AI 来源防火墙规则数达到上限即暂停自动应用（0 = 不限），
 # 防模型异常输出打爆防火墙。
 auto_apply_max_per_day = 20
+# 证据阈值（按攻击强度调）：24h 内快路径 detection 达 N 次才算「已定罪」——
+# 攻击洪水期调高降噪（0 按防呆视为 1，不允许零证据定罪）。
+auto_apply_min_detections = 1
+# 情报命中层要求的最少蜜罐观测数（24h 内；0 视为 1）。
+auto_apply_intel_min_hits = 1
 # 自动分析间隔（秒），30-86400。热更。
 analyze_interval_secs = 900
 # 单条 payload 上送给 LLM 的最大字符数（40-2000，控制上送量）。热更。

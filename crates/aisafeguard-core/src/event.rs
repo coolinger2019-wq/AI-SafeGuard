@@ -62,7 +62,7 @@ pub enum SecurityEvent {
     /// 快路径检测器产出（端口扫描/暴破/洪水等，见 docs/NGFW_EVOLUTION.md）。
     Detection {
         ts: i64,
-        /// scan | bruteforce | flood | signature | intel_hit
+        /// scan | bruteforce | flood | signature | intel_hit | mcp_ghost（F792a：蜜罐幽灵工具定罪）
         kind: String,
         src_ip: String,
         confidence: String,

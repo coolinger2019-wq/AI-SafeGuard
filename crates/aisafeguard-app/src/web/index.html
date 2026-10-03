@@ -189,6 +189,12 @@
           <label style="display:flex;align-items:center;gap:6px">日限额
             <input type="number" id="pol-cap" min="0" max="100000" step="1" style="width:76px"> 条/24h
             <span class="hint">0=不限；攻击强度高（扫描洪水期）调高，平日 10-20</span></label>
+          <label style="display:flex;align-items:center;gap:6px">定罪阈值
+            <input type="number" id="pol-det" min="1" max="1000" step="1" style="width:60px"> 检测/24h
+            <span class="hint">快路径 detection 达 N 次才算已定罪；洪水期调高</span></label>
+          <label style="display:flex;align-items:center;gap:6px">情报观测
+            <input type="number" id="pol-intel" min="1" max="1000" step="1" style="width:60px"> 次/24h
+            <span class="hint">情报命中层要求的最少蜜罐观测</span></label>
           <label style="display:flex;align-items:center;gap:6px">豁免清单
             <input type="text" id="pol-exempt" placeholder="运营/管理出口 IP，逗号分隔" style="width:230px">
             <span class="hint">永不自动应用</span></label>
@@ -715,12 +721,19 @@ async function loadPolicy() {
     $('pol-sev').value = (aiRawField(raw, 'auto_apply_min_severity') || '"high"').replace(/"/g, '') || 'high';
     const cap = parseInt(aiRawField(raw, 'auto_apply_max_per_day'), 10);
     $('pol-cap').value = Number.isFinite(cap) ? cap : 20;
+    const detMin = parseInt(aiRawField(raw, 'auto_apply_min_detections'), 10);
+    $('pol-det').value = detMin >= 1 ? detMin : 1;
+    const intelMin = parseInt(aiRawField(raw, 'auto_apply_intel_min_hits'), 10);
+    $('pol-intel').value = intelMin >= 1 ? intelMin : 1;
     $('pol-exempt').value = parseExempt(aiRawField(raw, 'auto_apply_exempt_ips')).join(', ');
   } catch (_) { /* 策略卡加载失败不打断主流程，保存时服务端仍会校验 */ }
 }
 $('pol-save').onclick = async () => {
   const cap = parseInt($('pol-cap').value, 10);
   if (!(cap >= 0)) return showPolMsg('err', '日限额须为 ≥0 的整数（0 = 不限）');
+  const detMin = parseInt($('pol-det').value, 10);
+  const intelMin = parseInt($('pol-intel').value, 10);
+  if (!(detMin >= 1) || !(intelMin >= 1)) return showPolMsg('err', '证据阈值须为 ≥1 的整数（0 会被防呆视为 1）');
   const exempt = $('pol-exempt').value.split(/[,\uFF0C\n]+/).map((s) => s.trim()).filter(Boolean);
   const bad = exempt.find((s) => !/^[0-9a-fA-F.:]+$/.test(s));
   if (bad) return showPolMsg('err', '豁免清单含可疑条目（须为 IP）：' + bad);
@@ -734,6 +747,8 @@ $('pol-save').onclick = async () => {
     raw = upsertAiField(raw, 'auto_apply', String($('pol-auto').checked));
     raw = upsertAiField(raw, 'auto_apply_min_severity', '"' + $('pol-sev').value + '"');
     raw = upsertAiField(raw, 'auto_apply_max_per_day', String(cap));
+    raw = upsertAiField(raw, 'auto_apply_min_detections', String(detMin));
+    raw = upsertAiField(raw, 'auto_apply_intel_min_hits', String(intelMin));
     raw = upsertAiField(raw, 'auto_apply_exempt_ips', '[' + exempt.map((s) => '"' + s + '"').join(', ') + ']');
     const r = await fetch('/api/config/raw', {
       method: 'PUT',
@@ -746,7 +761,8 @@ $('pol-save').onclick = async () => {
     showPolMsg(req.length ? 'warn' : 'ok', req.length
       ? '已保存。以下项需重启服务生效：' + req.join('、')
       : '策略已保存并热更生效（自动应用' + ($('pol-auto').checked ? '开' : '关')
-        + '，严重度 ≥' + $('pol-sev').value + '，日限额 ' + cap + '，豁免 ' + exempt.length + ' 条）');
+        + '，严重度 ≥' + $('pol-sev').value + '，日限额 ' + cap
+        + '，定罪阈值 ' + detMin + ' 检测、情报观测 ' + intelMin + ' 次，豁免 ' + exempt.length + ' 条）');
     if ($('cfg').dataset.loaded && !cfgDirty) loadCfg(); // 配置编辑器已加载则重载，防旧文本回写
   } catch (e) { showPolMsg('err', '保存失败：' + e.message); }
   finally { $('pol-save').disabled = false; }

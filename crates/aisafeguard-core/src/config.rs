@@ -289,6 +289,12 @@ pub struct AiConfig {
     /// 自动应用（0 = 不限）。约束 AI 规则总 churn（人工批准的 AI 建议同占额），
     /// 防模型异常输出打爆防火墙。
     pub auto_apply_max_per_day: u32,
+    /// auto_apply 证据阈值（F792b，按攻击强度调）：滚动 24h 内快路径 detection
+    /// 次数达到该值才算「快路径已定罪」。默认 1；攻击洪水期调高降噪。
+    /// 0 按防呆视为 1（不允许零证据定罪）。
+    pub auto_apply_min_detections: u32,
+    /// 情报命中层要求的最少蜜罐观测数（滚动 24h 内）。默认 1；0 按防呆视为 1。
+    pub auto_apply_intel_min_hits: u32,
     /// 灰度执行：AI 建议应用时的默认封禁时长（秒，AI 未给 ttl_secs 时使用）。
     /// AI 判断是概率性的——应用即短 TTL 试运行，到期自动解封，人工确认后转正。
     pub trial_ttl_secs: u64,
@@ -308,6 +314,8 @@ impl Default for AiConfig {
             auto_apply_min_severity: "high".into(),
             auto_apply_exempt_ips: Vec::new(),
             auto_apply_max_per_day: 20,
+            auto_apply_min_detections: 1,
+            auto_apply_intel_min_hits: 1,
             analyze_interval_secs: 900,
             max_snippet_chars: 200,
             trial_ttl_secs: 900,

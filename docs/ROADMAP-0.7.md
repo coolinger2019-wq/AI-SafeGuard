@@ -256,6 +256,41 @@
 
 ---
 
+## 追加批次：MCP 蜜罐深化 + auto_apply 证据阈值可调（F792，2026-10-03 用户拍板「引入 HoneyMCP 长处」）
+
+### 对标结论（github.com/barvhaim/HoneyMCP，2026-10-03 评估）
+
+HoneyMCP 是「给真实 MCP server 的工具清单混入幽灵工具」的**内部防线**（检测 agent 被提示注入
+劫持，触发幽灵工具=高保真零误报）；我们是「公网独立假 server」的**外部传感器**（捕对 AI 基础
+设施的探测）。赛道不同——我们天然处于其 COGNITIVE（持续欺骗）模式（全假无真实面可泄露），
+其 SCANNER 锁死/中间件形态/LLM 动态诱饵/ToolGen 不抄；其仪表盘/webhook/遥测我们已有且更强
+（哈希链事件库 vs JSON 文件）。抄三点 + 一个自研延伸，见下。
+
+### F792a MCP 蜜罐深化（借鉴 HoneyMCP） — 规模 S
+
+- ①**合成凭证级诱饵响应**：新增 `get_credentials` 幽灵工具（返回嵌 canary 水印的合成
+  AWS key / DB 连接串——「值得偷」，canary 外泄即归因，H210 同哲学）；`read_file` 支持
+  /etc/shadow 假哈希行、`db_query` 返回假结果集、`fetch_url` 返回假内部 API JSON——
+  提升攻击者停留时长与 TTP 深度。红线不变：全部合成、水印内嵌（H210「不得被当真实数据引用」
+  由水印满足）。
+- ②**tools/call 命中诱饵工具 = 确定性攻击证据** → 蜜罐额外产出 `Detection` 事件
+  （kind=mcp_ghost，confidence=high）——零误报逻辑与「合法 agent 不会调幽灵工具」同构。
+  事件进快路径证据面：AI 提名 + auto_apply 证据门控（快路径已定罪）自动放行 → 灰度封禁
+  闭环。v1 蜜罐不直连防火墙（AI 15min 粒度闭环足够），直连 auto-ban 列为可选强化。
+- ③**诱饵工具分类标注**：attack_category（system_execution / data_exfiltration）+
+  threat_level（critical/high/medium）进诱饵表与 Detection 证据串——事件可统计语义化，
+  AI 提示词吃到结构化威胁意图。
+
+### F792b auto_apply 证据阈值可调（按攻击强度） — 规模 S
+
+- `[ai]` 新增两个热更字段：`auto_apply_min_detections`（默认 1——24h 内快路径 detection
+  达 N 次才算「已定罪」，攻击洪水期调高降噪）、`auto_apply_intel_min_hits`（默认 1——
+  情报命中层要求的最少蜜罐观测数）。0 值防呆按 1 处理（不允许零证据定罪）。
+- 控制台「AI 自动处置策略」卡片同步两控件；config.example.toml 防漂移同步。
+- 验收：guard 测试（阈值=2 时单 detection 不放行、两次放行）+ 配置 roundtrip + 卡片交互。
+
+---
+
 ## 跨任务红线汇总（0.7 全批次适用）
 
 1. 0.6 全部红线不变：内网/回环永不自动封；跨节点建议而非命令；AI 不自动处置；凭证材料不出节点；`forbid(unsafe_code)`。

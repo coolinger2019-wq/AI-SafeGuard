@@ -2272,9 +2272,10 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
 /// 决定是否自动应用。三道检查全部通过才放行，任一不过留灰度人工审批：
 /// ①运营者豁免——清单内 IP 永不自动应用；目标无法解析为 IP 按不可信处理。
 /// ②日限额——滚动 24h 内 origin=ai 规则数达上限即暂停（0 = 不限）。
-/// ③证据广度——快路径已定罪（24h 内 ≥1 次 detection，频次规则确定性产出；
-///   「多信号」蜜罐命中叠加检测亦在此层）或情报命中（可自动封禁的高置信条目
-///   在库且该 IP 被观测到主动行为）。仅蜜罐命中无检测 = 单信号，不自动应用。
+/// ③证据广度（阈值可按攻击强度调，F792b）——快路径已定罪（24h 内 detection
+///   次数 ≥ auto_apply_min_detections，频次规则确定性产出；「多信号」蜜罐命中
+///   叠加检测亦在此层）或情报命中（可自动封禁的高置信条目在库且观测数 ≥
+///   auto_apply_intel_min_hits）。仅蜜罐命中无检测 = 单信号，不自动应用。
 fn auto_apply_guard_ok(store: &Store, ai: &AiConfig, remote_ip: &str, now: i64) -> bool {
     // ① 豁免：解析失败的豁免条目忽略；目标解析失败 = 不放行
     let Ok(ip) = remote_ip.parse::<std::net::IpAddr>() else {
@@ -2293,14 +2294,16 @@ fn auto_apply_guard_ok(store: &Store, ai: &AiConfig, remote_ip: &str, now: i64) 
     if cap > 0 && store.ai_rules_since(now - 86_400).unwrap_or(cap) >= cap {
         return false;
     }
-    // ③ 证据广度
+    // ③ 证据广度（阈值 0 值防呆视为 1——不允许零证据定罪）
+    let det_min = ai.auto_apply_min_detections.max(1) as i64;
+    let intel_min = ai.auto_apply_intel_min_hits.max(1) as i64;
     let Ok((honey, det)) = store.evidence_breadth(remote_ip, now - 86_400) else {
         return false;
     };
-    if det >= 1 {
+    if det >= det_min {
         return true;
     }
-    honey >= 1 && store.intel_auto_block_hit(remote_ip, now).unwrap_or(false)
+    honey >= intel_min && store.intel_auto_block_hit(remote_ip, now).unwrap_or(false)
 }
 
 fn analysis_failed(eng: &EngineHandle, model: &str, msg: &str) {
@@ -2807,6 +2810,25 @@ mod tests {
         assert!(!auto_apply_guard_ok(&store, &ai, "5.6.7.8", now), "在库零观测不放行");
         store.insert_event(&honeypot_hit("5.6.7.8")).unwrap();
         assert!(auto_apply_guard_ok(&store, &ai, "5.6.7.8", now));
+
+        // 证据阈值（F792b）：min_detections=2 时单次检测不放行，两次放行
+        let ai_strict = AiConfig {
+            auto_apply_min_detections: 2,
+            ..Default::default()
+        };
+        store.insert_event(&detection("3.3.3.3")).unwrap();
+        assert!(!auto_apply_guard_ok(&store, &ai_strict, "3.3.3.3", now), "阈值=2 单次检测不放行");
+        store.insert_event(&detection("3.3.3.3")).unwrap();
+        assert!(auto_apply_guard_ok(&store, &ai_strict, "3.3.3.3", now));
+
+        // 情报观测阈值：intel_min_hits=2 时单次观测不放行，再次观测放行
+        let ai_intel_strict = AiConfig {
+            auto_apply_intel_min_hits: 2,
+            ..Default::default()
+        };
+        assert!(!auto_apply_guard_ok(&store, &ai_intel_strict, "5.6.7.8", now), "阈值=2 单次观测不放行");
+        store.insert_event(&honeypot_hit("5.6.7.8")).unwrap();
+        assert!(auto_apply_guard_ok(&store, &ai_intel_strict, "5.6.7.8", now));
 
         // 运营者豁免：清单内 IP 即使有检测也不放行（人工批准不受此限）
         let ai_exempt = AiConfig {
