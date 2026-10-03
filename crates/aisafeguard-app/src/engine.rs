@@ -769,7 +769,9 @@ impl EngineHandle {
             Ok(r) => r,
             Err(e) => {
                 // 封禁失败：认领回滚为 pending（人工可重试），不留死状态
-                let _ = self.store.set_proposal_status_if(id, "applying", "pending", None);
+                let _ = self
+                    .store
+                    .set_proposal_status_if(id, "applying", "pending", None);
                 return Err(e);
             }
         };

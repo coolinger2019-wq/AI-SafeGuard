@@ -1044,7 +1044,7 @@ fn rt_wait_ctrl_c(bundle: &EngineBundle) -> anyhow::Result<()> {
         // honeypot.stop() 等优雅收尾永不执行
         #[cfg(unix)]
         {
-            use tokio::signal::unix::{signal, SignalKind};
+            use tokio::signal::unix::{SignalKind, signal};
             let mut term = signal(SignalKind::terminate())?;
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {}

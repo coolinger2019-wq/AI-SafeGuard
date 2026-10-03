@@ -94,8 +94,10 @@ pub fn build_user_prompt(inputs: &PromptInputs<'_>) -> String {
         intel = section("intel", neutral(inputs.intel)),
         flows = section("flows", neutral(inputs.flows)),
         feedback = section("feedback", neutral(inputs.feedback)),
-        self_endpoints =
-            section("self_endpoints", inputs.self_endpoints.map(|s| s.to_string())),
+        self_endpoints = section(
+            "self_endpoints",
+            inputs.self_endpoints.map(|s| s.to_string())
+        ),
         interactions = section("interactions", neutral(inputs.interactions)),
         credentials = section("credentials", neutral(inputs.credentials)),
         canary = section("canary", neutral(inputs.canary)),

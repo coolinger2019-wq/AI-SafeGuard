@@ -823,8 +823,15 @@ impl Store {
             for (i, (id, ts, kind, listener, remote_ip, remote_port, summary, payload)) in
                 rows.into_iter().enumerate()
             {
-                let canonical =
-                    canonical_event(ts, &kind, &listener, &remote_ip, remote_port, &summary, &payload);
+                let canonical = canonical_event(
+                    ts,
+                    &kind,
+                    &listener,
+                    &remote_ip,
+                    remote_port,
+                    &summary,
+                    &payload,
+                );
                 let hash = chain_hash(&prev, &canonical);
                 if i == 0 {
                     // 仅新链头置空 prev_hash（verify 的「链起点」信号）；
@@ -836,8 +843,11 @@ impl Store {
                     )
                     .map_err(|e| Error::Store(e.to_string()))?;
                 } else {
-                    conn.execute("UPDATE events SET hash = ?2 WHERE id = ?1", params![id, hash])
-                        .map_err(|e| Error::Store(e.to_string()))?;
+                    conn.execute(
+                        "UPDATE events SET hash = ?2 WHERE id = ?1",
+                        params![id, hash],
+                    )
+                    .map_err(|e| Error::Store(e.to_string()))?;
                 }
                 prev = hash;
             }
@@ -1807,8 +1817,7 @@ mod tests {
         // 非空链的 verify：再插 1 条后 3/3 可验。
         store
             .insert_event(&aisafeguard_core::event::SecurityEvent::engine(
-                "info",
-                "tail",
+                "info", "tail",
             ))
             .unwrap();
         let report = store.verify_chain().unwrap();
