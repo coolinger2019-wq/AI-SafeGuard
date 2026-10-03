@@ -181,11 +181,27 @@ auto_apply_exempt_ips = []
 # 日限额：滚动 24h 内 AI 来源防火墙规则数达到上限即暂停自动应用（0 = 不限），
 # 防模型异常输出打爆防火墙。
 auto_apply_max_per_day = 20
-# 证据阈值（按攻击强度调）：24h 内快路径 detection 达 N 次才算「已定罪」——
-# 攻击洪水期调高降噪（0 按防呆视为 1，不允许零证据定罪）。
-auto_apply_min_detections = 1
-# 情报命中层要求的最少蜜罐观测数（24h 内；0 视为 1）。
-auto_apply_intel_min_hits = 1
+# ── 证据门控（auto_apply 的核心机制，三条定罪通道满足任一即自动应用）──
+#
+# AI 只提名（产建议），是否自动封禁由本机确定性证据决定（防 AI 自评自裁）：
+#
+#   通道一「快路径已定罪」：24h 内该来源触发过 ≥ auto_apply_min_detections 次
+#     快路径检测（scan 端口扫描 / bruteforce 暴力探测 / credential_spray 凭证
+#     喷洒 / mcp_ghost / docker_ghost / payload_signature——这些是确定性规则
+#     判定，零误报）。
+#   通道二「带载荷蜜罐命中」：24h 内该来源对蜜罐真发过数据（payload 非空，
+#     如 telnet 登录名塞二进制、HTTP 利用串）≥ auto_apply_min_honey_payload 次。
+#     纯端口探测（连接即断，payload 为空）不计入——那类多属扫描噪声。
+#   通道三「情报命中」：该来源在威胁情报库（允许自动封禁的源）且 24h 内被
+#     蜜罐观测到 ≥ auto_apply_intel_min_hits 次（在库但零观测不封，防误伤
+#     已被修复/转让 IP 的历史条目）。
+#
+# 三通道全不满足 = 单信号，建议留在「待处理」等人工确认。阈值均可按攻击
+# 强度调（洪水期调高降噪）；0 值一律按防呆视为 1——不允许零证据定罪。
+auto_apply_min_detections = 1      # 通道一：快路径 detection 次数门槛
+auto_apply_min_honey_payload = 3   # 通道二：带载荷蜜罐命中次数门槛
+auto_apply_intel_min_hits = 1      # 通道三：情报层最少蜜罐观测数
+# ── 证据门控说明结束 ──
 # 自动分析间隔（秒），30-86400。热更。
 analyze_interval_secs = 900
 # 单条 payload 上送给 LLM 的最大字符数（40-2000，控制上送量）。热更。

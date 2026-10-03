@@ -1221,17 +1221,25 @@ impl Store {
 
     // ---------- auto_apply 证据门控（F791 补全，2026-10-03 用户拍板） ----------
 
-    /// 证据广度：该来源 IP 近窗口内的蜜罐命中数与快路径检测数。
-    /// auto_apply 的门控输入——仅蜜罐命中（单信号）不足以免审批，分层见 engine 侧。
-    pub fn evidence_breadth(&self, remote_ip: &str, since_ts: i64) -> Result<(i64, i64)> {
+    /// 证据广度：该来源 IP 近窗口内的 (蜜罐总命中, 带载荷蜜罐命中, 快路径检测数)。
+    /// auto_apply 的门控输入——带载荷 = 攻击者真发了数据（telnet 登录名塞二进制/
+    /// HTTP 利用串），比裸端口探测强一档；分层语义见 engine 的 auto_apply_guard_ok。
+    pub fn evidence_breadth(&self, remote_ip: &str, since_ts: i64) -> Result<(i64, i64, i64)> {
         self.lock()?
             .query_row(
                 "SELECT
                    COALESCE(SUM(CASE WHEN kind = 'honeypot_hit' THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN kind = 'honeypot_hit' AND payload != '' THEN 1 ELSE 0 END), 0),
                    COALESCE(SUM(CASE WHEN kind = 'detection'    THEN 1 ELSE 0 END), 0)
                  FROM events WHERE remote_ip = ?1 AND ts >= ?2 AND remote_ip != ''",
                 params![remote_ip, since_ts],
-                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                },
             )
             .map_err(|e| Error::Store(e.to_string()))
     }

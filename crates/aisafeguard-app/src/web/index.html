@@ -175,8 +175,9 @@
 
     <div id="tab-prop" hidden>
       <div class="card" id="pol-card" style="margin-bottom:10px">
-        <div class="k">AI 自动处置策略 —— 满足证据门控才自动灰度封禁（到期自动解封）：
-        快路径已定罪（24h 内有检测命中）或情报命中；仅蜜罐命中留人工确认。保存即热更。</div>
+        <div class="k">AI 自动处置策略 —— 三条定罪通道满足任一才自动灰度封禁（到期自动解封）：
+        ① 快路径已定罪（24h 内 detection 达「定罪阈值」）② 带载荷蜜罐命中（真发过数据，纯端口探测不算）达「载荷阈值」
+        ③ 情报库命中且被观测达「情报观测」次数。三通道全不满足 = 单信号，留人工。保存即热更。</div>
         <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-top:10px">
           <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="pol-auto"> 自动应用</label>
           <label style="display:flex;align-items:center;gap:6px">最低严重度
@@ -191,7 +192,10 @@
             <span class="hint">0=不限；攻击强度高（扫描洪水期）调高，平日 10-20</span></label>
           <label style="display:flex;align-items:center;gap:6px">定罪阈值
             <input type="number" id="pol-det" min="1" max="1000" step="1" style="width:60px"> 检测/24h
-            <span class="hint">快路径 detection 达 N 次才算已定罪；洪水期调高</span></label>
+            <span class="hint">通道① 快路径 detection 达 N 次</span></label>
+          <label style="display:flex;align-items:center;gap:6px">载荷阈值
+            <input type="number" id="pol-honey" min="1" max="1000" step="1" style="width:60px"> 次/24h
+            <span class="hint">通道② 带载荷蜜罐命中（真发过数据）达 N 次；纯端口探测不算</span></label>
           <label style="display:flex;align-items:center;gap:6px">情报观测
             <input type="number" id="pol-intel" min="1" max="1000" step="1" style="width:60px"> 次/24h
             <span class="hint">情报命中层要求的最少蜜罐观测</span></label>
@@ -742,6 +746,8 @@ async function loadPolicy() {
     $('pol-cap').value = Number.isFinite(cap) ? cap : 20;
     const detMin = parseInt(aiRawField(raw, 'auto_apply_min_detections'), 10);
     $('pol-det').value = detMin >= 1 ? detMin : 1;
+    const honeyMin = parseInt(aiRawField(raw, 'auto_apply_min_honey_payload'), 10);
+    $('pol-honey').value = honeyMin >= 1 ? honeyMin : 3;
     const intelMin = parseInt(aiRawField(raw, 'auto_apply_intel_min_hits'), 10);
     $('pol-intel').value = intelMin >= 1 ? intelMin : 1;
     $('pol-exempt').value = parseExempt(aiRawField(raw, 'auto_apply_exempt_ips')).join(', ');
@@ -751,8 +757,9 @@ $('pol-save').onclick = async () => {
   const cap = parseInt($('pol-cap').value, 10);
   if (!(cap >= 0)) return showPolMsg('err', '日限额须为 ≥0 的整数（0 = 不限）');
   const detMin = parseInt($('pol-det').value, 10);
+  const honeyMin = parseInt($('pol-honey').value, 10);
   const intelMin = parseInt($('pol-intel').value, 10);
-  if (!(detMin >= 1) || !(intelMin >= 1)) return showPolMsg('err', '证据阈值须为 ≥1 的整数（0 会被防呆视为 1）');
+  if (!(detMin >= 1) || !(honeyMin >= 1) || !(intelMin >= 1)) return showPolMsg('err', '证据阈值须为 ≥1 的整数（0 会被防呆视为 1）');
   const exempt = $('pol-exempt').value.split(/[,\uFF0C\n]+/).map((s) => s.trim()).filter(Boolean);
   const bad = exempt.find((s) => !/^[0-9a-fA-F.:]+$/.test(s));
   if (bad) return showPolMsg('err', '豁免清单含可疑条目（须为 IP）：' + bad);
@@ -767,6 +774,7 @@ $('pol-save').onclick = async () => {
     raw = upsertAiField(raw, 'auto_apply_min_severity', '"' + $('pol-sev').value + '"');
     raw = upsertAiField(raw, 'auto_apply_max_per_day', String(cap));
     raw = upsertAiField(raw, 'auto_apply_min_detections', String(detMin));
+    raw = upsertAiField(raw, 'auto_apply_min_honey_payload', String(honeyMin));
     raw = upsertAiField(raw, 'auto_apply_intel_min_hits', String(intelMin));
     raw = upsertAiField(raw, 'auto_apply_exempt_ips', '[' + exempt.map((s) => '"' + s + '"').join(', ') + ']');
     const r = await fetch('/api/config/raw', {
@@ -781,7 +789,8 @@ $('pol-save').onclick = async () => {
       ? '已保存。以下项需重启服务生效：' + req.join('、')
       : '策略已保存并热更生效（自动应用' + ($('pol-auto').checked ? '开' : '关')
         + '，严重度 ≥' + $('pol-sev').value + '，日限额 ' + cap
-        + '，定罪阈值 ' + detMin + ' 检测、情报观测 ' + intelMin + ' 次，豁免 ' + exempt.length + ' 条）');
+        + '，定罪阈值 ' + detMin + ' 检测 / ' + honeyMin + ' 带载荷命中 / 情报观测 '
+        + intelMin + ' 次，豁免 ' + exempt.length + ' 条）');
     if ($('cfg').dataset.loaded && !cfgDirty) loadCfg(); // 配置编辑器已加载则重载，防旧文本回写
   } catch (e) { showPolMsg('err', '保存失败：' + e.message); }
   finally { $('pol-save').disabled = false; }

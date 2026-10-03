@@ -2432,10 +2432,14 @@ fn auto_apply_policy_ok(
 /// 决定是否自动应用。三道检查全部通过才放行，任一不过留灰度人工审批：
 /// ①运营者豁免——清单内 IP 永不自动应用；目标无法解析为 IP 按不可信处理。
 /// ②日限额——滚动 24h 内 origin=ai 规则数达上限即暂停（0 = 不限）。
-/// ③证据广度（阈值可按攻击强度调，F792b）——快路径已定罪（24h 内 detection
-///   次数 ≥ auto_apply_min_detections，频次规则确定性产出；「多信号」蜜罐命中
-///   叠加检测亦在此层）或情报命中（可自动封禁的高置信条目在库且观测数 ≥
-///   auto_apply_intel_min_hits）。仅蜜罐命中无检测 = 单信号，不自动应用。
+/// ③证据广度（三条定罪通道，阈值均可按攻击强度调）：
+///   a) 快路径已定罪——24h 内 detection ≥ auto_apply_min_detections（确定性产出）；
+///   b) 带载荷蜜罐命中——24h 内 payload 非空的 honeypot_hit ≥
+///      auto_apply_min_honey_payload（攻击者真发了数据，如 telnet 登录名塞
+///      二进制；纯端口探测空载荷不计入）；
+///   c) 情报命中——可自动封禁条目在库且 24h 内蜜罐观测 ≥
+///      auto_apply_intel_min_hits。
+///   三通道全不满足 = 单信号，留灰度人工。
 fn auto_apply_guard_ok(store: &Store, ai: &AiConfig, remote_ip: &str, now: i64) -> bool {
     // ① 豁免：解析失败的豁免条目忽略；目标解析失败 = 不放行
     let Ok(ip) = remote_ip.parse::<std::net::IpAddr>() else {
@@ -2454,15 +2458,23 @@ fn auto_apply_guard_ok(store: &Store, ai: &AiConfig, remote_ip: &str, now: i64) 
     if cap > 0 && store.ai_rules_since(now - 86_400).unwrap_or(cap) >= cap {
         return false;
     }
-    // ③ 证据广度（阈值 0 值防呆视为 1——不允许零证据定罪）
+    // ③ 证据广度（三条定罪通道，满足任一即放行；阈值 0 值防呆视为 1）
     let det_min = ai.auto_apply_min_detections.max(1) as i64;
+    let honey_min = ai.auto_apply_min_honey_payload.max(1) as i64;
     let intel_min = ai.auto_apply_intel_min_hits.max(1) as i64;
-    let Ok((honey, det)) = store.evidence_breadth(remote_ip, now - 86_400) else {
+    let Ok((honey, honey_payload, det)) = store.evidence_breadth(remote_ip, now - 86_400) else {
         return false;
     };
+    // 通道一：快路径已定罪（频次检测器确定性产出）
     if det >= det_min {
         return true;
     }
+    // 通道二：带载荷蜜罐命中（攻击者真发了数据——telnet 登录名塞二进制/
+    // HTTP 利用串；纯端口探测 payload 为空不计入）
+    if honey_payload >= honey_min {
+        return true;
+    }
+    // 通道三：情报命中（可自动封禁的库内条目 + 被观测到主动行为）
     honey >= intel_min && store.intel_auto_block_hit(remote_ip, now).unwrap_or(false)
 }
 
@@ -3014,6 +3026,38 @@ mod tests {
             store.insert_event(&honeypot_hit("1.2.3.4")).unwrap();
         }
         assert!(!auto_apply_guard_ok(&store, &ai, "1.2.3.4", now));
+
+        // 通道二（F795 补全）：带载荷蜜罐命中 ≥ min_honey_payload(默认3) 即定罪；
+        // 纯端口探测（payload 空）不算数
+        let payload_hit = |ip: &str| SecurityEvent::HoneypotHit {
+            ts: now,
+            listener: "telnet".into(),
+            kind: "telnet".into(),
+            port: 2323,
+            remote_ip: ip.into(),
+            remote_port: 55555,
+            summary: "登录名提交二进制载荷".into(),
+            payload: "binary-blob".into(),
+            http_hint: None,
+            interaction: None,
+        };
+        for _ in 0..2 {
+            store.insert_event(&payload_hit("4.4.4.4")).unwrap();
+        }
+        assert!(
+            !auto_apply_guard_ok(&store, &ai, "4.4.4.4", now),
+            "2 次带载荷 < 3 不放行"
+        );
+        store.insert_event(&payload_hit("4.4.4.4")).unwrap();
+        assert!(
+            auto_apply_guard_ok(&store, &ai, "4.4.4.4", now),
+            "3 次带载荷放行"
+        );
+        // 4 次空载荷探测 ≠ 定罪
+        assert!(
+            !auto_apply_guard_ok(&store, &ai, "1.2.3.4", now),
+            "空载荷命中不计入通道二"
+        );
 
         // 快路径已定罪（≥1 detection）放行——含多信号情形
         store.insert_event(&detection("1.2.3.4")).unwrap();

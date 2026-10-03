@@ -295,6 +295,10 @@ pub struct AiConfig {
     pub auto_apply_min_detections: u32,
     /// 情报命中层要求的最少蜜罐观测数（滚动 24h 内）。默认 1；0 按防呆视为 1。
     pub auto_apply_intel_min_hits: u32,
+    /// auto_apply 证据阈值（F795 补全，第三条定罪通道）：滚动 24h 内「带载荷」
+    /// 蜜罐命中（payload 非空 = 攻击者真发了数据，如 telnet 登录名塞二进制）
+    /// 达到该值即定罪。默认 3；纯端口探测（空载荷）不计入。0 按防呆视为 1。
+    pub auto_apply_min_honey_payload: u32,
     /// 灰度执行：AI 建议应用时的默认封禁时长（秒，AI 未给 ttl_secs 时使用）。
     /// AI 判断是概率性的——应用即短 TTL 试运行，到期自动解封，人工确认后转正。
     pub trial_ttl_secs: u64,
@@ -316,6 +320,7 @@ impl Default for AiConfig {
             auto_apply_max_per_day: 20,
             auto_apply_min_detections: 1,
             auto_apply_intel_min_hits: 1,
+            auto_apply_min_honey_payload: 3,
             analyze_interval_secs: 900,
             max_snippet_chars: 200,
             trial_ttl_secs: 900,
@@ -1033,6 +1038,7 @@ mod tests {
         assert!(!cfg.ai.auto_apply);
         assert!(cfg.ai.auto_apply_exempt_ips.is_empty());
         assert_eq!(cfg.ai.auto_apply_max_per_day, 20);
+        assert_eq!(cfg.ai.auto_apply_min_honey_payload, 3);
     }
 
     /// F710 多源模型：新格式解析、旧单源字段拒绝（无兼容层）、源校验。
