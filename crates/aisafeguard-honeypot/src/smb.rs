@@ -394,7 +394,13 @@ pub(crate) async fn smb_session(s: &mut TcpStream) -> std::io::Result<SessionOut
         "非 SMB/NBSS 数据".into()
     } else {
         let labels: Vec<String> = steps.iter().map(|x| x.command.clone()).collect();
-        let mut sm = format!("SMB2 会话({} 步): {}", labels.len(), labels.join(" → "));
+        // 步骤里含 SMB1（smb1_negotiate/smb1_short）时前缀如实降级，不冒充 SMB2
+        let proto = if labels.iter().any(|l| l.starts_with("smb1_")) {
+            "SMB1"
+        } else {
+            "SMB2"
+        };
+        let mut sm = format!("{proto} 会话({} 步): {}", labels.len(), labels.join(" → "));
         if !creds.is_empty() {
             sm.push_str(&format!(" 凭证[{}]", creds.join("; ")));
         }
