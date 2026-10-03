@@ -16,7 +16,7 @@ use tokio::sync::{Semaphore, watch};
 use crate::canary::CanaryState;
 use crate::shell::ShellRuntime;
 use crate::templates::TemplateRegistry;
-use crate::{SessionOutcome, http, mysql, protocol, redis};
+use crate::{SessionOutcome, http, mcp, mysql, protocol, redis};
 
 /// 每连接会话共享的运行时（0.5.11 收敛：假 Shell/蜜饵/模板/反识别参数/凭证
 /// 采集开关统一入口，协议分派按 kind 取用）。
@@ -487,6 +487,8 @@ async fn handle_conn(
             http::http_session(&mut stream, ctx.canary.as_deref(), tpl.as_ref(), &ctx.fp.http_server)
                 .await
         }
+        // F791：MCP 蜜罐（JSON-RPC / Streamable HTTP + 旧 SSE 传输）
+        "mcp" => mcp::mcp_session(&mut stream, ctx.canary.as_deref()).await,
         "telnet" => protocol::telnet_session(&mut stream, &ctx.fp.telnet_greeting).await,
         "mysql" => mysql::mysql_session(&mut stream, &ctx.fp.mysql_version).await,
         "redis" => redis::redis_session(&mut stream).await,

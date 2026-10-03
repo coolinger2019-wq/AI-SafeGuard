@@ -300,24 +300,21 @@ pub(crate) async fn http_session(
         && let Some(start) = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
     {
         body_start = Some(start);
-        let want = (start + content_length(&head_text).min(4096)).min(8192);
-        let mut chunk = [0u8; 1024];
-        for _ in 0..8 {
-            if buf.len() >= want {
-                break;
-            }
-            match tokio::time::timeout(Duration::from_secs(2), s.read(&mut chunk)).await {
-                Ok(Ok(0)) | Err(_) | Ok(Err(_)) => break,
-                Ok(Ok(n)) => buf.extend_from_slice(&chunk[..n]),
-            }
-        }
+        read_body(s, &mut buf, start, &head_text).await;
     }
 
     // 诱饵路由（F11 + H210 蜜饵优先）：登录路径 → 假登录页；蜜饵路径 → 带水印
     // 诱饵文件；其余诱饵 → 受限页；未匹配 → 通用假页
-    // 诱饵路由（F11 + H210 蜜饵 + H300 模板）：
+    // 诱饵路由（F11 + H210 蜜饵 + H300 模板 + F791 MCP 诱饵路径）：
     // 模板监听器：蜜饵 > 模板敏感路径(403) > 模板页面(其余全部路径)；
     // 内置监听器：登录路径 → 假登录页；蜜饵 → 带水印诱饵；其余诱饵 → 受限页；未匹配 → 通用假页
+    // MCP 诱饵路径（/mcp、/sse 等）优先于一切页面路由——协议级探测直接进 MCP 蜜罐
+    let mcp_resp = if hint.is_some() && crate::mcp::is_mcp_path(&path) {
+        let body_bytes = body_start.map(|st| buf[st..].to_vec()).unwrap_or_default();
+        Some(crate::mcp::http_route(&method, &path, &body_bytes, canary))
+    } else {
+        None
+    };
     let is_post = method == "POST";
     let login = hint.is_some() && tpl.is_none() && is_login_path(&path);
     let tpl_decoy = hint.is_some()
@@ -330,6 +327,8 @@ pub(crate) async fn http_session(
     };
     let (status, ctype, body): (&[u8], &str, Vec<u8>) = if hint.is_none() {
         (b"HTTP/1.1 404 Not Found\r\n".as_slice(), "text/html; charset=utf-8", Vec::new())
+    } else if let Some(m) = &mcp_resp {
+        (m.status.as_bytes(), m.ctype, m.body.clone())
     } else if let Some((ctype, content)) = &canary_hit {
         (
             b"HTTP/1.1 200 OK\r\n".as_slice(),
@@ -371,9 +370,14 @@ pub(crate) async fn http_session(
             generic_page().into_bytes(),
         )
     };
+    let mcp_sid_hdr = mcp_resp
+        .as_ref()
+        .and_then(|m| m.session_id.as_ref())
+        .map(|sid| format!("Mcp-Session-Id: {sid}\r\n"))
+        .unwrap_or_default();
     s.write_all(
         format!(
-            "{}Content-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\nServer: {server}\r\n\r\n",
+            "{}Content-Type: {ctype}\r\nContent-Length: {}\r\n{mcp_sid_hdr}Connection: close\r\nServer: {server}\r\n\r\n",
             String::from_utf8_lossy(status),
             body.len()
         )
@@ -386,6 +390,9 @@ pub(crate) async fn http_session(
 
     // 诱饵标签并入 hint.tags（F13 单一字段）与摘要后缀（人类可读）
     let mut tags = hint.as_ref().map(|h| h.tags.clone()).unwrap_or_default();
+    if let Some(m) = &mcp_resp {
+        tags.extend(m.tags.iter().cloned());
+    }
     if login {
         tags.push(if is_post {
             "login:post".into()
@@ -443,7 +450,7 @@ pub(crate) async fn http_session(
 }
 
 /// 读 HTTP 请求直到头部完整（\r\n\r\n）或超出上限；调用方按需续读 body。
-async fn read_http_request(s: &mut TcpStream) -> Result<Vec<u8>, std::io::Error> {
+pub(crate) async fn read_http_request(s: &mut TcpStream) -> Result<Vec<u8>, std::io::Error> {
     let mut buf = Vec::with_capacity(1024);
     let mut chunk = [0u8; 1024];
     for _ in 0..8 {
@@ -457,6 +464,27 @@ async fn read_http_request(s: &mut TcpStream) -> Result<Vec<u8>, std::io::Error>
         }
     }
     Ok(buf)
+}
+
+/// POST body 续读（Content-Length 有界 4 KiB，总长不超 8 KiB）——
+/// http 会话与 mcp 蜜罐（F791）共用同一上限。
+pub(crate) async fn read_body(
+    s: &mut TcpStream,
+    buf: &mut Vec<u8>,
+    body_start: usize,
+    head_text: &str,
+) {
+    let want = (body_start + content_length(head_text).min(4096)).min(8192);
+    let mut chunk = [0u8; 1024];
+    for _ in 0..8 {
+        if buf.len() >= want {
+            break;
+        }
+        match tokio::time::timeout(Duration::from_secs(2), s.read(&mut chunk)).await {
+            Ok(Ok(0)) | Err(_) | Ok(Err(_)) => break,
+            Ok(Ok(n)) => buf.extend_from_slice(&chunk[..n]),
+        }
+    }
 }
 
 /// HTTP 头部是否已完整收到（\r\n\r\n）或超出上限——供读循环与模糊测试共用。

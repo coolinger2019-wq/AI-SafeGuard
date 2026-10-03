@@ -73,6 +73,15 @@ enabled = true
 # kind = "redis"
 # enabled = true
 
+# MCP 蜜罐（F791）：仿真「内部运维工具箱」MCP Server（JSON-RPC 2.0），诱捕
+# 针对 AI 基础设施（MCP 端点）的探测与 agent 工具调用——tools/call 的参数就是 TTP。
+# 独立监听器给端口级扫描；http 监听器另内建 /mcp、/api/mcp、/sse 诱饵路径（无需配置）。
+# [[honeypot.listeners]]
+# name = "mcp"
+# port = 8000
+# kind = "mcp"
+# enabled = true
+
 [honeypot.shell]
 # SSH 假 Shell（中交互）：开启后 ssh 监听器认证通过即进入命令仿真会话，
 # 逐命令留痕进事件。白名单命令返回仿真结果，永不执行真实命令。

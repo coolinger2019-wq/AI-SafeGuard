@@ -233,6 +233,29 @@
 
 ---
 
+## 追加批次：MCP/LLM 暴露面蜜罐（F791，2026-10-03 用户拍板「先做起来直接上线」）
+
+### F791 MCP 蜜罐（假 MCP Server + LLM API 端点诱饵） — 规模 S
+
+- **动机（pilot 第一手证据）**：公网节点上线 2 天即观测到 `/mcp`、`/api/mcp`、`/sse` 被大众
+  扫描器探测——AI 基础设施（MCP 端点/LLM API）已是真实攻击面；竞品（CrowdSec/fail2ban/
+  传统 HIDS）均无此蜜罐面。学术侧已成型（Agentic Cloud Decoys、agent 蜜饵论文），开源实现
+  空缺——先发数据独占。honey-token 逻辑与 H210 canary 同构：工具结果带水印 token，
+  在他处出现即可归因。
+- **交付**：`mcp` 协议仿真模块（JSON-RPC 2.0 / MCP Streamable HTTP + 兼容旧 SSE 传输）——
+  ①独立监听器 kind=`mcp`（显式配置=开启，默认监听表不新增，baseline 契约不变）；
+  ②既有 http 监听器内建 MCP 诱饵路径（`/mcp`、`/api/mcp`、`/sse`：POST→JSON-RPC 响应、
+  GET /sse→旧传输 endpoint 事件、GET→405），捕获已落在 8081 上的存量探测。
+- **仿真范围**：initialize（版本协商回显）→ tools/list（诱饵工具：execute_command/read_file/
+  db_query/fetch_url——攻击者 agent 最想要的四类）→ tools/call（假输出 + canary 水印）；
+  notifications→202；未知方法 -32601；畸形 JSON -32700。多请求连接记 interaction 逐方法序列。
+- **红线**：响应内容全部合成（假数据零真实引用，H210 同款）；请求按不可信数据清洗截断；
+  参数中的 password 类键脱敏复用 redact_secrets。
+- **验收**：单测（消息形态/诱饵工具/水印/畸形不 panic 模糊）+ 监听器 e2e + http 诱饵路径 e2e；
+  节点部署后 localhost 真连验证 + 事件落库检查。
+
+---
+
 ## 跨任务红线汇总（0.7 全批次适用）
 
 1. 0.6 全部红线不变：内网/回环永不自动封；跨节点建议而非命令；AI 不自动处置；凭证材料不出节点；`forbid(unsafe_code)`。

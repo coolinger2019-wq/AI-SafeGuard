@@ -12,6 +12,7 @@ mod canary;
 mod cred;
 mod http;
 mod listener;
+mod mcp;
 mod mysql;
 mod protocol;
 mod redis;

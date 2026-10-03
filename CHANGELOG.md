@@ -59,6 +59,18 @@
   发布仍是单二进制）。egui `--remote` 模式保留为全功能备选（规则/
   组织面板操作）。
 
+### 新增（续五）
+
+- **MCP 蜜罐（F791）**：仿真「内部运维工具箱」形态的 MCP Server（JSON-RPC 2.0，
+  Streamable HTTP 传输 + 兼容旧 SSE 传输）——诱捕针对 AI 基础设施（MCP 端点）的探测与
+  agent 工具调用（pilot 公网节点上线 2 天即观测到 `/mcp`、`/api/mcp`、`/sse` 被大众扫描器
+  探测；竞品均无此蜜罐面）。initialize 版本协商回显 → tools/list 诱饵工具
+  （execute_command/read_file/db_query/fetch_url）→ tools/call 合成假输出（+ canary 水印，
+  工具参数即 TTP 证据）；notifications→202、未知方法 -32601、畸形 JSON -32700。
+  接入两面：独立监听器 `kind="mcp"`（默认关，显式配置=开启）+ http 监听器内建 MCP 诱饵
+  路径（`/mcp`、`/api/mcp`、`/sse`、`/messages`，无需配置即生效）。多请求连接记
+  interaction 逐方法序列。响应内容全部合成，参数 password 类键脱敏复用 redact_secrets。
+
 ## [0.6.0] - 2026-09-30
 
 0.6「多机协同完全体」：回答「多台机器看到同一个攻击者时，组织比我单个人更确信」。
