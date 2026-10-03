@@ -72,8 +72,6 @@ pub(crate) struct McpHttpResponse {
     pub tags: Vec<String>,
     /// 交互步标签（initialize / tools/call:read_file / malformed / sse-endpoint）
     pub label: String,
-    /// 本连接上见过的 JSON-RPC 方法序列（summary 用）
-    pub methods: Vec<String>,
     /// SSE 端点事件后直接断连
     pub close: bool,
 }
@@ -112,7 +110,7 @@ pub(crate) fn handle_jsonrpc(body: &[u8], canary: Option<&CanaryState>) -> RpcOu
     let params = obj.get("params").cloned().unwrap_or(Value::Null);
     let label = tool_label(&method, &params);
     match method.as_str() {
-        "initialize" => RpcOutcome::Reply(initialize_result(&params), "initialize".into()),
+        "initialize" => RpcOutcome::Reply(initialize_result(&params, id), "initialize".into()),
         "ping" => RpcOutcome::Reply(json!({"jsonrpc":"2.0","id":id,"result":{}}), "ping".into()),
         "tools/list" => RpcOutcome::Reply(
             json!({"jsonrpc":"2.0","id":id,"result":{"tools": tools_value()}}),
@@ -143,7 +141,7 @@ fn tool_label(method: &str, params: &Value) -> String {
     }
 }
 
-fn initialize_result(params: &Value) -> Value {
+fn initialize_result(params: &Value, id: Value) -> Value {
     let client_version = params
         .get("protocolVersion")
         .and_then(|v| v.as_str())
@@ -155,7 +153,7 @@ fn initialize_result(params: &Value) -> Value {
     };
     json!({
         "jsonrpc": "2.0",
-        "id": params.get("id").cloned().unwrap_or(Value::Null),
+        "id": id,
         "result": {
             "protocolVersion": negotiated,
             "capabilities": {"tools": {"listChanged": false}},
@@ -251,7 +249,6 @@ pub(crate) fn http_route(
         "POST" => match handle_jsonrpc(body, canary) {
             RpcOutcome::Reply(v, label) => {
                 let session = (label == "initialize").then(session_id);
-                let methods = vec![label.clone()];
                 McpHttpResponse {
                     status: "HTTP/1.1 200 OK\r\n",
                     ctype: "application/json",
@@ -259,7 +256,6 @@ pub(crate) fn http_route(
                     session_id: session,
                     tags: vec!["mcp".into()],
                     label,
-                    methods,
                     close: false,
                 }
             }
@@ -269,7 +265,6 @@ pub(crate) fn http_route(
                 body: Vec::new(),
                 session_id: None,
                 tags: vec!["mcp".into()],
-                methods: vec![label.clone()],
                 label,
                 close: false,
             },
@@ -285,7 +280,6 @@ pub(crate) fn http_route(
                 session_id: None,
                 tags: vec!["mcp".into(), "sse".into()],
                 label: "sse-endpoint".into(),
-                methods: Vec::new(),
                 close: true,
             }
         }
@@ -297,7 +291,6 @@ pub(crate) fn http_route(
             session_id: None,
             tags: vec!["mcp".into()],
             label: format!("405:{method}"),
-            methods: Vec::new(),
             close: false,
         },
     }
@@ -335,7 +328,6 @@ pub(crate) async fn mcp_session(
     canary: Option<&CanaryState>,
 ) -> std::io::Result<SessionOutcome> {
     let mut steps = Vec::new();
-    let mut methods: Vec<String> = Vec::new();
     let mut payloads: Vec<String> = Vec::new();
     let mut hint = None;
 
@@ -368,13 +360,13 @@ pub(crate) async fn mcp_session(
         }
 
         let resp = http_route(&method, &path, &body, canary);
-        if !resp.methods.is_empty() {
-            methods.extend(resp.methods.iter().cloned());
+        // 载荷 = 脱敏请求头 + POST 体（GET/SSE 探测也要留下「请求了什么」的证据）
+        let mut text = crate::redact_secrets(&head_text);
+        if method == "POST" {
+            text.push('\n');
+            text.push_str(&String::from_utf8_lossy(&body));
         }
-        payloads.push(sanitize(
-            crate::redact_secrets(&String::from_utf8_lossy(&body)).as_bytes(),
-            MAX_PAYLOAD,
-        ));
+        payloads.push(sanitize(text.as_bytes(), MAX_PAYLOAD));
         steps.push(aisafeguard_core::event::ShellStep {
             command: resp.label.clone(),
             response: format!(
@@ -391,12 +383,13 @@ pub(crate) async fn mcp_session(
         }
     }
 
-    let summary = if methods.is_empty() {
+    let summary = if steps.is_empty() {
         let first = payloads.first().cloned().unwrap_or_default();
         crate::request_summary(&first, "非 MCP/HTTP 数据")
     } else {
-        let joined = methods.join(" → ");
-        let mut sm = format!("MCP 会话({} 步): {}", methods.len(), joined);
+        let labels: Vec<String> = steps.iter().map(|s| s.command.clone()).collect();
+        let joined = labels.join(" → ");
+        let mut sm = format!("MCP 会话({} 步): {}", labels.len(), joined);
         if sm.chars().count() > 160 {
             sm = sm.chars().take(157).collect::<String>() + "...";
         }
@@ -434,6 +427,7 @@ mod tests {
         .to_string();
         let (resp, label) = reply_of(req.as_bytes());
         assert_eq!(label, "initialize");
+        assert_eq!(resp["id"], 1, "响应必须回显请求顶层 id（非 params 内）");
         let result = &resp["result"];
         assert_eq!(result["protocolVersion"], "2025-03-26", "支持集内版本应回显");
         assert_eq!(result["serverInfo"]["name"], SERVER_NAME);
