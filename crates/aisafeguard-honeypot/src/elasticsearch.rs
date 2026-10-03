@@ -3,10 +3,10 @@
 //! 报告里可归因）；数据写入/脚本注入是确定性攻击证据，ghost 定罪零误报
 //! （CVE-2014-3120 / CVE-2015-1427 类脚本利用在 _search body 里可见）。
 
-use serde_json::{json, Value};
 use crate::canary::CanaryState;
 use crate::http::JsonRoute;
-use crate::{sanitize, GhostVerdict};
+use crate::{GhostVerdict, sanitize};
+use serde_json::{Value, json};
 
 const ES_VERSION: &str = "8.11.3";
 
@@ -61,7 +61,11 @@ fn cat_indices(canary: Option<&CanaryState>) -> String {
     let watermark = canary
         .and_then(|c| c.token("es/cat"))
         .map(|t| {
-            let seg: String = t.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect();
+            let seg: String = t
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .take(8)
+                .collect();
             format!("backup-{seg}    ")
         })
         .unwrap_or_else(|| "backup-synthetic".into());
@@ -107,7 +111,11 @@ pub(crate) fn route(
 ) -> JsonRoute {
     let path = path.split('?').next().unwrap_or("");
     let cluster = cluster_name(canary);
-    let segs: Vec<&str> = path.trim_start_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+    let segs: Vec<&str> = path
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
     match (method, path) {
         ("GET", "/") => ok(
             "root",
@@ -247,7 +255,11 @@ mod tests {
         let r = route("POST", "/logs-2026.10.03/_search", body, None);
         let ghost = r.ghost.expect("脚本注入应定罪");
         assert_eq!(ghost.threat, "critical");
-        assert!(ghost.evidence.contains("Runtime"), "证据应含载荷: {}", ghost.evidence);
+        assert!(
+            ghost.evidence.contains("Runtime"),
+            "证据应含载荷: {}",
+            ghost.evidence
+        );
     }
 
     #[test]
@@ -260,7 +272,12 @@ mod tests {
         );
         assert!(r.ghost.is_some(), "写入应定罪");
         assert_eq!(r.status, "HTTP/1.1 201 Created\r\n");
-        let r = route("POST", "/logs-2026.10.03/_search", br#"{"query":{"match_all":{}}}"#, None);
+        let r = route(
+            "POST",
+            "/logs-2026.10.03/_search",
+            br#"{"query":{"match_all":{}}}"#,
+            None,
+        );
         assert!(r.ghost.is_none(), "普通查询不定罪");
         let v: Value = serde_json::from_slice(&r.body).unwrap();
         assert_eq!(v["hits"]["total"]["value"], 2);

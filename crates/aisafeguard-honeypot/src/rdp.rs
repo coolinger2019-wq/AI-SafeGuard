@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::{sanitize, SessionOutcome, MAX_PAYLOAD};
+use crate::{MAX_PAYLOAD, SessionOutcome, sanitize};
 
 /// 连接请求解析结果
 pub(crate) struct ClientHello {
@@ -61,7 +61,9 @@ pub(crate) fn parse_x224_cr(data: &[u8]) -> Option<ClientHello> {
 /// X.224 连接确认（CC）+ rdp_neg_rsp（选择标准 RDP 安全层——选 NLA/SSL 就要接
 /// TLS/CredSSP 会话，低交互 v1 明确不进入）。
 pub(crate) fn cc_response(with_nego: bool) -> Vec<u8> {
-    let mut out = vec![0x03, 0x00, 0x00, 0x0b, 0x06, 0xd0, 0x00, 0x00, 0x12, 0x34, 0x00];
+    let mut out = vec![
+        0x03, 0x00, 0x00, 0x0b, 0x06, 0xd0, 0x00, 0x00, 0x12, 0x34, 0x00,
+    ];
     if with_nego {
         out[2] = 0x00;
         out[3] = 0x13;
@@ -96,7 +98,8 @@ pub(crate) async fn rdp_session(s: &mut TcpStream) -> std::io::Result<SessionOut
         });
     }
     let mut pdu = vec![0u8; len - 4];
-    s.read_exact(&mut pdu).await?;
+    // 慢连接防护：帧体与包头同一超时
+    tokio::time::timeout(Duration::from_secs(10), s.read_exact(&mut pdu)).await??;
     let mut full = head.to_vec();
     full.extend_from_slice(&pdu);
 
@@ -131,10 +134,7 @@ pub(crate) async fn rdp_session(s: &mut TcpStream) -> std::io::Result<SessionOut
 
     Ok(SessionOutcome {
         summary: format!("RDP 连接协商: client={client} 协议={proto_label}"),
-        payload: crate::sanitize(
-            &redact(&full, &followup),
-            MAX_PAYLOAD,
-        ),
+        payload: crate::sanitize(&redact(&full, &followup), MAX_PAYLOAD),
         http_hint: None,
         interaction: Some(vec![
             aisafeguard_core::event::ShellStep {
@@ -143,7 +143,12 @@ pub(crate) async fn rdp_session(s: &mut TcpStream) -> std::io::Result<SessionOut
             },
             aisafeguard_core::event::ShellStep {
                 command: "x224-cc".into(),
-                response: if with_nego { "neg_rsp PROTOCOL_RDP" } else { "plain" }.into(),
+                response: if with_nego {
+                    "neg_rsp PROTOCOL_RDP"
+                } else {
+                    "plain"
+                }
+                .into(),
             },
         ]),
         credentials: Vec::new(),
@@ -200,13 +205,11 @@ mod tests {
     /// 按 F794b② 约定：检测向量逐字节钉住。
     #[test]
     fn probe_exact_live_bytes() {
-        let cr: Vec<u8> = [
-            0x03u8, 0x00, 0x00, 0x2e, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00,
-        ]
-        .into_iter()
-        .chain(b"Cookie: mstshash=kali-probe\r\n".iter().copied())
-        .chain([0x01u8, 0x00, 0x08, 0x00, 0x03, 0x00, 0x00, 0x00])
-        .collect();
+        let cr: Vec<u8> = [0x03u8, 0x00, 0x00, 0x2e, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00]
+            .into_iter()
+            .chain(b"Cookie: mstshash=kali-probe\r\n".iter().copied())
+            .chain([0x01u8, 0x00, 0x08, 0x00, 0x03, 0x00, 0x00, 0x00])
+            .collect();
         let hello = parse_x224_cr(&cr).expect("探针结构应解析");
         assert_eq!(hello.mstshash.as_deref(), Some("kali-probe"));
         assert_eq!(

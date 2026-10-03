@@ -114,8 +114,8 @@ pub fn signing_bytes(env: &Envelope) -> Vec<u8> {
 /// 实测 ring 的 ECDSA 验签不吃 SPKI DER，吃 `04||X||Y` 裸点）。
 pub fn public_point_from_cert_der(cert_der: &[u8]) -> Result<Vec<u8>, String> {
     use x509_parser::prelude::*;
-    let (_, cert) = X509Certificate::from_der(cert_der)
-        .map_err(|e| format!("对端证书 DER 解析失败: {e}"))?;
+    let (_, cert) =
+        X509Certificate::from_der(cert_der).map_err(|e| format!("对端证书 DER 解析失败: {e}"))?;
     Ok(cert.public_key().subject_public_key.data.to_vec())
 }
 
@@ -215,7 +215,6 @@ impl DedupSet {
         }
         true
     }
-
 }
 
 // ---------- F400 韧性：入站限频与出站有界队列（纯逻辑，可注入时钟测试） ----------
@@ -285,10 +284,15 @@ mod tests {
     #[test]
     fn canonical_json_is_key_order_independent() {
         // 键插入顺序不同，规范化结果必须逐字节一致
-        let a = json!({"ts": 1, "node": "a", "payload": {"z": 1, "a": [2, {"y": null, "b": true}]}});
-        let b = json!({"node": "a", "payload": {"a": [2, {"b": true, "y": null}], "z": 1}, "ts": 1});
+        let a =
+            json!({"ts": 1, "node": "a", "payload": {"z": 1, "a": [2, {"y": null, "b": true}]}});
+        let b =
+            json!({"node": "a", "payload": {"a": [2, {"b": true, "y": null}], "z": 1}, "ts": 1});
         assert_eq!(canonical_json(&a), canonical_json(&b));
-        assert_eq!(canonical_json(&a), r#"{"node":"a","payload":{"a":[2,{"b":true,"y":null}],"z":1},"ts":1}"#);
+        assert_eq!(
+            canonical_json(&a),
+            r#"{"node":"a","payload":{"a":[2,{"b":true,"y":null}],"z":1},"ts":1}"#
+        );
     }
 
     #[test]
@@ -361,16 +365,16 @@ mod tests {
         assert!(!verify_signature(&point, &signing_bytes(&tampered), &sig));
         // 错误公钥 → 拒
         crate::fed::cmd_issue_cert(&dir, "node-b", &[]).unwrap();
-        let other_pem = std::fs::read_to_string(dir.join("fed").join("certs").join("node-b.pem")).unwrap();
-        let (i, j) = (
-            other_pem.find(begin).unwrap(),
-            other_pem.find(end).unwrap(),
-        );
+        let other_pem =
+            std::fs::read_to_string(dir.join("fed").join("certs").join("node-b.pem")).unwrap();
+        let (i, j) = (other_pem.find(begin).unwrap(), other_pem.find(end).unwrap());
         let body2: String = other_pem[i + begin.len()..i + j]
             .chars()
             .filter(|c| !c.is_whitespace())
             .collect();
-        let der2 = base64::engine::general_purpose::STANDARD.decode(body2).unwrap();
+        let der2 = base64::engine::general_purpose::STANDARD
+            .decode(body2)
+            .unwrap();
         let point2 = public_point_from_cert_der(&der2).unwrap();
         assert!(!verify_signature(&point2, &bytes, &sig));
         // 非法签名 hex → 拒（不 panic）

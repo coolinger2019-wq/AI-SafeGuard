@@ -59,7 +59,9 @@ pub fn parse_crowdsec_blocklist(text: &str) -> ParsedBlocklist {
             let ok = l
                 .split_once('/')
                 .and_then(|(ip, prefix)| {
-                    ip.parse::<std::net::IpAddr>().ok().zip(prefix.parse::<u8>().ok())
+                    ip.parse::<std::net::IpAddr>()
+                        .ok()
+                        .zip(prefix.parse::<u8>().ok())
                 })
                 .is_some();
             if ok {

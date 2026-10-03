@@ -74,7 +74,9 @@ fn canary_response(
         .iter()
         .find(|(p, _, _)| lower == *p || lower.starts_with(&format!("{p}/")))?;
     let res = lower.trim_start_matches('/');
-    let token = canary.token(res).unwrap_or_else(|| "AC1.<水印不可用>".into());
+    let token = canary
+        .token(res)
+        .unwrap_or_else(|| "AC1.<水印不可用>".into());
     Some((ctype, tpl.replace("{token}", &token)))
 }
 
@@ -216,13 +218,13 @@ pub(crate) fn extract_form_credentials(
             continue;
         };
         let key = key.trim().to_ascii_lowercase();
-        let take = |keys: Vec<&str>| keys.iter().any(|k| {
-            let kc: Vec<char> = k.chars().collect();
-            let lc: Vec<char> = key.chars().collect();
-            lc.starts_with(&kc)
-                && boundary_before(&lc, 0)
-                && boundary_after(&lc, kc.len())
-        });
+        let take = |keys: Vec<&str>| {
+            keys.iter().any(|k| {
+                let kc: Vec<char> = k.chars().collect();
+                let lc: Vec<char> = key.chars().collect();
+                lc.starts_with(&kc) && boundary_before(&lc, 0) && boundary_after(&lc, kc.len())
+            })
+        };
         let mut all_pass: Vec<&str> = SECRET_KEYS.to_vec();
         all_pass.extend(extra_pass_keys.iter().map(|s| s.as_str()));
         let mut all_user: Vec<&str> = USERNAME_KEYS.to_vec();
@@ -238,12 +240,10 @@ pub(crate) fn extract_form_credentials(
     }
     // 用户名/密码都是空 → 没有采集价值
     match (username, password) {
-        (Some(u), Some(p)) if !u.is_empty() && !p.is_empty() => {
-            Some(crate::cred::RawCredential {
-                username: u,
-                password: Some(p),
-            })
-        }
+        (Some(u), Some(p)) if !u.is_empty() && !p.is_empty() => Some(crate::cred::RawCredential {
+            username: u,
+            password: Some(p),
+        }),
         _ => None,
     }
 }
@@ -318,7 +318,9 @@ pub(crate) async fn http_session(
     let is_post = method == "POST";
     let login = hint.is_some() && tpl.is_none() && is_login_path(&path);
     let tpl_decoy = hint.is_some()
-        && tpl.as_ref().is_some_and(|t| path_in_list(&path, &t.decoy_paths));
+        && tpl
+            .as_ref()
+            .is_some_and(|t| path_in_list(&path, &t.decoy_paths));
     let decoy = hint.is_some() && tpl.is_none() && is_decoy_path(&path);
     let canary_hit = if hint.is_some() {
         canary_response(&path, canary)
@@ -326,7 +328,11 @@ pub(crate) async fn http_session(
         None
     };
     let (status, ctype, body): (&[u8], &str, Vec<u8>) = if hint.is_none() {
-        (b"HTTP/1.1 404 Not Found\r\n".as_slice(), "text/html; charset=utf-8", Vec::new())
+        (
+            b"HTTP/1.1 404 Not Found\r\n".as_slice(),
+            "text/html; charset=utf-8",
+            Vec::new(),
+        )
     } else if let Some(m) = &mcp_resp {
         (m.status.as_bytes(), m.ctype, m.body.clone())
     } else if let Some((ctype, content)) = &canary_hit {
@@ -593,7 +599,7 @@ pub fn http_request_complete(buf: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{start, HoneypotHandle};
+    use crate::{HoneypotHandle, start};
     use aisafeguard_core::config::{HoneypotConfig, ListenerConfig};
     use aisafeguard_core::event::{EventBus, SecurityEvent};
     use std::time::Duration;
@@ -867,12 +873,17 @@ mod tests {
             let mut c = tokio::net::TcpStream::connect(("127.0.0.1", port))
                 .await
                 .unwrap();
-            c.write_all(format!("GET {path} HTTP/1.1
+            c.write_all(
+                format!(
+                    "GET {path} HTTP/1.1
 Host: x
 
-").as_bytes())
-                .await
-                .unwrap();
+"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
             let mut resp = vec![0u8; 2048];
             let n = c.read(&mut resp).await.unwrap();
             let body = String::from_utf8_lossy(&resp[..n]).to_string();

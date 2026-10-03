@@ -344,13 +344,13 @@ pub mod nft {
         protocol: crate::Protocol,
     ) -> Vec<&'static str> {
         use crate::{Direction, Protocol};
+        // 出站必须落 OUT 集合（旧实现把 Out+Tcp/Udp 并进 In 臂——出站端口级
+        // 封禁实际写在入站链上，add/remove 对称但功能失效）
         let (tcp, udp) = match (direction, protocol) {
-            (Direction::In, Protocol::Tcp) | (Direction::Out, Protocol::Tcp) => {
-                (Some(SET_PORT_TCP_IN), None)
-            }
-            (Direction::In, Protocol::Udp) | (Direction::Out, Protocol::Udp) => {
-                (None, Some(SET_PORT_UDP_IN))
-            }
+            (Direction::In, Protocol::Tcp) => (Some(SET_PORT_TCP_IN), None),
+            (Direction::In, Protocol::Udp) => (None, Some(SET_PORT_UDP_IN)),
+            (Direction::Out, Protocol::Tcp) => (Some(SET_PORT_TCP_OUT), None),
+            (Direction::Out, Protocol::Udp) => (None, Some(SET_PORT_UDP_OUT)),
             (Direction::In, _) => (Some(SET_PORT_TCP_IN), Some(SET_PORT_UDP_IN)),
             (Direction::Out, _) => (Some(SET_PORT_TCP_OUT), Some(SET_PORT_UDP_OUT)),
         };

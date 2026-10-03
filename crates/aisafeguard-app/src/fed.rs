@@ -141,7 +141,11 @@ impl OrgFeed {
 
     fn since(&self, after: u64) -> (Vec<(u64, serde_json::Value)>, u64) {
         (
-            self.items.iter().filter(|(id, _)| *id > after).cloned().collect(),
+            self.items
+                .iter()
+                .filter(|(id, _)| *id > after)
+                .cloned()
+                .collect(),
             self.next_id,
         )
     }
@@ -170,7 +174,11 @@ fn append_audit_log(data_dir: &Path, env: &Envelope, now: i64) {
         "envelope": env,
     });
     use std::io::Write as _;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = writeln!(f, "{line}");
     }
 }
@@ -409,8 +417,7 @@ fn gate_envelope(state: &FedState, peer: &FedPeer, body: &Bytes) -> Result<Gate,
         ));
     }
     let cap = state.engine.config().fed.inbound_rate_per_min;
-    if !state.limiter.lock().unwrap().check(&env.node, now, cap)
-        && env.ty != fedproto::types::HELLO
+    if !state.limiter.lock().unwrap().check(&env.node, now, cap) && env.ty != fedproto::types::HELLO
     {
         state.stats.rate_limited.fetch_add(1, Ordering::Relaxed);
         return Err(err_status(
@@ -423,7 +430,10 @@ fn gate_envelope(state: &FedState, peer: &FedPeer, body: &Bytes) -> Result<Gate,
     }
     let mut gate = state.gate.lock().unwrap();
     // 6a) 幂等：24h 窗内 (node, seq) 已见 = 补传重发，跳过但按成功应答
-    if !gate.dedup().first_time(&env.node, env.seq, now, fedproto::REPLAY_WINDOW_SECS) {
+    if !gate
+        .dedup()
+        .first_time(&env.node, env.seq, now, fedproto::REPLAY_WINDOW_SECS)
+    {
         state.stats.duplicates.fetch_add(1, Ordering::Relaxed);
         return Ok(Gate::Duplicate(Box::new(env)));
     }
@@ -473,7 +483,12 @@ async fn fed_hello(
             .map(|mut c| c.set_offset(&env.node, offset))
             .ok();
     }
-    let members = state.engine.store.list_fed_members().unwrap_or_default().len();
+    let members = state
+        .engine
+        .store
+        .list_fed_members()
+        .unwrap_or_default()
+        .len();
     Json(json!({
         "ok": true,
         "proto": fedproto::PROTO,
@@ -653,7 +668,11 @@ async fn fed_events(
                         )
                     })
                     .unwrap_or(false);
-                let severity = if boosted { "critical" } else { oc.severity.as_str() };
+                let severity = if boosted {
+                    "critical"
+                } else {
+                    oc.severity.as_str()
+                };
                 let sugg = json!({
                     "type": "org-suggestion",
                     "suggestion": {
@@ -679,7 +698,11 @@ async fn fed_events(
     }
     for oc in &emitted {
         state.engine.bus.publish(SecurityEvent::engine(
-            if oc.severity == "critical" { "warn" } else { "info" },
+            if oc.severity == "critical" {
+                "warn"
+            } else {
+                "info"
+            },
             format!(
                 "组织印证：{} 「{}」由 {} 个节点独立观测（{}）——仅加置信，处置仍归各节点本地决策",
                 oc.dim.as_str(),
@@ -867,7 +890,8 @@ async fn fed_proposals(
             let key = format!(
                 "block:{}:{}",
                 valid.remote_ip,
-                valid.local_port
+                valid
+                    .local_port
                     .map(|p| p.to_string())
                     .unwrap_or_else(|| "any".into())
             );
@@ -884,7 +908,11 @@ async fn fed_proposals(
                     )
                 })
                 .unwrap_or(false);
-            let severity = if boosted { "critical" } else { valid.severity.as_str() };
+            let severity = if boosted {
+                "critical"
+            } else {
+                valid.severity.as_str()
+            };
             let sugg = json!({
                 "type": "org-suggestion",
                 "suggestion": {
@@ -1292,8 +1320,8 @@ pub fn cmd_audit_stix(
         )
     })?;
     let key = crate::fedproto::load_signing_key(&key_pem).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let pkg = crate::stix::sign_package(node, &key, &bundle, now)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let pkg =
+        crate::stix::sign_package(node, &key, &bundle, now).map_err(|e| anyhow::anyhow!("{e}"))?;
     std::fs::write(out, serde_json::to_string_pretty(&pkg)?)?;
     let n_ind = bundle["objects"]
         .as_array()
@@ -1316,9 +1344,7 @@ pub fn cmd_stix_import(data_dir: &Path, path: &Path) -> anyhow::Result<()> {
     let cert_path = certs_dir(data_dir).join(format!("{node}.pem"));
     let der = read_pem_certs(&cert_path)
         .map_err(|e| {
-            anyhow::anyhow!(
-                "签发方证书不可读（{cert_path:?}）: {e} —— 导入要求先取得该成员证书"
-            )
+            anyhow::anyhow!("签发方证书不可读（{cert_path:?}）: {e} —— 导入要求先取得该成员证书")
         })?
         .remove(0);
     crate::stix::verify_package(&pkg, der.as_ref())
@@ -1418,7 +1444,12 @@ pub fn cmd_expect(data_dir: &Path, node: &str, fp: &str) -> anyhow::Result<()> {
 /// `fed quarantine <node> [原因]` / `fed quarantine <node> --lift <指纹前缀>`（F400 软隔离）。
 /// 与吊销的区别：吊销断一切连接（驱离），隔离保留心跳与审计、只断事件/建议通道
 /// （留观察的停权）。解除需管理员提供证书指纹前缀（≥16 位十六进制）确认——防误操作。
-pub fn cmd_quarantine(data_dir: &Path, node: &str, lift_fp: &str, reason: &str) -> anyhow::Result<()> {
+pub fn cmd_quarantine(
+    data_dir: &Path,
+    node: &str,
+    lift_fp: &str,
+    reason: &str,
+) -> anyhow::Result<()> {
     if !valid_node_name(node) {
         anyhow::bail!("node 名不合法（限字母数字_-，≤32 字符）");
     }
@@ -1440,7 +1471,11 @@ pub fn do_quarantine(
 ) -> anyhow::Result<String> {
     if !lift {
         let reason = reason.trim();
-        let reason = if reason.is_empty() { "（管理员未注明原因）" } else { reason };
+        let reason = if reason.is_empty() {
+            "（管理员未注明原因）"
+        } else {
+            reason
+        };
         if !store.set_fed_member_status(node, "quarantined")? {
             anyhow::bail!("成员 {node} 不存在（先 issue-cert 并等其上线）");
         }
@@ -1521,8 +1556,8 @@ pub fn join_approval_process(
     request_json: &str,
     coord_addr: &str,
 ) -> anyhow::Result<(String, String)> {
-    let req: serde_json::Value = serde_json::from_str(request_json)
-        .map_err(|e| anyhow::anyhow!("申请文件解析失败: {e}"))?;
+    let req: serde_json::Value =
+        serde_json::from_str(request_json).map_err(|e| anyhow::anyhow!("申请文件解析失败: {e}"))?;
     if req["kind"].as_str() != Some("asg-join-request") {
         anyhow::bail!("不是入伙申请文件（kind 不符）");
     }
@@ -1534,7 +1569,8 @@ pub fn join_approval_process(
     }
     let ca_pem_path = fed_dir(data_dir).join("ca.pem");
     let ca_key_pem_path = fed_dir(data_dir).join("ca-key.pem");
-    let ca_params = rcgen::CertificateParams::from_ca_cert_pem(&std::fs::read_to_string(&ca_pem_path)?)?;
+    let ca_params =
+        rcgen::CertificateParams::from_ca_cert_pem(&std::fs::read_to_string(&ca_pem_path)?)?;
     let ca_key = rcgen::KeyPair::from_pem(&std::fs::read_to_string(&ca_key_pem_path)?)?;
     let issuer_cert = ca_params.clone().self_signed(&ca_key)?;
 
@@ -1551,9 +1587,9 @@ pub fn join_approval_process(
     params
         .distinguished_name
         .push(rcgen::DnType::CommonName, node);
-    params.subject_alt_names = vec![rcgen::SanType::DnsName(
-        rcgen::Ia5String::try_from(node.to_string())?,
-    )];
+    params.subject_alt_names = vec![rcgen::SanType::DnsName(rcgen::Ia5String::try_from(
+        node.to_string(),
+    )?)];
     let cert = params
         .signed_by(&member_key, &issuer_cert, &ca_key)
         .map_err(|e| anyhow::anyhow!("证书签发失败: {e}"))?;
@@ -1621,8 +1657,8 @@ pub fn join_import_prep(
     approval_json: &str,
     coord_addr: &str,
 ) -> anyhow::Result<JoinImported> {
-    let doc: serde_json::Value = serde_json::from_str(approval_json)
-        .map_err(|e| anyhow::anyhow!("批准包解析失败: {e}"))?;
+    let doc: serde_json::Value =
+        serde_json::from_str(approval_json).map_err(|e| anyhow::anyhow!("批准包解析失败: {e}"))?;
     if doc["kind"].as_str() != Some("asg-join-approval") {
         anyhow::bail!("不是批准包（kind 不符）");
     }
@@ -1643,17 +1679,14 @@ pub fn join_import_prep(
     }
 
     // 证书必须与本机 pending 私钥配对（公钥比对）——批准包与申请缺一不可
-    let pending_path = fed_dir(data_dir).join("pending").join(format!("{node}.pem"));
+    let pending_path = fed_dir(data_dir)
+        .join("pending")
+        .join(format!("{node}.pem"));
     let pending_pem = std::fs::read_to_string(&pending_path).map_err(|_| {
-        anyhow::anyhow!(
-            "本机没有 {} 的入伙申请私钥（先在成员侧生成入伙申请）",
-            node
-        )
+        anyhow::anyhow!("本机没有 {} 的入伙申请私钥（先在成员侧生成入伙申请）", node)
     })?;
-    let pending_key = rcgen::KeyPair::from_pem_and_sign_algo(
-        &pending_pem,
-        &rcgen::PKCS_ECDSA_P256_SHA256,
-    )?;
+    let pending_key =
+        rcgen::KeyPair::from_pem_and_sign_algo(&pending_pem, &rcgen::PKCS_ECDSA_P256_SHA256)?;
     let der_b64 = pem_blocks(cert_pem, "CERTIFICATE")
         .into_iter()
         .next()
@@ -1826,10 +1859,7 @@ pub async fn serve_coordinator(engine: Arc<EngineHandle>) -> Result<(), String> 
                 .peer_certificates()
                 .and_then(|c| c.first())
                 .map(|c| c.as_ref().to_vec());
-            let cert_fp = leaf_der
-                .as_ref()
-                .map(|d| cert_fp_of(d))
-                .unwrap_or_default();
+            let cert_fp = leaf_der.as_ref().map(|d| cert_fp_of(d)).unwrap_or_default();
             // 吊销检查（0.4.0 C1）：立即生效（每次连接读文件），命中拒连并留审计事件
             if let Some(reason) = check_not_revoked(&data_dir, &cert_fp) {
                 bus.publish(SecurityEvent::engine(
@@ -1933,7 +1963,9 @@ async fn post_envelope(
             let status = r.status().as_u16();
             let body = r.text().await.unwrap_or_default();
             if (200..300).contains(&status) {
-                serde_json::from_str(&body).map(SendOutcome::Ok).unwrap_or(SendOutcome::Ok(json!({})))
+                serde_json::from_str(&body)
+                    .map(SendOutcome::Ok)
+                    .unwrap_or(SendOutcome::Ok(json!({})))
             } else {
                 SendOutcome::Rejected(status, body)
             }
@@ -2639,16 +2671,35 @@ mod tests {
             join_approval_process(&coord_dir, &request_json, "https://192.168.1.10:7421").unwrap();
         assert_eq!(node, "pc-2");
         assert!(approval_json.contains("asg-join-approval"));
-        let expected = std::fs::read_to_string(coord_dir.join("fed").join("expected.json")).unwrap();
+        let expected =
+            std::fs::read_to_string(coord_dir.join("fed").join("expected.json")).unwrap();
         assert!(expected.contains("pc-2"), "批准必须自动预登记指纹");
 
         // 成员导入：证书落位 + pending 清理
         let imported =
             join_import_prep(&member_dir, &approval_json, "https://192.168.1.10:7421").unwrap();
         assert_eq!(imported.node, "pc-2");
-        assert!(member_dir.join("fed").join("certs").join("pc-2.pem").exists());
-        assert!(member_dir.join("fed").join("certs").join("pc-2-key.pem").exists());
-        assert!(!member_dir.join("fed").join("pending").join("pc-2.pem").exists());
+        assert!(
+            member_dir
+                .join("fed")
+                .join("certs")
+                .join("pc-2.pem")
+                .exists()
+        );
+        assert!(
+            member_dir
+                .join("fed")
+                .join("certs")
+                .join("pc-2-key.pem")
+                .exists()
+        );
+        assert!(
+            !member_dir
+                .join("fed")
+                .join("pending")
+                .join("pc-2.pem")
+                .exists()
+        );
         assert!(member_dir.join("fed").join("ca.pem").exists());
 
         // 重复导入拒绝：pending 已清，无申请私钥可配对

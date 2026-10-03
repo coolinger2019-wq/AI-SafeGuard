@@ -115,10 +115,13 @@ impl AisafeApp {
 
     /// 监听表编辑器：启停/名称/协议/端口/增删行 + 基础格式校验（保存时）
     pub(crate) fn honeypot_listener_table(&mut self, ui: &mut egui::Ui, draft: &mut AppConfig) {
-        section(ui, format!(
-            "监听表（{} 行，改动需重启生效）",
-            draft.honeypot.listeners.len()
-        ));
+        section(
+            ui,
+            format!(
+                "监听表（{} 行，改动需重启生效）",
+                draft.honeypot.listeners.len()
+            ),
+        );
         // 端口列文本缓冲与监听表行数对齐（增删行时同步维护，此处兜底重建）
         if self.settings_listener_ports.len() != draft.honeypot.listeners.len() {
             self.settings_listener_ports = draft
@@ -150,8 +153,7 @@ impl AisafeApp {
                 for (i, l) in draft.honeypot.listeners.iter_mut().enumerate() {
                     ui.checkbox(&mut l.enabled, "");
                     ui.add(
-                        egui::TextEdit::singleline(&mut l.name)
-                            .desired_width(cell_w.min(120.0)),
+                        egui::TextEdit::singleline(&mut l.name).desired_width(cell_w.min(120.0)),
                     );
                     egui::ComboBox::from_id_salt(("listener-kind", i))
                         .selected_text(kind_display(&l.kind))
@@ -185,10 +187,12 @@ impl AisafeApp {
                 self.settings_listener_ports.push("3307".into());
             }
             ui.label(
-                RichText::new("协议：SSH / HTTP / Telnet / Generic / MySQL / Redis；端口 1-65535 且不得重复。\
-某一行绑定失败不影响其他监听器。")
-                    .size(type_scale::CAPTION)
-                    .color(text_dim()),
+                RichText::new(
+                    "协议：SSH / HTTP / Telnet / Generic / MySQL / Redis；端口 1-65535 且不得重复。\
+某一行绑定失败不影响其他监听器。",
+                )
+                .size(type_scale::CAPTION)
+                .color(text_dim()),
             );
         });
     }
@@ -317,7 +321,11 @@ fn listener_status_list(
     // 这里不做分栏/分块，杜绝"算出来的列数和实际渲染错位导致整条不渲染"。
     for (ki, kind) in LISTENER_KINDS.iter().enumerate() {
         let proto = kind_display(kind);
-        let cfg_idx = draft.honeypot.listeners.iter().position(|l| l.kind == *kind);
+        let cfg_idx = draft
+            .honeypot
+            .listeners
+            .iter()
+            .position(|l| l.kind == *kind);
         let info = cfg_idx.and_then(|i| {
             let name = &draft.honeypot.listeners[i].name;
             listeners.iter().find(|l| &l.name == name)
@@ -394,9 +402,7 @@ fn listener_status_list(
                                 }
                                 (Some(_), None) => ("● 已停止".to_string(), text_dim()),
                             };
-                            ui.label(
-                                RichText::new(state).size(type_scale::CAPTION).color(color),
-                            );
+                            ui.label(RichText::new(state).size(type_scale::CAPTION).color(color));
                         },
                     );
                     // ⑤ 操作：已配置给「热切换开关 + 配置」，未配置给「+ 添加」
@@ -407,9 +413,8 @@ fn listener_status_list(
                             Some(i) => {
                                 // 热切换（0.5.12）：按钮按真实 bind 状态显示目标动作——
                                 // 运行中给「停止」，否则（含绑定失败重试）给「启动」
-                                let running_now = info
-                                    .map(|l| l.running && honeypot_enabled)
-                                    .unwrap_or(false);
+                                let running_now =
+                                    info.map(|l| l.running && honeypot_enabled).unwrap_or(false);
                                 let label = if running_now { "停止" } else { "启动" };
                                 if ui
                                     .button(label)
@@ -451,7 +456,10 @@ fn listener_status_list(
 }
 
 /// 状态判定：以引擎的真实 bind 结果为准，「配置里有」≠「真的在跑」。
-fn running_state(l: &crate::engine::ListenerInfo, honeypot_enabled: bool) -> (&'static str, Color32) {
+fn running_state(
+    l: &crate::engine::ListenerInfo,
+    honeypot_enabled: bool,
+) -> (&'static str, Color32) {
     if l.mode == "未启用" {
         ("未启用", text_dim())
     } else if l.running && honeypot_enabled {
@@ -478,76 +486,72 @@ impl AisafeApp {
         }
         let cur = cfg.honeypot.listeners[idx].clone();
         if self.hp_name_buf.is_empty() {
-        self.hp_name_buf = cur.name.clone();
-    }
+            self.hp_name_buf = cur.name.clone();
+        }
 
-    let mut action: Option<ListenerAction> = None;
-    Frame::new()
-        .fill(bg_card())
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::same(14))
-        .stroke(Stroke::new(1.0, border()))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(format!("配置：{}", kind_display(&cur.kind)))
-                        .size(type_scale::SECTION)
-                        .strong(),
-                );
-                chip(ui, "重启后生效", warn());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("收起").clicked() {
-                        action = Some(ListenerAction::OpenConfig(usize::MAX));
-                    }
-                });
-            });
-            ui.add_space(space::S);
-
-            // 名称 / 协议 / 端口：每行一个字段，避免横向布局里换行标签拿不到宽度
-            ui.horizontal(|ui| {
-                ui.label(caption("名称").color(text_dim()));
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.hp_name_buf).desired_width(180.0),
-                );
-            });
-            let kinds: Vec<String> = LISTENER_KINDS.iter().map(|k| (*k).to_string()).collect();
-            let mut kind = cur.kind.clone();
-            ui.horizontal(|ui| {
-                ui.label(caption("协议").color(text_dim()));
-                egui::ComboBox::from_id_salt("hp-config-kind")
-                    .selected_text(kind_display(&kind))
-                    .show_ui(ui, |ui| {
-                        for k in &kinds {
-                            ui.selectable_value(&mut kind, k.clone(), kind_display(k));
+        let mut action: Option<ListenerAction> = None;
+        Frame::new()
+            .fill(bg_card())
+            .corner_radius(CornerRadius::same(8))
+            .inner_margin(Margin::same(14))
+            .stroke(Stroke::new(1.0, border()))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("配置：{}", kind_display(&cur.kind)))
+                            .size(type_scale::SECTION)
+                            .strong(),
+                    );
+                    chip(ui, "重启后生效", warn());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("收起").clicked() {
+                            action = Some(ListenerAction::OpenConfig(usize::MAX));
                         }
                     });
-            });
-            ui.horizontal(|ui| {
-                ui.label(caption("端口").color(text_dim()));
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.hp_port_buf).desired_width(80.0),
-                );
-                if ui.button("保存该监听器").clicked() {
-                    match self.hp_save_edits(idx, &kind) {
-                        Ok(()) => {
-                            self.hp_config_open = None;
-                            self.hp_name_buf.clear();
+                });
+                ui.add_space(space::S);
+
+                // 名称 / 协议 / 端口：每行一个字段，避免横向布局里换行标签拿不到宽度
+                ui.horizontal(|ui| {
+                    ui.label(caption("名称").color(text_dim()));
+                    ui.add(egui::TextEdit::singleline(&mut self.hp_name_buf).desired_width(180.0));
+                });
+                let kinds: Vec<String> = LISTENER_KINDS.iter().map(|k| (*k).to_string()).collect();
+                let mut kind = cur.kind.clone();
+                ui.horizontal(|ui| {
+                    ui.label(caption("协议").color(text_dim()));
+                    egui::ComboBox::from_id_salt("hp-config-kind")
+                        .selected_text(kind_display(&kind))
+                        .show_ui(ui, |ui| {
+                            for k in &kinds {
+                                ui.selectable_value(&mut kind, k.clone(), kind_display(k));
+                            }
+                        });
+                });
+                ui.horizontal(|ui| {
+                    ui.label(caption("端口").color(text_dim()));
+                    ui.add(egui::TextEdit::singleline(&mut self.hp_port_buf).desired_width(80.0));
+                    if ui.button("保存该监听器").clicked() {
+                        match self.hp_save_edits(idx, &kind) {
+                            Ok(()) => {
+                                self.hp_config_open = None;
+                                self.hp_name_buf.clear();
+                            }
+                            Err(msg) => self.set_toast(msg),
                         }
-                        Err(msg) => self.set_toast(msg),
                     }
-                }
-            });
-            ui.add_space(space::XS);
-            ui.label(
-                RichText::new(
-                    "协议专属设置：SSH/Telnet 的假 Shell 开关与伪装用户名/主机名、\
+                });
+                ui.add_space(space::XS);
+                ui.label(
+                    RichText::new(
+                        "协议专属设置：SSH/Telnet 的假 Shell 开关与伪装用户名/主机名、\
 凭证采集、蜜饵 canary 都在下方对应分区——它们在配置里是全局节，不随单个监听器走。",
-                )
-                .size(type_scale::CAPTION)
-                .color(text_dim()),
-            );
-        });
+                    )
+                    .size(type_scale::CAPTION)
+                    .color(text_dim()),
+                );
+            });
         action
     }
 }

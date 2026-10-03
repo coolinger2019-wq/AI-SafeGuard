@@ -247,7 +247,10 @@ impl Console for RemoteConsole {
 
     fn join_request_create(&self, node: &str) -> anyhow::Result<(String, String)> {
         let v: serde_json::Value = self
-            .post_json("/api/fed/join/request", &serde_json::json!({ "node": node }))?
+            .post_json(
+                "/api/fed/join/request",
+                &serde_json::json!({ "node": node }),
+            )?
             .json()?;
         Ok((
             v["request_json"].as_str().unwrap_or_default().to_string(),

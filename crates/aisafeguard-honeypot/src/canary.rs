@@ -115,16 +115,10 @@ pub(crate) fn place_and_watch_fs_canaries(
                         watched.push(path.clone());
                         ("info", format!("蜜饵文件已放置: {}", path.display()))
                     }
-                    Err(e) => (
-                        "warn",
-                        format!("蜜饵文件写入失败 {}: {e}", path.display()),
-                    ),
+                    Err(e) => ("warn", format!("蜜饵文件写入失败 {}: {e}", path.display())),
                 }
             }
-            Err(e) => (
-                "warn",
-                format!("蜜饵路径被拒绝 {}: {e}", path.display()),
-            ),
+            Err(e) => ("warn", format!("蜜饵路径被拒绝 {}: {e}", path.display())),
         };
         bus.publish(SecurityEvent::engine(level, note));
     }
@@ -188,7 +182,8 @@ fn fs_canary_content(path: &Path, canary: &CanaryState) -> String {
 
 /// 只读监听诱饵文件的读取行为（Linux inotify Access 事件），触发即发蜜罐事件。
 #[cfg(target_os = "linux")]
-fn start_fs_watcher(paths: Vec<PathBuf>, bus: EventBus, canary: Arc<CanaryState>) -> usize {    use notify::Watcher;
+fn start_fs_watcher(paths: Vec<PathBuf>, bus: EventBus, canary: Arc<CanaryState>) -> usize {
+    use notify::Watcher;
     let (tx, rx) = std::sync::mpsc::channel();
     let mut watcher = match notify::recommended_watcher(tx) {
         Ok(w) => w,
@@ -250,7 +245,6 @@ fn start_fs_watcher(paths: Vec<PathBuf>, bus: EventBus, canary: Arc<CanaryState>
     paths.len()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,7 +282,9 @@ mod tests {
         std::fs::write(&existing, b"x").unwrap();
         assert!(validate_fs_path(&existing).is_err(), "已存在路径必须拒绝");
         let _ = std::fs::remove_file(&existing);
-        let orphan = std::env::temp_dir().join(format!("no-such-dir-{}", std::process::id())).join("x.env");
+        let orphan = std::env::temp_dir()
+            .join(format!("no-such-dir-{}", std::process::id()))
+            .join("x.env");
         assert!(validate_fs_path(&orphan).is_err(), "父目录缺失必须拒绝");
     }
 }

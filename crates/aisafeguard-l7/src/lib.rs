@@ -437,25 +437,31 @@ pub fn parse_ja4(data: &[u8]) -> Option<Ja4> {
     // ALPN：取第一个值；>2 字符取首尾字符；首字节非 ASCII → "99"；无 → "00"
     let alpn: String = match ch.extensions.iter().find(|(t, _)| *t == 0x0010) {
         Some((_, d)) => {
-            // d = list_len(2) + [name_len(1) + name]*，取首项
-            let name_len = *d.get(2)? as usize;
-            let name = d.get(3..(3 + name_len).min(d.len()))?;
-            if name.is_empty() {
-                "00".to_string()
-            } else {
-                let a: String = if name.len() > 2 {
-                    [name[0], name[name.len() - 1]]
-                        .iter()
-                        .map(|b| *b as char)
-                        .collect()
-                } else {
-                    name.iter().map(|b| *b as char).collect()
-                };
-                if a.as_bytes()[0] > 127 {
-                    "99".to_string()
-                } else {
-                    a
+            // d = list_len(2) + [name_len(1) + name]*，取首项。
+            // 畸形/空 ALPN 按官方 ja4.py 语义回退 "00"，不放弃整枚指纹
+            //（否则攻击者发一个空 ALPN 扩展即可让本可算出的指纹消失）。
+            let name = d
+                .get(2)
+                .map(|b| *b as usize)
+                .filter(|n| 3 + n <= d.len())
+                .and_then(|n| d.get(3..3 + n));
+            match name {
+                Some(name) if !name.is_empty() => {
+                    let a: String = if name.len() > 2 {
+                        [name[0], name[name.len() - 1]]
+                            .iter()
+                            .map(|b| *b as char)
+                            .collect()
+                    } else {
+                        name.iter().map(|b| *b as char).collect()
+                    };
+                    if a.as_bytes()[0] > 127 {
+                        "99".to_string()
+                    } else {
+                        a
+                    }
                 }
+                _ => "00".to_string(),
             }
         }
         None => "00".to_string(),

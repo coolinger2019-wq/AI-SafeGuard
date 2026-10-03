@@ -252,11 +252,21 @@ mod tests {
         assert_eq!(source_label("org"), "组织协同");
         // TTL 语义：org 与 ai 同为灰度 trial，转正后 promoted
         assert_eq!(
-            ttl_state(&row("org", "n", Some(aisafeguard_core::now_ts() + 600), false)),
+            ttl_state(&row(
+                "org",
+                "n",
+                Some(aisafeguard_core::now_ts() + 600),
+                false
+            )),
             "trial"
         );
         assert_eq!(
-            ttl_state(&row("org", "n", Some(aisafeguard_core::now_ts() + 600), true)),
+            ttl_state(&row(
+                "org",
+                "n",
+                Some(aisafeguard_core::now_ts() + 600),
+                true
+            )),
             "promoted"
         );
         // 原因摘要模板

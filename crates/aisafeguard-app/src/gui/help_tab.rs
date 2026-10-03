@@ -83,7 +83,11 @@ fn render_markdown(ui: &mut egui::Ui, text: &str) {
         }
         if let Some(rest) = numbered_prefix(trimmed) {
             let marker = format!("{rest} ");
-            rich_inline(ui, trimmed[rest.len()..].trim_start(), Some((&marker, accent())));
+            rich_inline(
+                ui,
+                trimmed[rest.len()..].trim_start(),
+                Some((&marker, accent())),
+            );
             continue;
         }
         // 表格行：等宽展示（手册里表格仅作对齐参考）
@@ -108,7 +112,12 @@ fn mono_line(ui: &mut egui::Ui, text: &str, size: f32) {
     egui::ScrollArea::horizontal()
         .id_salt(("md-mono", text.len(), text.as_ptr() as usize))
         .show(ui, |ui| {
-            ui.label(RichText::new(text).monospace().size(size).color(text_color()));
+            ui.label(
+                RichText::new(text)
+                    .monospace()
+                    .size(size)
+                    .color(text_color()),
+            );
         });
 }
 
@@ -122,7 +131,9 @@ fn markdown_line(
     wrap_override: Option<f32>,
 ) {
     let mut job = LayoutJob::default();
-    job.wrap.max_width = wrap_override.unwrap_or_else(|| ui.available_width()).max(40.0);
+    job.wrap.max_width = wrap_override
+        .unwrap_or_else(|| ui.available_width())
+        .max(40.0);
     // 标题内也允许 **粗体** 与 `行内代码`
     job.append_inline(text, size, family, text_color());
     ui.label(job);
@@ -142,13 +153,7 @@ fn heading_with_marker(ui: &mut egui::Ui, text: &str, marker: &str, size: f32) {
             },
         );
         let wrap = (ui.available_width() - space::S).max(40.0);
-        markdown_line(
-            ui,
-            text,
-            size,
-            FontFamily::Proportional,
-            Some(wrap),
-        );
+        markdown_line(ui, text, size, FontFamily::Proportional, Some(wrap));
     });
 }
 
@@ -169,7 +174,12 @@ fn rich_inline(ui: &mut egui::Ui, text: &str, marker: Option<(&str, Color32)>) {
             },
         );
     }
-    job.append_inline(text, type_scale::BODY, FontFamily::Proportional, text_color());
+    job.append_inline(
+        text,
+        type_scale::BODY,
+        FontFamily::Proportional,
+        text_color(),
+    );
     ui.label(job);
 }
 

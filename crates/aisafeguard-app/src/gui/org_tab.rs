@@ -324,7 +324,11 @@ impl AisafeApp {
                             "corroboration" => format!(
                                 "{} 节点 · 复验{}",
                                 e.nodes_count,
-                                if e.detail == "hit" { "命中" } else { "未命中" }
+                                if e.detail == "hit" {
+                                    "命中"
+                                } else {
+                                    "未命中"
+                                }
                             ),
                             "fp-flag" => format!("{} 节点标记误报", e.nodes_count),
                             "quorum" => format!("{} 节点采纳", e.nodes_count),

@@ -26,7 +26,9 @@ fn b64url(data: &[u8]) -> String {
 }
 
 fn unb64url(text: &str) -> Option<Vec<u8>> {
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(text).ok()
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(text)
+        .ok()
 }
 
 /// SHA-256(key ‖ payload) 摘要

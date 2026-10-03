@@ -35,8 +35,14 @@ pub async fn serve(engine: Arc<EngineHandle>) {
         .route("/api/proposals", get(list_proposals))
         .route("/api/proposals/{id}/apply", post(apply_proposal))
         .route("/api/proposals/{id}/confirm", post(confirm_campaign))
-        .route("/api/honeypot/listeners/{name}/start", post(honeypot_listener_start))
-        .route("/api/honeypot/listeners/{name}/stop", post(honeypot_listener_stop))
+        .route(
+            "/api/honeypot/listeners/{name}/start",
+            post(honeypot_listener_start),
+        )
+        .route(
+            "/api/honeypot/listeners/{name}/stop",
+            post(honeypot_listener_stop),
+        )
         .route("/api/proposals/{id}/dismiss", post(dismiss_proposal))
         .route(
             "/api/feedback",
@@ -48,11 +54,11 @@ pub async fn serve(engine: Arc<EngineHandle>) {
         .route("/api/exposure/scan", post(scan_exposure))
         .route("/api/xdp/clear", post(xdp_clear))
         .route("/api/fed/panel", get(fed_panel))
-        .route("/api/fed/members/{node}/quarantine", post(fed_member_quarantine))
         .route(
-            "/api/fed/members/{node}/revoke",
-            post(fed_member_revoke),
+            "/api/fed/members/{node}/quarantine",
+            post(fed_member_quarantine),
         )
+        .route("/api/fed/members/{node}/revoke", post(fed_member_revoke))
         .route("/api/fed/join/request", post(fed_join_request))
         .route("/api/fed/join/approve", post(fed_join_approve))
         .route("/api/fed/join/import", post(fed_join_import))
@@ -261,7 +267,9 @@ async fn fed_join_request(State(s): State<AppState>, body: axum::body::Bytes) ->
         .ok()
         .and_then(|v| v["node"].as_str().map(str::to_string));
     let Some(node) = node else {
-        return err_resp(aisafeguard_core::error::Error::Config("缺少 node 字段".into()));
+        return err_resp(aisafeguard_core::error::Error::Config(
+            "缺少 node 字段".into(),
+        ));
     };
     match s.engine.join_request_create(&node) {
         Ok((request_json, fingerprint)) => Json(json!({
@@ -281,9 +289,14 @@ struct JoinApproveBody {
 
 async fn fed_join_approve(State(s): State<AppState>, body: axum::body::Bytes) -> Response {
     let Ok(b) = serde_json::from_slice::<JoinApproveBody>(&body) else {
-        return err_resp(aisafeguard_core::error::Error::Config("缺少 request_json/coord_addr 字段".into()));
+        return err_resp(aisafeguard_core::error::Error::Config(
+            "缺少 request_json/coord_addr 字段".into(),
+        ));
     };
-    match s.engine.join_approval_process(&b.request_json, &b.coord_addr) {
+    match s
+        .engine
+        .join_approval_process(&b.request_json, &b.coord_addr)
+    {
         Ok((approval_json, node)) => Json(json!({
             "ok": true, "approval_json": approval_json, "node": node,
         }))
@@ -301,7 +314,9 @@ struct JoinImportBody {
 
 async fn fed_join_import(State(s): State<AppState>, body: axum::body::Bytes) -> Response {
     let Ok(b) = serde_json::from_slice::<JoinImportBody>(&body) else {
-        return err_resp(aisafeguard_core::error::Error::Config("缺少 approval_json/coord_addr 字段".into()));
+        return err_resp(aisafeguard_core::error::Error::Config(
+            "缺少 approval_json/coord_addr 字段".into(),
+        ));
     };
     match s.engine.join_import(&b.approval_json, &b.coord_addr) {
         Ok(message) => Json(json!({ "ok": true, "message": message })).into_response(),
@@ -527,20 +542,26 @@ async fn web_console(State(s): State<AppState>) -> Response {
 async fn service_restart(State(s): State<AppState>) -> Response {
     if cfg!(windows) {
         return err_resp(aisafeguard_core::error::Error::Config(
-            "面板重启仅支持 Linux systemd 部署；Windows 请用服务管理器重启 AISafeGuard 服务"
-                .into(),
+            "面板重启仅支持 Linux systemd 部署；Windows 请用服务管理器重启 AISafeGuard 服务".into(),
         ));
     }
-    s.engine.bus.publish(aisafeguard_core::event::SecurityEvent::engine(
-        "warn",
-        "面板触发服务重启",
-    ));
+    s.engine
+        .bus
+        .publish(aisafeguard_core::event::SecurityEvent::engine(
+            "warn",
+            "面板触发服务重启",
+        ));
     // 延迟 1 秒再重启：让 HTTP 响应先走完（直接 restart 会和响应竞态，curl/页面只会看到断连）
     match std::process::Command::new("sh")
-        .args(["-c", "sleep 1; systemctl restart --no-block aisafeguard.service"])
+        .args([
+            "-c",
+            "sleep 1; systemctl restart --no-block aisafeguard.service",
+        ])
         .spawn()
     {
-        Ok(_) => Json(json!({ "ok": true, "message": "重启已触发，服务将在数秒内回来" })).into_response(),
+        Ok(_) => {
+            Json(json!({ "ok": true, "message": "重启已触发，服务将在数秒内回来" })).into_response()
+        }
         Err(e) => err_resp(aisafeguard_core::error::Error::Config(format!(
             "执行 systemctl 失败: {e}"
         ))),
@@ -550,11 +571,7 @@ async fn service_restart(State(s): State<AppState>) -> Response {
 /// config.toml 原文（文本编辑器加载用）。
 async fn get_config_raw(State(s): State<AppState>) -> Response {
     match s.engine.config_raw() {
-        Ok(raw) => (
-            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            raw,
-        )
-            .into_response(),
+        Ok(raw) => ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], raw).into_response(),
         Err(e) => err_resp(e),
     }
 }

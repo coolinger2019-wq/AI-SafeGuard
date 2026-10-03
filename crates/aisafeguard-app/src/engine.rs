@@ -11,7 +11,9 @@ use aisafeguard_core::error::{Error, Result};
 use aisafeguard_core::event::{EventBus, SecurityEvent};
 use aisafeguard_core::{now_ts, secrets};
 use aisafeguard_firewall::{BlockSpec, Direction, Firewall, Protocol, RULE_PREFIX};
-use aisafeguard_store::{AiRunRow, CredentialStore, EventRow, ProposalRow, RuleRow, StatsSummary, Store};
+use aisafeguard_store::{
+    AiRunRow, CredentialStore, EventRow, ProposalRow, RuleRow, StatsSummary, Store,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::console::Console;
@@ -419,10 +421,7 @@ impl EngineHandle {
                     with_fingerprint,
                 }
             },
-            org_metrics: self
-                .store
-                .org_metrics_since(since)
-                .unwrap_or_default(),
+            org_metrics: self.store.org_metrics_since(since).unwrap_or_default(),
             intel: {
                 let meta = self
                     .store
@@ -437,10 +436,7 @@ impl EngineHandle {
                         .as_ref()
                         .and_then(|m| m["ok"].as_bool())
                         .unwrap_or(false),
-                    last_fetch_added: meta
-                        .as_ref()
-                        .and_then(|m| m["added"].as_i64())
-                        .unwrap_or(0),
+                    last_fetch_added: meta.as_ref().and_then(|m| m["added"].as_i64()).unwrap_or(0),
                     last_fetch_active: meta
                         .as_ref()
                         .and_then(|m| m["active"].as_i64())
@@ -497,8 +493,7 @@ impl EngineHandle {
         for e in out.iter_mut() {
             let n = self.store.org_flag_count(&e.remote_ip);
             if n > 0 {
-                e.reason_summary =
-                    format!("{}（组织内 {} 节点标记误报）", e.reason_summary, n);
+                e.reason_summary = format!("{}（组织内 {} 节点标记误报）", e.reason_summary, n);
             }
         }
         Ok(out)
@@ -611,11 +606,8 @@ impl EngineHandle {
                 );
             }
         }
-        let imported = crate::fed::join_import_prep(
-            &self.config().data_dir(),
-            approval_json,
-            coord_addr,
-        )?;
+        let imported =
+            crate::fed::join_import_prep(&self.config().data_dir(), approval_json, coord_addr)?;
         let mut cfg = self.config();
         cfg.fed.enabled = true;
         cfg.fed.role = "agent".into();
@@ -717,6 +709,14 @@ impl EngineHandle {
     }
 
     pub fn apply_proposal(&self, id: i64) -> Result<RuleRow> {
+        // 原子认领（F795 C2）：pending→applying 抢占成功才继续，防并发双应用
+        // 双封禁（Web 手点 / API / 自动应用回扫三通道并发）
+        if !self
+            .store
+            .set_proposal_status_if(id, "pending", "applying", None)?
+        {
+            return Err(Error::Store(format!("建议 #{id} 不存在或已被处理")));
+        }
         let p = self
             .store
             .get_proposal(id)?
@@ -725,12 +725,6 @@ impl EngineHandle {
         // 即构成 H310 所等的人工确认，走正常 block 路径按建议自带 TTL 灰度封禁。
         // 红线不变：AI 自动应用仍只作用于 block（auto_apply_policy_ok 门控）；
         // 仅登记不封的「确认战役」语义保留在 confirm 端点（egui）。
-        if p.status != "pending" {
-            return Err(Error::Store(format!(
-                "建议 #{id} 状态为 {}，无法应用",
-                p.status
-            )));
-        }
         let direction = match p.direction.as_str() {
             "in" => Direction::In,
             _ => Direction::Out,
@@ -767,13 +761,20 @@ impl EngineHandle {
         // 灰度执行（AI 深度介入 v1）：建议应用即短 TTL 试运行，到期自动解封；
         // AI 明确给了 ttl_secs 用它的，否则用配置的默认灰度时长。人工"转正"才延长。
         let trial_ttl = p.ttl_secs.unwrap_or(self.config().ai.trial_ttl_secs as i64);
-        let row = self.add_block_ex(
+        let row = match self.add_block_ex(
             &spec,
             if org { "org" } else { "ai" },
             Some(now_ts() + trial_ttl),
-        )?;
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                // 封禁失败：认领回滚为 pending（人工可重试），不留死状态
+                let _ = self.store.set_proposal_status_if(id, "applying", "pending", None);
+                return Err(e);
+            }
+        };
         self.store
-            .set_proposal_status(id, "applied", Some(row.id))?;
+            .set_proposal_status_if(id, "applying", "applied", Some(row.id))?;
         self.bus.publish(SecurityEvent::ProposalApplied {
             ts: now_ts(),
             proposal_id: id,
@@ -783,13 +784,9 @@ impl EngineHandle {
     }
 
     pub fn dismiss_proposal(&self, id: i64) -> Result<()> {
-        let p = self
-            .store
-            .get_proposal(id)?
-            .ok_or_else(|| Error::Store(format!("建议 #{id} 不存在")))?;
-        if p.status == "pending" {
-            self.store.set_proposal_status(id, "dismissed", None)?;
-        }
+        // 原子迁移即完整语义：pending 才可驳回，无需先读（不存在/已处理均 no-op）
+        self.store
+            .set_proposal_status_if(id, "pending", "dismissed", None)?;
         Ok(())
     }
 
@@ -893,7 +890,12 @@ impl EngineHandle {
         }
         if in_config {
             let mut new_cfg = cfg.clone();
-            if let Some(row) = new_cfg.honeypot.listeners.iter_mut().find(|l| l.name == name) {
+            if let Some(row) = new_cfg
+                .honeypot
+                .listeners
+                .iter_mut()
+                .find(|l| l.name == name)
+            {
                 row.enabled = run;
             }
             new_cfg.save(&self.cfg_path)?;
@@ -933,7 +935,12 @@ impl EngineHandle {
                 p.status
             )));
         }
-        self.store.set_proposal_status(id, "applied", None)?;
+        if !self
+            .store
+            .set_proposal_status_if(id, "pending", "applied", None)?
+        {
+            return Err(Error::Store(format!("建议 #{id} 已被处理")));
+        }
         self.bus.publish(SecurityEvent::ProposalApplied {
             ts: now_ts(),
             proposal_id: id,
@@ -964,9 +971,12 @@ impl EngineHandle {
             return false;
         }
         let eng = Arc::clone(self);
+        // drop guard 复位：run_analysis 内任一 panic 都不能让 ai_running 永久卡死
+        //（否则一次 panic 断绝后续所有手动+定时分析）
+        let guard = AiRunningGuard(Arc::clone(self));
         self.rt.spawn(async move {
+            let _guard = guard;
             run_analysis(&eng).await;
-            eng.ai_running.store(false, Ordering::Relaxed);
         });
         true
     }
@@ -1016,8 +1026,8 @@ impl EngineHandle {
     /// 写盘走 toml_edit 保留原文注释与排版（F790：配置文件自带字段说明，编辑不丢），
     /// 运行态推进与 save_config 相同。返回需重启生效的项名列表（空 = 全部热更）。
     pub fn apply_config_raw(&self, raw: &str) -> Result<Vec<String>> {
-        let cfg: AppConfig = toml::from_str(raw)
-            .map_err(|e| Error::Config(format!("TOML 解析失败: {e}")))?;
+        let cfg: AppConfig =
+            toml::from_str(raw).map_err(|e| Error::Config(format!("TOML 解析失败: {e}")))?;
         let doc: toml_edit::DocumentMut = raw
             .parse()
             .map_err(|e| Error::Config(format!("TOML 解析失败: {e}")))?;
@@ -1097,6 +1107,12 @@ const SELF_API_ENDPOINTS: &[&str] = &[
     "POST /api/honeypot/listeners/{name}/start|stop — 蜜罐监听器热启停（0.5.12）",
     "GET /api/fed/panel — 组织面板数据（0.6 F500，只读）",
     "POST /api/fed/members/{node}/quarantine|lift — 软隔离与解除（0.6 F500，与 CLI 同通路）",
+    "POST /api/fed/members/{node}/revoke — 吊销驱离成员（0.7，两步确认）",
+    "POST /api/fed/join/request|approve|import — 入伙向导三件套（0.7 F740）",
+    "GET/PUT /api/config/raw — 配置原文读写（F790 Web 控制台，服务端校验落盘）",
+    "POST /api/service/restart — 服务自重启（F790 v1.1，Linux systemd）",
+    "POST /api/xdp/clear — XDP 快速层清空（0.5.1 G3）",
+    "POST /api/proposals/{id}/confirm — 观察类建议确认战役（0.5.11 H310）",
 ];
 
 /// 本产品自身攻击面快照（<self_endpoints> 段动态部分：协同开关等运行事实）。
@@ -1250,12 +1266,14 @@ pub fn tag_ioc_hit(
     if now - cache.0 > 60 {
         cache.0 = now;
         cache.1.clear();
-        cache.1.extend(store
-            .active_intel(now)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| r.source.starts_with("stix:"))
-            .map(|r| r.value));
+        cache.1.extend(
+            store
+                .active_intel(now)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|r| r.source.starts_with("stix:"))
+                .map(|r| r.value),
+        );
     }
     if cache.1.contains(&ip) && !text.contains("ioc-hit") {
         text.push_str(" [ioc-hit]");
@@ -1440,8 +1458,7 @@ pub fn spawn_credential_task(eng: &Arc<EngineHandle>) {
                 loop {
                     match aisafeguard_core::accounts::local_usernames() {
                         Ok(names) => {
-                            *accounts.write().expect("账号快照锁") =
-                                names.into_iter().collect();
+                            *accounts.write().expect("账号快照锁") = names.into_iter().collect();
                         }
                         Err(e) => eng.bus.publish(SecurityEvent::engine(
                             "warn",
@@ -1486,10 +1503,8 @@ pub fn spawn_credential_task(eng: &Arc<EngineHandle>) {
                         pass_hash: &hash,
                     };
                     if let Err(e) = cred_store.insert(record) {
-                        eng.bus.publish(SecurityEvent::engine(
-                            "error",
-                            format!("凭证入库失败: {e}"),
-                        ));
+                        eng.bus
+                            .publish(SecurityEvent::engine("error", format!("凭证入库失败: {e}")));
                         continue;
                     }
                     let Ok(ip) = remote_ip.parse::<IpAddr>() else {
@@ -1503,9 +1518,7 @@ pub fn spawn_credential_task(eng: &Arc<EngineHandle>) {
                         .expect("账号快照锁")
                         .contains(&username.to_lowercase());
                     // 1) 用户名命中本机账号 → credential_spray（直推快路径）
-                    if is_local
-                        && fire_once(&mut spray_fired, (&remote_ip, &username), now)
-                    {
+                    if is_local && fire_once(&mut spray_fired, (&remote_ip, &username), now) {
                         handle_detection(
                             &DetectionSink {
                                 fw: &*eng.firewall,
@@ -1526,9 +1539,7 @@ pub fn spawn_credential_task(eng: &Arc<EngineHandle>) {
                         );
                     }
                     // 2) 跨协议同口令 → credential_reuse（聚合告警，不直接处置）
-                    if !hash.is_empty()
-                        && fire_once(&mut reuse_fired, (&remote_ip, &hash), now)
-                    {
+                    if !hash.is_empty() && fire_once(&mut reuse_fired, (&remote_ip, &hash), now) {
                         let protocols = cred_store
                             .hash_protocol_count(&remote_ip, &hash, now - 86_400)
                             .unwrap_or(0);
@@ -1542,7 +1553,9 @@ pub fn spawn_credential_task(eng: &Arc<EngineHandle>) {
                                 },
                                 "credential_reuse",
                                 ip,
-                                &format!("同一来源跨 {protocols} 种协议提交相同口令（撞库/喷洒特征）"),
+                                &format!(
+                                    "同一来源跨 {protocols} 种协议提交相同口令（撞库/喷洒特征）"
+                                ),
                                 None,
                                 &dcfg,
                                 false,
@@ -1563,11 +1576,7 @@ pub fn spawn_credential_task(eng: &Arc<EngineHandle>) {
 }
 
 /// 同一判定键 24h 只触发一次；键集合超限先清过期项再放行新键。
-fn fire_once(
-    fired: &mut HashMap<(String, String), i64>,
-    key: (&str, &str),
-    now: i64,
-) -> bool {
+fn fire_once(fired: &mut HashMap<(String, String), i64>, key: (&str, &str), now: i64) -> bool {
     let k = (key.0.to_string(), key.1.to_string());
     if fired.get(&k).is_some_and(|t| now - *t < 86_400) {
         return false;
@@ -1611,12 +1620,11 @@ pub fn spawn_rules_task(eng: &Arc<EngineHandle>) {
                             ));
                         }
                         Err(e) => {
-                            // 整包拒绝：新包不生效；旧包（若有）保持，避免规则引擎空窗
-                            let note = format!("加载失败（整包拒绝）：{e}");
-                            eng.rules.set_current(None, &cfg.path, &note);
+                            // 整包拒绝：新包不生效，旧包（若有）保持——不动 current，
+                            // 避免一次坏文件让检测引擎当场全盲（与注释承诺一致）
                             eng.bus.publish(SecurityEvent::engine(
                                 "error",
-                                format!("规则包加载失败（整包拒绝，不半生效）: {e}"),
+                                format!("规则包加载失败（整包拒绝，不半生效，保留旧包）: {e}"),
                             ));
                         }
                     }
@@ -1963,8 +1971,10 @@ pub fn spawn_expiry_janitor(eng: &Arc<EngineHandle>) {
                     && active
                         .iter()
                         .any(|r| r.enabled && !expired_ids.contains(&r.id) && same_element(r, &row));
-                let _ = eng.store.delete_rule(row.id);
                 if covered {
+                    // 同元素仍有覆盖：防火墙元素保留（后到期规则的封禁语义），
+                    // 只清本条记账
+                    let _ = eng.store.delete_rule(row.id);
                     eng.bus.publish(SecurityEvent::engine(
                         "info",
                         format!(
@@ -1974,17 +1984,28 @@ pub fn spawn_expiry_janitor(eng: &Arc<EngineHandle>) {
                     ));
                     continue;
                 }
-                if let Err(e) = eng.firewall.remove(&name, &spec) {
-                    tracing::warn!("解封规则 {name} 失败: {e}");
+                // 先防火墙后记账：remove 失败保留记账行，下轮重试——先删记账会让
+                // remove 失败的规则变成无账孤儿（无重试、resync 也读不到）
+                match eng.firewall.remove(&name, &spec) {
+                    Ok(()) => {
+                        let _ = eng.store.delete_rule(row.id);
+                        eng.bus.publish(SecurityEvent::FirewallRuleRemoved {
+                            ts: now_ts(),
+                            name: name.clone(),
+                        });
+                        eng.bus.publish(SecurityEvent::engine(
+                            "info",
+                            format!("TTL 到期，自动解封 {name}（{}）", row.remote_ip),
+                        ));
+                    }
+                    Err(e) => {
+                        tracing::warn!("解封规则 {name} 失败（保留记账下轮重试）: {e}");
+                        eng.bus.publish(SecurityEvent::engine(
+                            "error",
+                            format!("解封规则 {name}（{}）失败，保留记账下轮重试: {e}", row.remote_ip),
+                        ));
+                    }
                 }
-                eng.bus.publish(SecurityEvent::FirewallRuleRemoved {
-                    ts: now_ts(),
-                    name: name.clone(),
-                });
-                eng.bus.publish(SecurityEvent::engine(
-                    "info",
-                    format!("TTL 到期，自动解封 {name}（{}）", row.remote_ip),
-                ));
             }
         }
     });
@@ -2056,13 +2077,12 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
             .filter(|h| !h.interaction.is_empty())
             .take(3)
             .map(|h| {
-                let commands: Vec<String> = serde_json::from_str::<
-                    Vec<aisafeguard_core::event::ShellStep>,
-                >(&h.interaction)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|s| truncate(&s.command, 200))
-                .collect();
+                let commands: Vec<String> =
+                    serde_json::from_str::<Vec<aisafeguard_core::event::ShellStep>>(&h.interaction)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|s| truncate(&s.command, 200))
+                        .collect();
                 serde_json::json!({
                     "ts": h.ts,
                     "remote_ip": h.remote_ip,
@@ -2073,7 +2093,11 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
             .collect::<Vec<_>>()
     )
     .to_string();
-    let interactions_json = if interactions_json == "[]" { None } else { Some(interactions_json) };
+    let interactions_json = if interactions_json == "[]" {
+        None
+    } else {
+        Some(interactions_json)
+    };
     // ② 凭证尝试（口令只以掩码出现；spray 标记 = 用户名与本机账号同名）
     let accounts = eng.local_accounts.read().expect("账号快照锁").clone();
     let credentials_json = match eng.credentials.recent(now_ts() - 86_400, 20) {
@@ -2107,7 +2131,11 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                 })
             })
             .collect();
-        if rows.is_empty() { None } else { Some(serde_json::json!(rows).to_string()) }
+        if rows.is_empty() {
+            None
+        } else {
+            Some(serde_json::json!(rows).to_string())
+        }
     };
     // ④ JA3/JA4 指纹（l7 开启且有指纹事件才出现）
     let fingerprints_json = match eng.store.recent_events(50, None) {
@@ -2124,7 +2152,11 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                     })
                 })
                 .collect();
-            if fps.is_empty() { None } else { Some(serde_json::json!(fps).to_string()) }
+            if fps.is_empty() {
+                None
+            } else {
+                Some(serde_json::json!(fps).to_string())
+            }
         }
         Err(_) => None,
     };
@@ -2218,6 +2250,10 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
             Ok((analysis, proposals)) => {
                 let mut created = 0i64;
                 let mut auto_applied = 0i64;
+                // 失败记账（F795 C9）：入库/应用失败不再静默消失
+                let mut dropped = 0i64;
+                let mut apply_failed = 0i64;
+                let mut first_error: Option<String> = None;
                 for p in proposals {
                     if eng
                         .store
@@ -2238,6 +2274,10 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                         &p.reason,
                         &analysis,
                     ) else {
+                        dropped += 1;
+                        if first_error.is_none() {
+                            first_error = Some("建议入库失败".into());
+                        }
                         continue;
                     };
                     eng.bus.publish(SecurityEvent::ProposalCreated {
@@ -2247,10 +2287,22 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                         reason: p.reason.clone(),
                     });
                     created += 1;
-                    if auto_apply_policy_ok(eng, &cfg, &p.action, &p.severity, &p.remote_ip, p.local_port)
-                        && eng.apply_proposal(pid).is_ok()
-                    {
-                        auto_applied += 1;
+                    if auto_apply_policy_ok(
+                        eng,
+                        &cfg,
+                        &p.action,
+                        &p.severity,
+                        &p.remote_ip,
+                        p.local_port,
+                    ) {
+                        if eng.apply_proposal(pid).is_ok() {
+                            auto_applied += 1;
+                        } else {
+                            apply_failed += 1;
+                            if first_error.is_none() {
+                                first_error = Some("自动应用失败".into());
+                            }
+                        }
                     }
                 }
                 // 存量建议回扫（F793 补全）：策略开启/阈值调整后，pending 的 block 类
@@ -2284,6 +2336,21 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                 }
                 if rescan_applied > 0 {
                     summary.push_str(&format!("，回扫补应用 {rescan_applied} 条"));
+                }
+                if dropped + apply_failed > 0 {
+                    summary.push_str(&format!(
+                        "，失败 {failed} 条（{detail}）",
+                        failed = dropped + apply_failed,
+                        detail = first_error.as_deref().unwrap_or("未知")
+                    ));
+                    eng.bus.publish(SecurityEvent::engine(
+                        "error",
+                        format!(
+                            "AI 分析产出处置失败 {failed} 条: {detail}",
+                            failed = dropped + apply_failed,
+                            detail = first_error.as_deref().unwrap_or("未知")
+                        ),
+                    ));
                 }
                 let _ = eng
                     .store
@@ -2524,7 +2591,9 @@ impl Console for EmbeddedConsole {
     }
 
     fn toggle_listener(&self, name: &str, run: bool) -> anyhow::Result<()> {
-        self.0.toggle_listener(name, run).map_err(anyhow::Error::msg)
+        self.0
+            .toggle_listener(name, run)
+            .map_err(anyhow::Error::msg)
     }
 
     fn apply_proposal(&self, id: i64) -> anyhow::Result<RuleRow> {
@@ -2650,7 +2719,10 @@ pub async fn run_intel_refresh(
     let mut dropped = 0usize; // 网段（F770 决策依据）+ 超上限截断
     for source in &cfg.sources {
         if !source.valid() {
-            tracing::warn!("情报源 {} 配置非法（name/url/confidence/kind/ttl/format 检查），跳过", source.name);
+            tracing::warn!(
+                "情报源 {} 配置非法（name/url/confidence/kind/ttl/format 检查），跳过",
+                source.name
+            );
             failures += 1;
             continue;
         }
@@ -2685,9 +2757,7 @@ pub async fn run_intel_refresh(
                         );
                         dropped += (ips.len() as u64 - source.max_entries) as usize;
                     }
-                    ips.into_iter()
-                        .take(source.max_entries as usize)
-                        .collect()
+                    ips.into_iter().take(source.max_entries as usize).collect()
                 }),
         };
         match fetched {
@@ -2705,7 +2775,10 @@ pub async fn run_intel_refresh(
             }
             Err(e) => {
                 failures += 1;
-                tracing::warn!("情报源 {} 拉取失败（跳过该源，其余源照常）: {e}", source.name);
+                tracing::warn!(
+                    "情报源 {} 拉取失败（跳过该源，其余源照常）: {e}",
+                    source.name
+                );
             }
         }
     }
@@ -2728,14 +2801,18 @@ pub async fn run_intel_refresh(
         .unwrap_or_default()
         .into_iter()
         .filter(|h| {
-            !h.remote_ip.is_empty()
-                && h.remote_ip != "unknown"
-                && seen.insert(h.remote_ip.clone())
+            !h.remote_ip.is_empty() && h.remote_ip != "unknown" && seen.insert(h.remote_ip.clone())
         })
         .map(|h| h.remote_ip)
         .collect();
-    let (added_local, _) =
-        apply_intel_source(&eng.store, eng.firewall.as_ref(), &eng.bus, &local, hits, now);
+    let (added_local, _) = apply_intel_source(
+        &eng.store,
+        eng.firewall.as_ref(),
+        &eng.bus,
+        &local,
+        hits,
+        now,
+    );
     total_added += added_local;
 
     let _ = eng.store.prune_intel(now);
@@ -2824,14 +2901,30 @@ pub(crate) fn apply_intel_source(
                 ),
                 tag: "情报".into(),
             };
-            if apply_block(firewall, store, bus, &spec, "intel", Some(now + source.ttl_secs as i64))
-                .is_ok()
+            if apply_block(
+                firewall,
+                store,
+                bus,
+                &spec,
+                "intel",
+                Some(now + source.ttl_secs as i64),
+            )
+            .is_ok()
             {
                 blocked += 1;
             }
         }
     }
     (added, blocked)
+}
+
+/// ai_running 复位守卫（F795）：触发分析的任务 panic 时随栈展开复位标志，
+/// 防一次 panic 永久卡死手动+定时分析。
+struct AiRunningGuard(Arc<EngineHandle>);
+impl Drop for AiRunningGuard {
+    fn drop(&mut self) {
+        self.0.ai_running.store(false, Ordering::Relaxed);
+    }
 }
 
 #[cfg(test)]
@@ -2842,8 +2935,8 @@ mod tests {
     /// F793 同元素判定：同 IP+方向+粒度交叠才共享元素；IP 级与端口级互不干扰。
     #[test]
     fn same_element_matches_ip_direction_and_scope() {
-        let rule = |ip: &str, dir: &str, proto: &str, port: Option<u16>| {
-            aisafeguard_store::RuleRow {
+        let rule =
+            |ip: &str, dir: &str, proto: &str, port: Option<u16>| aisafeguard_store::RuleRow {
                 id: 0,
                 created_ts: 0,
                 name: String::new(),
@@ -2857,8 +2950,7 @@ mod tests {
                 expires_ts: Some(0),
                 tag: String::new(),
                 promoted: false,
-            }
-        };
+            };
         let a = rule("1.2.3.4", "in", "any", None);
         // 同 IP 同方向 IP 级 → 同元素（协议不同不分裂 IP 级元素）
         assert!(same_element(&a, &rule("1.2.3.4", "in", "any", None)));
@@ -2937,7 +3029,10 @@ mod tests {
                 true,
             )])
             .unwrap();
-        assert!(!auto_apply_guard_ok(&store, &ai, "5.6.7.8", now), "在库零观测不放行");
+        assert!(
+            !auto_apply_guard_ok(&store, &ai, "5.6.7.8", now),
+            "在库零观测不放行"
+        );
         store.insert_event(&honeypot_hit("5.6.7.8")).unwrap();
         assert!(auto_apply_guard_ok(&store, &ai, "5.6.7.8", now));
 
@@ -2947,7 +3042,10 @@ mod tests {
             ..Default::default()
         };
         store.insert_event(&detection("3.3.3.3")).unwrap();
-        assert!(!auto_apply_guard_ok(&store, &ai_strict, "3.3.3.3", now), "阈值=2 单次检测不放行");
+        assert!(
+            !auto_apply_guard_ok(&store, &ai_strict, "3.3.3.3", now),
+            "阈值=2 单次检测不放行"
+        );
         store.insert_event(&detection("3.3.3.3")).unwrap();
         assert!(auto_apply_guard_ok(&store, &ai_strict, "3.3.3.3", now));
 
@@ -2956,9 +3054,17 @@ mod tests {
             auto_apply_intel_min_hits: 2,
             ..Default::default()
         };
-        assert!(!auto_apply_guard_ok(&store, &ai_intel_strict, "5.6.7.8", now), "阈值=2 单次观测不放行");
+        assert!(
+            !auto_apply_guard_ok(&store, &ai_intel_strict, "5.6.7.8", now),
+            "阈值=2 单次观测不放行"
+        );
         store.insert_event(&honeypot_hit("5.6.7.8")).unwrap();
-        assert!(auto_apply_guard_ok(&store, &ai_intel_strict, "5.6.7.8", now));
+        assert!(auto_apply_guard_ok(
+            &store,
+            &ai_intel_strict,
+            "5.6.7.8",
+            now
+        ));
 
         // 运营者豁免：清单内 IP 即使有检测也不放行（人工批准不受此限）
         let ai_exempt = AiConfig {
@@ -2984,7 +3090,10 @@ mod tests {
                 .unwrap();
         }
         store.insert_event(&detection("2.2.2.2")).unwrap();
-        assert!(!auto_apply_guard_ok(&store, &ai, "2.2.2.2", now), "达限额不放行");
+        assert!(
+            !auto_apply_guard_ok(&store, &ai, "2.2.2.2", now),
+            "达限额不放行"
+        );
         let ai_uncapped = AiConfig {
             auto_apply_max_per_day: 0,
             ..Default::default()

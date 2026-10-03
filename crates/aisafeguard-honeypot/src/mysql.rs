@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use aisafeguard_core::event::ShellStep;
 
-use crate::{sanitize, SessionOutcome, MAX_PAYLOAD};
+use crate::{MAX_PAYLOAD, SessionOutcome, sanitize};
 
 #[cfg(test)]
 // 生产默认值已收口到 [honeypot.fingerprint].mysql_version（config.rs）；此处供测试断言
@@ -23,9 +23,7 @@ const PACKET_TIMEOUT: Duration = Duration::from_secs(10);
 // ---------- 包帧 ----------
 
 /// 读一个 MySQL 包:[len 3LE][seq][payload]。超长包视为畸形 → Err（调用方断开）。
-async fn read_packet(
-    s: &mut tokio::net::TcpStream,
-) -> std::io::Result<(u8, Vec<u8>)> {
+async fn read_packet(s: &mut tokio::net::TcpStream) -> std::io::Result<(u8, Vec<u8>)> {
     use tokio::io::AsyncReadExt;
     let mut hdr = [0u8; 4];
     tokio::time::timeout(PACKET_TIMEOUT, s.read_exact(&mut hdr)).await??;
@@ -333,11 +331,7 @@ pub(crate) async fn mysql_session(
         summary,
         payload: payload_text,
         http_hint: None,
-        interaction: if steps.is_empty() {
-            None
-        } else {
-            Some(steps)
-        },
+        interaction: if steps.is_empty() { None } else { Some(steps) },
         credentials,
     })
 }
@@ -402,7 +396,9 @@ mod tests {
             let _ = parse_handshake_username(&bytes);
             if let Ok(text) = std::str::from_utf8(&bytes) {
                 match classify_query(text) {
-                    QueryKind::Select | QueryKind::Show | QueryKind::ShowDatabases
+                    QueryKind::Select
+                    | QueryKind::Show
+                    | QueryKind::ShowDatabases
                     | QueryKind::Other => {}
                 }
             }
@@ -435,7 +431,7 @@ mod tests {
 
     #[tokio::test]
     async fn mysql_listener_roundtrip() {
-        use crate::{start, HoneypotHandle};
+        use crate::{HoneypotHandle, start};
         use aisafeguard_core::config::{HoneypotConfig, ListenerConfig};
         use aisafeguard_core::event::{EventBus, SecurityEvent};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

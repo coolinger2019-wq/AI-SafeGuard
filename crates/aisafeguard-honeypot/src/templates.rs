@@ -57,6 +57,8 @@ pub(crate) struct TemplateRegistry {
     root: PathBuf,
     /// 模板名 → 关联文件快照（路径, mtime, 长度）
     files: Mutex<HashMap<String, Vec<WatchedFile>>>,
+    /// 已告警过的新模板目录（去重：轮询每 5s 一次，不去重会刷屏）
+    warned_new: Mutex<std::collections::HashSet<String>>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -130,7 +132,9 @@ impl TemplateRegistry {
                         // 整包哲学的单模板化：只拒绝这一个模板
                         bus.publish(SecurityEvent::engine(
                             "warn",
-                            format!("模板 [{name}] 解析失败已拒绝（不影响其他模板与内置默认）: {e}"),
+                            format!(
+                                "模板 [{name}] 解析失败已拒绝（不影响其他模板与内置默认）: {e}"
+                            ),
                         ));
                     }
                 }
@@ -150,6 +154,7 @@ impl TemplateRegistry {
                 set: RwLock::new(set),
                 root: root.to_path_buf(),
                 files: Mutex::new(files),
+                warned_new: Mutex::new(std::collections::HashSet::new()),
             }),
             extra_listeners,
         )
@@ -177,7 +182,10 @@ impl TemplateRegistry {
                     changed = true; // 文件被删：保留旧内容，告警
                     bus.publish(SecurityEvent::engine(
                         "warn",
-                        format!("模板 [{name}] 的文件丢失: {}（沿用上一份内容）", path.display()),
+                        format!(
+                            "模板 [{name}] 的文件丢失: {}（沿用上一份内容）",
+                            path.display()
+                        ),
                     ));
                     continue;
                 };
@@ -230,15 +238,25 @@ impl TemplateRegistry {
                 }
             }
         }
-        // 新模板目录出现 = 结构性变更，只能重启生效
+        // 新模板目录出现 = 结构性变更，只能重启生效（告警去重：同一目录只发一次）
         if let Ok(rd) = std::fs::read_dir(&self.root) {
             for entry in rd.flatten() {
                 let p = entry.path();
                 if !p.is_dir() {
                     continue;
                 }
-                let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                if !name.is_empty() && !files.contains_key(&name) {
+                let name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let first_warn = !name.is_empty()
+                    && !files.contains_key(&name)
+                    && self
+                        .warned_new
+                        .lock()
+                        .map(|mut s| s.insert(name.clone()))
+                        .unwrap_or(false);
+                if first_warn {
                     bus.publish(SecurityEvent::engine(
                         "warn",
                         format!("检测到新模板 [{name}]：增删模板需重启程序生效"),
@@ -250,19 +268,18 @@ impl TemplateRegistry {
 }
 
 /// 加载单个模板。成功返回 (http 内容, banner 覆盖, 额外监听器, 关联文件)。
-fn load_one(
-    name: &str,
-    dir: &Path,
-    used_ports: &mut Vec<u16>,
-) -> Result<LoadedTemplate, String> {
+fn load_one(name: &str, dir: &Path, used_ports: &mut Vec<u16>) -> Result<LoadedTemplate, String> {
     let spec_path = dir.join("template.toml");
-    let spec_text = std::fs::read_to_string(&spec_path)
-        .map_err(|e| format!("读取 template.toml 失败: {e}"))?;
-    let spec: TemplateSpec = toml::from_str(&spec_text)
-        .map_err(|e| format!("template.toml 解析失败: {e}"))?;
+    let spec_text =
+        std::fs::read_to_string(&spec_path).map_err(|e| format!("读取 template.toml 失败: {e}"))?;
+    let spec: TemplateSpec =
+        toml::from_str(&spec_text).map_err(|e| format!("template.toml 解析失败: {e}"))?;
 
-    let mut watched: Vec<WatchedFile> =
-        vec![(spec_path.clone(), file_stamp(&spec_path)?, file_len(&spec_path)?)];
+    let mut watched: Vec<WatchedFile> = vec![(
+        spec_path.clone(),
+        file_stamp(&spec_path)?,
+        file_len(&spec_path)?,
+    )];
 
     // 端口冲突：与已有监听器或其他模板拒绝（沿用「占用检查启动拒绝」思路）。
     // 注意：只在成功时登记端口——失败的模板不得占坑
@@ -294,7 +311,11 @@ fn load_one(
         let page_path = dir.join(&spec.page);
         let page = std::fs::read_to_string(&page_path)
             .map_err(|e| format!("页面文件 {} 读取失败: {e}", page_path.display()))?;
-        watched.push((page_path, file_stamp(&dir.join(&spec.page))?, file_len(&dir.join(&spec.page))?));
+        watched.push((
+            page_path,
+            file_stamp(&dir.join(&spec.page))?,
+            file_len(&dir.join(&spec.page))?,
+        ));
         let split_keys = |raw: &str| {
             raw.split(',')
                 .map(|s| s.trim().to_lowercase())
@@ -344,12 +365,7 @@ mod tests {
     use aisafeguard_core::event::SecurityEvent;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    fn write_template(
-        root: &Path,
-        name: &str,
-        toml_text: &str,
-        page: Option<&str>,
-    ) -> PathBuf {
+    fn write_template(root: &Path, name: &str, toml_text: &str, page: Option<&str>) -> PathBuf {
         let dir = root.join(name);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("template.toml"), toml_text).unwrap();
@@ -484,7 +500,9 @@ mod tests {
             }
         }
         let mut c = conn.expect("模板监听器未就绪");
-        c.write_all(b"GET /login HTTP/1.1\r\nHost: x\r\n\r\n").await.unwrap();
+        c.write_all(b"GET /login HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
         let mut resp = Vec::new();
         let _ = c.read_to_end(&mut resp).await;
         let text = String::from_utf8_lossy(&resp);
@@ -493,8 +511,14 @@ mod tests {
         drop(c);
 
         // POST 提交 → 200 模板页 + template 标签事件
-        let mut c = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-        c.write_all(b"POST /login HTTP/1.1\r\nHost: x\r\nContent-Length: 20\r\n\r\naccount=bob&secret=pw").await.unwrap();
+        let mut c = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        c.write_all(
+            b"POST /login HTTP/1.1\r\nHost: x\r\nContent-Length: 20\r\n\r\naccount=bob&secret=pw",
+        )
+        .await
+        .unwrap();
         let mut resp = Vec::new();
         let _ = c.read_to_end(&mut resp).await;
         drop(c);
@@ -514,16 +538,15 @@ mod tests {
                     {
                         saw_template_tag = true;
                     }
-                    if interaction.is_none()
-                        && summary.contains("POST")
-                        && http_hint.is_some()
-                    {
+                    if interaction.is_none() && summary.contains("POST") && http_hint.is_some() {
                         // 凭证采集:模板表单字段(account/secret)也应被采集
                         saw_credential = summary.contains("bob") || summary.contains("bob=");
                     }
                 }
                 Ok(Ok(SecurityEvent::CredentialObserved {
-                    username, pass_hash, ..
+                    username,
+                    pass_hash,
+                    ..
                 })) => {
                     assert_eq!(username, "bob");
                     assert!(pass_hash.is_some(), "模板表单口令应被哈希采集");

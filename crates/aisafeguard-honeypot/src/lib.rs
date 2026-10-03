@@ -19,8 +19,8 @@ mod mysql;
 mod protocol;
 mod rdp;
 mod redis;
-mod smb;
 pub mod shell;
+mod smb;
 mod templates;
 
 use std::time::Duration;
@@ -29,10 +29,10 @@ use aisafeguard_l7 as l7;
 use tokio::io::AsyncReadExt;
 
 pub use http::{
-    content_length, http_request_complete, is_decoy_path, is_login_path, redact_secrets,
-    DECOY_PATHS,
+    DECOY_PATHS, content_length, http_request_complete, is_decoy_path, is_login_path,
+    redact_secrets,
 };
-pub use listener::{start, HoneypotHandle, ListenerState};
+pub use listener::{HoneypotHandle, ListenerState, start};
 
 /// 单连接会话出口（0.5.9 H102 会话模型）：协议模块填齐，handle_conn 统一发事件。
 pub(crate) struct SessionOutcome {

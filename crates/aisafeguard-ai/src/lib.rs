@@ -77,24 +77,30 @@ pub struct PromptInputs<'a> {
 }
 
 pub fn build_user_prompt(inputs: &PromptInputs<'_>) -> String {
-    let section = |tag: &str, v: Option<&str>| {
+    // 注入中和（F795）：不可信段（攻击者载荷可出现在 events/interactions/
+    // credentials/canary/feedback/org/fingerprints/intel）里的字面 `</events>`
+    // 可闭合数据标签伪造指令段——把 `</` 替换为 `<\/`（JSON 合法转义，
+    // 解析语义不变），技术上封死越出数据标签的路径，防线不再只有提示词一句话。
+    let neutral = |v: Option<&str>| v.map(|e| e.replace("</", "<\\/"));
+    let section = |tag: &str, v: Option<String>| {
         v.map(|e| format!("\n\n<{tag}>\n{e}\n</{tag}>"))
             .unwrap_or_default()
     };
     format!(
         "本机蜜罐最近 24 小时统计与最近捕获的原始记录如下（不可信数据）：\n\n<stats>\n{stats}\n</stats>\n\n<events>\n{events}\n</events>{exposure}{intel}{flows}{feedback}{self_endpoints}{interactions}{credentials}{canary}{fingerprints}{org}\n请分析并只输出 JSON。",
         stats = inputs.stats,
-        events = inputs.events,
-        exposure = section("exposure", inputs.exposure),
-        intel = section("intel", inputs.intel),
-        flows = section("flows", inputs.flows),
-        feedback = section("feedback", inputs.feedback),
-        self_endpoints = section("self_endpoints", inputs.self_endpoints),
-            interactions = section("interactions", inputs.interactions),
-            credentials = section("credentials", inputs.credentials),
-            canary = section("canary", inputs.canary),
-            fingerprints = section("fingerprints", inputs.fingerprints),
-            org = section("org", inputs.org),
+        events = neutral(Some(inputs.events)).unwrap_or_default(),
+        exposure = section("exposure", neutral(inputs.exposure)),
+        intel = section("intel", neutral(inputs.intel)),
+        flows = section("flows", neutral(inputs.flows)),
+        feedback = section("feedback", neutral(inputs.feedback)),
+        self_endpoints =
+            section("self_endpoints", inputs.self_endpoints.map(|s| s.to_string())),
+        interactions = section("interactions", neutral(inputs.interactions)),
+        credentials = section("credentials", neutral(inputs.credentials)),
+        canary = section("canary", neutral(inputs.canary)),
+        fingerprints = section("fingerprints", neutral(inputs.fingerprints)),
+        org = section("org", neutral(inputs.org)),
     )
 }
 
@@ -250,7 +256,12 @@ fn validate_proposal(v: &Value) -> Option<Proposal> {
             }
             _ => return None,
         };
-        let reason: String = v["reason"].as_str().unwrap_or("").chars().take(300).collect();
+        let reason: String = v["reason"]
+            .as_str()
+            .unwrap_or("")
+            .chars()
+            .take(300)
+            .collect();
         if reason.trim().is_empty() {
             return None;
         }

@@ -27,6 +27,11 @@ pub struct Detection {
     pub evidence: String,
 }
 
+/// 映射表键数上限：长跑内存有界（对齐 inspect.rs DETECTOR_MAP_CAP 先例——
+/// 每个出现过的来源 IP 永久留一条空 deque 会无界增长）。溢出清空全表是
+/// 可接受的退化：只影响窗口内正在累积的判定，不产生误判。
+const DETECTOR_MAP_CAP: usize = 4096;
+
 #[derive(Default)]
 struct Inner {
     /// 每来源的蜜罐触达序列 (ts, port)
@@ -62,6 +67,15 @@ impl FreqEngine {
             return Vec::new();
         }
         let mut inner = self.inner.lock().expect("频次引擎锁中毒");
+        // 键数上界：溢出清空全表（长跑内存有界；见 DETECTOR_MAP_CAP 注释）
+        if inner.scan.len() > DETECTOR_MAP_CAP
+            || inner.bruteforce.len() > DETECTOR_MAP_CAP
+            || inner.fired_at.len() > DETECTOR_MAP_CAP * 2
+        {
+            inner.scan.clear();
+            inner.bruteforce.clear();
+            inner.fired_at.clear();
+        }
         let mut out = Vec::new();
 
         // ---- 端口扫描：窗口内触达 ≥ N 个不同蜜罐端口 ----

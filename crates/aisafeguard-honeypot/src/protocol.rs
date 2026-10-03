@@ -6,11 +6,14 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
 use crate::cred::RawCredential;
-use crate::{READ_TIMEOUT, MAX_PAYLOAD, SessionOutcome, read_with_timeout, sanitize};
+use crate::{MAX_PAYLOAD, READ_TIMEOUT, SessionOutcome, read_with_timeout, sanitize};
 
 /// SSH banner 级会话。banner 来自 [honeypot.fingerprint] 或模板覆盖（H320），
 /// 发送时自动补 CRLF。
-pub(crate) async fn ssh_session(s: &mut TcpStream, banner: &str) -> std::io::Result<SessionOutcome> {
+pub(crate) async fn ssh_session(
+    s: &mut TcpStream,
+    banner: &str,
+) -> std::io::Result<SessionOutcome> {
     s.write_all(format!("{banner}\r\n").as_bytes()).await?;
     let (n, buf) = read_with_timeout(s, READ_TIMEOUT).await?;
     let text = sanitize(&buf[..n], MAX_PAYLOAD);
@@ -27,7 +30,10 @@ pub(crate) async fn ssh_session(s: &mut TcpStream, banner: &str) -> std::io::Res
 
 /// Telnet banner 级会话。greeting 来自 [honeypot.fingerprint] 或模板覆盖，
 /// 按配置字面原样发送（默认与 0.5.8 逐字节一致）。
-pub(crate) async fn telnet_session(s: &mut TcpStream, greeting: &str) -> std::io::Result<SessionOutcome> {
+pub(crate) async fn telnet_session(
+    s: &mut TcpStream,
+    greeting: &str,
+) -> std::io::Result<SessionOutcome> {
     s.write_all(greeting.as_bytes()).await?;
     let (n, buf) = read_with_timeout(s, READ_TIMEOUT).await?;
     let text = sanitize(&buf[..n], MAX_PAYLOAD);

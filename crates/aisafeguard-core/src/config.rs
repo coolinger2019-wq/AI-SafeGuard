@@ -515,7 +515,7 @@ pub struct IntelConfig {
 /// 情报源（F710）：自动封禁 = auto_block && confidence=="high" 双条件；
 /// 内网保护/TTL/审计是全局保险，任何源都不能放宽。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct IntelSource {
     /// 源标识（intel 表 source 列，如 feodo_c2 / crowdsec；限字母数字下划线）
     pub name: String,
@@ -1107,7 +1107,10 @@ auto_block = true
             "示例必须保持默认关的纪律"
         );
         let mut names = Vec::new();
-        collect_leaf_keys(&toml::Value::try_from(AppConfig::default()).expect("默认配置可序列化"), &mut names);
+        collect_leaf_keys(
+            &toml::Value::try_from(AppConfig::default()).expect("默认配置可序列化"),
+            &mut names,
+        );
         assert!(names.len() > 40, "字段收集不应为空");
         for name in names {
             assert!(

@@ -1,15 +1,15 @@
 mod api;
 mod console;
+mod corroboration;
 mod engine;
 mod explain;
-mod corroboration;
 mod fed;
 mod fedproto;
-mod stix;
 mod forward;
 mod gui;
 #[cfg(windows)]
 mod service;
+mod stix;
 #[cfg(not(windows))]
 mod service {
     pub fn service_data_dir() -> Option<std::path::PathBuf> {
@@ -434,8 +434,7 @@ fn main() -> anyhow::Result<()> {
                     eprintln!("用法: aisafeguard fed revoke <节点名|指纹> [原因]");
                     std::process::exit(2);
                 };
-                let (target, reason) =
-                    joined.split_once('\u{1}').unwrap_or((joined.as_str(), ""));
+                let (target, reason) = joined.split_once('\u{1}').unwrap_or((joined.as_str(), ""));
                 return match fed::cmd_revoke(
                     &resolve_cfg(cfg_path, data_dir)?.0.data_dir(),
                     target,
@@ -546,7 +545,9 @@ fn main() -> anyhow::Result<()> {
                     .map(|s| s.trim().to_string())
                     .map_err(|e| anyhow::anyhow!("读取 {} 失败: {e}", f.display()))?,
                 (None, None) => {
-                    anyhow::bail!("--remote 需要 --token <值> 或 --token-file <路径> 提供节点 token")
+                    anyhow::bail!(
+                        "--remote 需要 --token <值> 或 --token-file <路径> 提供节点 token"
+                    )
                 }
             };
             let rc = remote::RemoteConsole::with_base(url.clone(), token);
@@ -670,7 +671,11 @@ fn cmd_canary_decode((cfg, _): (AppConfig, PathBuf), token: Option<String>) -> a
     let payload = aisafeguard_core::canary::decode_token(key.as_bytes(), token.trim())
         .map_err(|e| anyhow::anyhow!("解码失败: {e}"))?;
     let ts = chrono::DateTime::from_timestamp(payload.ts, 0)
-        .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
+        .map(|d| {
+            d.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
         .unwrap_or_else(|| payload.ts.to_string());
     println!("蜜饵水印解码成功");
     println!("  来源节点: {}", payload.node);
@@ -843,8 +848,9 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
         });
     }
 
-    let honeypot =
-        rt.block_on(async { aisafeguard_honeypot::start(&cfg.honeypot, bus.clone(), &cfg.data_dir()) });
+    let honeypot = rt.block_on(async {
+        aisafeguard_honeypot::start(&cfg.honeypot, bus.clone(), &cfg.data_dir())
+    });
     if !cfg.honeypot.enabled {
         bus.publish(SecurityEvent::engine("info", "蜜罐功能已禁用"));
     }
@@ -870,14 +876,14 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
         honeypot,
         local_accounts: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
         credentials,
-        corroboration: Arc::new(std::sync::Mutex::new(corroboration::CorroborationEngine::default())),
+        corroboration: Arc::new(std::sync::Mutex::new(
+            corroboration::CorroborationEngine::default(),
+        )),
         // F500：fed 协议计数（恒 Some；agent/off 角色不增计数，面板展示为空）
         fed_stats: Some(Arc::new(crate::fed::FedStats::default())),
         token,
         version: VERSION,
     });
-
-
 
     // 快路径频次检测 + TTL 自动解封
     engine::spawn_detect_task(&engine);
@@ -900,13 +906,13 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
     // AI 定时分析（0.4.0 A4 接线）：任务自门控 [ai].enabled，interval/enabled 全热更
     engine.spawn_ai_task();
 
-    // 威胁情报（默认关闭，[intel].enabled 开启）
-    if cfg.intel.enabled {
-        engine::spawn_intel_task(&engine);
-    } else {
+    // 威胁情报（默认关闭）：任务自门控 [intel].enabled 且每轮重读配置——
+    // 无条件 spawn，热开启才能生效（否则「保存即热更」的提示是状态谎言）
+    engine::spawn_intel_task(&engine);
+    if !cfg.intel.enabled {
         bus.publish(SecurityEvent::engine(
             "info",
-            "威胁情报未启用（[intel].enabled）",
+            "威胁情报未启用（[intel].enabled，热开启无需重启）",
         ));
     }
 
@@ -942,7 +948,10 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
         rt.spawn(async move { api::serve(engine).await });
     }
 
-    // 组织协同（0.3）：coordinator 起独立 mTLS 监听面，agent 起上报任务
+    // 组织协同（0.3）：coordinator 起独立 mTLS 监听面（fed 角色属重启项）；
+    // agent 上报任务无条件 spawn——任务循环自门控（enabled/role/coordinator
+    // 每轮重读），入伙向导（join_import 热写 [fed] 配置）才能「无需重启」兑现
+    fed::spawn_fed_agent_task(&engine);
     if cfg.fed.enabled {
         if !cfg.fed.valid_role() || cfg.fed.node.is_empty() {
             bus.publish(SecurityEvent::engine(
@@ -1030,9 +1039,27 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
 
 fn rt_wait_ctrl_c(bundle: &EngineBundle) -> anyhow::Result<()> {
     bundle.rt.block_on(async {
-        let _ = tokio::signal::ctrl_c().await;
-    });
-    Ok(())
+        // SIGINT（Ctrl+C）+ SIGTERM（systemctl stop/restart——含产品自己的
+        // /api/service/restart）：只听 ctrl_c 会让 systemd 停机走默认硬杀，
+        // honeypot.stop() 等优雅收尾永不执行
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut term = signal(SignalKind::terminate())?;
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+        #[allow(unreachable_code)]
+        {
+            Ok::<(), anyhow::Error>(())
+        }
+    })
 }
 
 /// 本地 API token 存凭据管理器（AISafeGuard/api-token），内嵌模式使用。

@@ -43,7 +43,9 @@ allow = [
 
 [bans]
 multiple-versions = "warn"
-wildcards = "deny"
+# 内部 crate 一律 workspace 继承（0.5.12 决策：钉版本每次发版多改十行且必然漂移），
+# 在 deny 0.20 的 wildcard 检查下即 "*"——允许之；外部依赖全部带版本要求不受影响。
+wildcards = "allow"
 
 [sources]
 unknown-registry = "deny"

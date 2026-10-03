@@ -65,8 +65,10 @@ impl CredentialStore {
         // 面变大；本库只有单写者且写入频率低，回滚日志模式足够。
         #[cfg(unix)]
         {
+            // 红线：权限收紧失败 = fail-fast（静默 0644 落盘不可接受）
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| Error::Store(format!("凭证库 chmod 0600 失败: {e}")))?;
         }
         conn.execute_batch(SCHEMA)
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -76,7 +78,9 @@ impl CredentialStore {
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
-        self.conn.lock().map_err(|_| Error::Store("凭证库锁中毒".into()))
+        self.conn
+            .lock()
+            .map_err(|_| Error::Store("凭证库锁中毒".into()))
     }
 
     /// 追加一条凭证记录。
@@ -140,7 +144,8 @@ impl CredentialStore {
         let conn = self.lock()?;
         let hit: i64 = conn
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM credentials WHERE username = ?1 AND ts >= ?2)",
+                // 口径对齐 usernames_by_ip：用户名不区分大小写（"Admin" vs "admin"）
+                "SELECT EXISTS(SELECT 1 FROM credentials WHERE lower(username) = lower(?1) AND ts >= ?2)",
                 rusqlite::params![username, since],
                 |r| r.get(0),
             )
@@ -226,17 +231,59 @@ mod tests {
                 pass_hash: hash,
             }
         }
-        store.insert(rec(now, "9.9.9.9", 4444, "ssh", "ssh", "root", "$argon2id$AAA")).unwrap();
-        store.insert(rec(now, "9.9.9.9", 4444, "mysql", "mysql", "ROOT", "")).unwrap();
-        store.insert(rec(now - 40 * 86400, "8.8.8.8", 1, "ssh", "ssh", "admin", "$argon2id$BBB")).unwrap();
+        store
+            .insert(rec(
+                now,
+                "9.9.9.9",
+                4444,
+                "ssh",
+                "ssh",
+                "root",
+                "$argon2id$AAA",
+            ))
+            .unwrap();
+        store
+            .insert(rec(now, "9.9.9.9", 4444, "mysql", "mysql", "ROOT", ""))
+            .unwrap();
+        store
+            .insert(rec(
+                now - 40 * 86400,
+                "8.8.8.8",
+                1,
+                "ssh",
+                "ssh",
+                "admin",
+                "$argon2id$BBB",
+            ))
+            .unwrap();
 
         // 用户名按 lower 归一去重
         let names = store.usernames_by_ip("9.9.9.9", now - 60).unwrap();
         assert_eq!(names, vec!["root"]);
         // 跨协议同哈希
-        store.insert(rec(now, "9.9.9.9", 5555, "mysql", "mysql", "deploy", "$argon2id$AAA")).unwrap();
-        assert_eq!(store.hash_protocol_count("9.9.9.9", "$argon2id$AAA", now - 60).unwrap(), 2);
-        assert_eq!(store.hash_protocol_count("9.9.9.9", "$argon2id$CCC", now - 60).unwrap(), 0);
+        store
+            .insert(rec(
+                now,
+                "9.9.9.9",
+                5555,
+                "mysql",
+                "mysql",
+                "deploy",
+                "$argon2id$AAA",
+            ))
+            .unwrap();
+        assert_eq!(
+            store
+                .hash_protocol_count("9.9.9.9", "$argon2id$AAA", now - 60)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            store
+                .hash_protocol_count("9.9.9.9", "$argon2id$CCC", now - 60)
+                .unwrap(),
+            0
+        );
         // 保留期清理
         let pruned = store.prune(30).unwrap();
         assert_eq!(pruned, 1);

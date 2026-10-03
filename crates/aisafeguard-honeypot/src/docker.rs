@@ -4,10 +4,10 @@
 //! 的请求体本身就是 TTP（镜像名、挂载、命令），ghost 定罪零误报——合法客户端
 //! 不会在别人的 daemon 上建容器。
 
-use serde_json::{json, Value};
 use crate::canary::CanaryState;
 use crate::http::JsonRoute;
-use crate::{sanitize, GhostVerdict};
+use crate::{GhostVerdict, sanitize};
+use serde_json::{Value, json};
 
 const API_VERSION: &str = "1.43";
 const DOCKER_VERSION: &str = "24.0.7";
@@ -146,13 +146,17 @@ pub(crate) fn route(
                 }),
             }
         }
-        ("POST", p) if p.starts_with("/containers/") && (p.ends_with("/exec") || p.contains("/exec")) => {
+        ("POST", p)
+            if p.starts_with("/containers/") && (p.ends_with("/exec") || p.contains("/exec")) =>
+        {
             let body_clean = sanitize(body, 400);
             JsonRoute {
                 status: "HTTP/1.1 201 Created\r\n",
                 ctype: "application/json",
-                body: serde_json::to_vec(&json!({"Id": synthetic_id(canary, "docker/exec"), "Warnings": []}))
-                    .unwrap_or_default(),
+                body: serde_json::to_vec(
+                    &json!({"Id": synthetic_id(canary, "docker/exec"), "Warnings": []}),
+                )
+                .unwrap_or_default(),
                 label: "containers/exec".into(),
                 ghost: Some(GhostVerdict {
                     kind: "docker_ghost".into(),
@@ -204,17 +208,27 @@ mod tests {
 
     #[test]
     fn container_create_is_ghost_convicted() {
-        let cfg = json!({"Image": "alpine:latest", "Cmd": ["sh", "-c", "xmrig -o pool"]}).to_string();
+        let cfg =
+            json!({"Image": "alpine:latest", "Cmd": ["sh", "-c", "xmrig -o pool"]}).to_string();
         let r = route("POST", "/containers/create", cfg.as_bytes(), None);
         assert_eq!(r.status, "HTTP/1.1 201 Created\r\n");
         let ghost = r.ghost.expect("容器创建应定罪");
         assert_eq!(ghost.threat, "critical");
-        assert!(ghost.evidence.contains("xmrig"), "证据应含攻击者配置: {}", ghost.evidence);
+        assert!(
+            ghost.evidence.contains("xmrig"),
+            "证据应含攻击者配置: {}",
+            ghost.evidence
+        );
     }
 
     #[test]
     fn exec_and_regular_stubs() {
-        let r = route("POST", "/containers/abc/exec", br#"{"Cmd":["whoami"]}"#, None);
+        let r = route(
+            "POST",
+            "/containers/abc/exec",
+            br#"{"Cmd":["whoami"]}"#,
+            None,
+        );
         assert!(r.ghost.is_some(), "exec 应定罪");
         let r = route("POST", "/containers/abc/start", b"", None);
         assert!(r.ghost.is_none());

@@ -13,7 +13,7 @@
 //! - 导出包必须签名（节点证书 ECDSA P-256 对 bundle 规范化字节），导入验签
 //!   失败拒收（复用 fedproto 签名栈，证书来源 = 组织内成员证书）。
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::fedproto::{canonical_json, sign_with_key, verify_signature};
@@ -317,11 +317,31 @@ mod tests {
     fn feed() -> ExportFeed {
         ExportFeed {
             intel: vec![
-                ("c2".into(), "203.0.113.7".into(), "high".into(), 1_800_000_000),
-                ("scan_source".into(), "evil.example.com".into(), "local".into(), 1_800_000_000),
-                ("ja3".into(), "a67dc37ce3543d3d0f9e9e6ab1b0e5c9".into(), "fed".into(), 1_800_000_000),
+                (
+                    "c2".into(),
+                    "203.0.113.7".into(),
+                    "high".into(),
+                    1_800_000_000,
+                ),
+                (
+                    "scan_source".into(),
+                    "evil.example.com".into(),
+                    "local".into(),
+                    1_800_000_000,
+                ),
+                (
+                    "ja3".into(),
+                    "a67dc37ce3543d3d0f9e9e6ab1b0e5c9".into(),
+                    "fed".into(),
+                    1_800_000_000,
+                ),
                 // 内网地址：导出侧必须跳过（防内网拓扑泄漏）
-                ("scan_source".into(), "192.168.1.50".into(), "local".into(), 1_800_000_000),
+                (
+                    "scan_source".into(),
+                    "192.168.1.50".into(),
+                    "local".into(),
+                    1_800_000_000,
+                ),
             ],
             honeypot: vec![("203.0.113.7".into(), 12, 1_799_990_000, 1_800_000_000)],
             corr_hits: vec![
@@ -337,16 +357,22 @@ mod tests {
         assert_eq!(b["type"], "bundle");
         assert!(b["id"].as_str().unwrap().starts_with("bundle--"));
         let objs = b["objects"].as_array().unwrap();
-        for t in ["identity", "indicator", "observed-data", "sighting", "ipv4-addr"] {
-            assert!(
-                objs.iter().any(|o| o["type"] == t),
-                "缺少 {t} 对象"
-            );
+        for t in [
+            "identity",
+            "indicator",
+            "observed-data",
+            "sighting",
+            "ipv4-addr",
+        ] {
+            assert!(objs.iter().any(|o| o["type"] == t), "缺少 {t} 对象");
         }
         for o in objs {
             assert_eq!(o["spec_version"], "2.1", "每个对象带 spec_version");
             let id = o["id"].as_str().unwrap();
-            assert!(id.starts_with(o["type"].as_str().unwrap()), "id 前缀 = 类型");
+            assert!(
+                id.starts_with(o["type"].as_str().unwrap()),
+                "id 前缀 = 类型"
+            );
         }
         // indicator pattern 形态
         let ind = objs
@@ -363,7 +389,10 @@ mod tests {
         let od = objs.iter().find(|o| o["type"] == "observed-data").unwrap();
         assert_eq!(od["number_observed"], 12);
         let sco_ref = od["object_refs"].as_array().unwrap()[0].as_str().unwrap();
-        assert!(objs.iter().any(|o| o["id"] == sco_ref && o["type"] == "ipv4-addr"));
+        assert!(
+            objs.iter()
+                .any(|o| o["id"] == sco_ref && o["type"] == "ipv4-addr")
+        );
         // 内网 IP 不出现在包里（脱敏红线）
         let text = b.to_string();
         assert!(!text.contains("192.168.1.50"), "内网地址不得导出");
@@ -374,11 +403,22 @@ mod tests {
     fn bundle_never_carries_credential_material() {
         let mut f = feed();
         // 恶意构造：intel value 里混入口令样貌的字符串也只进 pattern（不可信数据）
-        f.intel.push(("domain".into(), "x".into(), "local".into(), 1_800_000_000));
+        f.intel
+            .push(("domain".into(), "x".into(), "local".into(), 1_800_000_000));
         let b = build_bundle("node-a", "0.5.12", &f, 1_800_000_000);
         let text = b.to_string();
-        for token in ["pass_hash", "password", "username", "argon", "credentials.db", "listener"] {
-            assert!(!text.to_lowercase().contains(token), "包内出现红线字段: {token}");
+        for token in [
+            "pass_hash",
+            "password",
+            "username",
+            "argon",
+            "credentials.db",
+            "listener",
+        ] {
+            assert!(
+                !text.to_lowercase().contains(token),
+                "包内出现红线字段: {token}"
+            );
         }
     }
 
@@ -411,7 +451,10 @@ mod tests {
         };
         assert!(verify_package(&pkg, &der_a).is_ok());
         // 他人证书 → 拒收
-        assert!(verify_package(&pkg, &der_b).is_err(), "非签发方证书必须拒收");
+        assert!(
+            verify_package(&pkg, &der_b).is_err(),
+            "非签发方证书必须拒收"
+        );
         // 篡改 bundle → 拒收
         let mut tampered = pkg.clone();
         tampered["bundle"]["objects"][0]["name"] = json!("attacker");
@@ -433,7 +476,9 @@ mod tests {
             .filter(|c| !c.is_whitespace())
             .collect();
         use base64::Engine as _;
-        base64::engine::general_purpose::STANDARD.decode(body).unwrap()
+        base64::engine::general_purpose::STANDARD
+            .decode(body)
+            .unwrap()
     }
 
     #[test]
@@ -452,7 +497,14 @@ mod tests {
         });
         let iocs = parse_indicators(&bundle, 1_790_000_000).unwrap();
         assert_eq!(iocs.len(), 3, "冻结子集之外的模式拒收");
-        assert_eq!(iocs[0], ImportedIoc { kind: "ip".into(), value: "203.0.113.7".into(), expires_ts: 1_800_000_000 });
+        assert_eq!(
+            iocs[0],
+            ImportedIoc {
+                kind: "ip".into(),
+                value: "203.0.113.7".into(),
+                expires_ts: 1_800_000_000
+            }
+        );
         assert_eq!(iocs[1].kind, "domain");
         // 无 valid_until → 默认 7 天
         assert_eq!(iocs[1].expires_ts, 1_790_000_000 + DEFAULT_IOC_TTL_SECS);
@@ -475,21 +527,38 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         crate::fed::cmd_init_ca(&dir, "").unwrap();
         crate::fed::cmd_issue_cert(&dir, "sample-node", &[]).unwrap();
-        let key_pem = std::fs::read_to_string(dir.join("fed").join("certs").join("sample-node-key.pem"))
-            .unwrap();
+        let key_pem =
+            std::fs::read_to_string(dir.join("fed").join("certs").join("sample-node-key.pem"))
+                .unwrap();
         let key = crate::fedproto::load_signing_key(&key_pem).unwrap();
         let feed = ExportFeed {
             intel: vec![
-                ("c2".into(), "203.0.113.7".into(), "high".into(), 1_800_000_000),
-                ("scan_source".into(), "evil.example.com".into(), "local".into(), 1_800_000_000),
-                ("ja4".into(), "t13d1516h2_8daaf6152771_b0da82dd1658".into(), "fed".into(), 1_800_000_000),
+                (
+                    "c2".into(),
+                    "203.0.113.7".into(),
+                    "high".into(),
+                    1_800_000_000,
+                ),
+                (
+                    "scan_source".into(),
+                    "evil.example.com".into(),
+                    "local".into(),
+                    1_800_000_000,
+                ),
+                (
+                    "ja4".into(),
+                    "t13d1516h2_8daaf6152771_b0da82dd1658".into(),
+                    "fed".into(),
+                    1_800_000_000,
+                ),
             ],
             honeypot: vec![("203.0.113.7".into(), 12, 1_799_990_000, 1_800_000_000)],
             corr_hits: vec![("ip".into(), "203.0.113.7".into(), 3, 1_800_000_000)],
         };
         let bundle = build_bundle("sample-node", "0.5.12", &feed, 1_800_000_000);
         let pkg = sign_package("sample-node", &key, &bundle, 1_800_000_000).unwrap();
-        let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/stix-sample.json");
+        let out =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/stix-sample.json");
         std::fs::write(&out, serde_json::to_string_pretty(&pkg).unwrap()).unwrap();
         println!("sample written to {}", out.display());
         let _ = std::fs::remove_dir_all(&dir);

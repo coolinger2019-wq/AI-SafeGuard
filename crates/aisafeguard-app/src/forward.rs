@@ -521,8 +521,14 @@ mod tests {
         // 到期可取；重发失败再入队 → 第二档 30s
         let items = q.take_due(t0 + Duration::from_secs(10));
         assert_eq!(items.len(), 1);
-        assert!(q.requeue(items.into_iter().next().unwrap(), t0 + Duration::from_secs(10)));
-        assert!(q.take_due(t0 + Duration::from_secs(20)).is_empty(), "30s 档未到");
+        assert!(q.requeue(
+            items.into_iter().next().unwrap(),
+            t0 + Duration::from_secs(10)
+        ));
+        assert!(
+            q.take_due(t0 + Duration::from_secs(20)).is_empty(),
+            "30s 档未到"
+        );
         // 放弃：重试次数用尽（0 首发 + 3 重试 = 4 发）
         let mut q2 = WebhookRetryQueue::new();
         q2.push(b"e".to_vec(), false, t0);
@@ -557,9 +563,18 @@ mod tests {
         );
         assert_eq!(sig.len(), 64);
         // 任一输入变化 → 签名变化
-        assert_ne!(webhook_sign("test-secret", 1_700_000_001, br#"{"hello":"world"}"#), sig);
-        assert_ne!(webhook_sign("other-secret", 1_700_000_000, br#"{"hello":"world"}"#), sig);
-        assert_ne!(webhook_sign("test-secret", 1_700_000_000, br#"{"hello":"world2"}"#), sig);
+        assert_ne!(
+            webhook_sign("test-secret", 1_700_000_001, br#"{"hello":"world"}"#),
+            sig
+        );
+        assert_ne!(
+            webhook_sign("other-secret", 1_700_000_000, br#"{"hello":"world"}"#),
+            sig
+        );
+        assert_ne!(
+            webhook_sign("test-secret", 1_700_000_000, br#"{"hello":"world2"}"#),
+            sig
+        );
         // 空密钥/空体不 panic
         assert_eq!(webhook_sign("", 0, b"").len(), 64);
     }

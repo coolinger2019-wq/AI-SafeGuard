@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::{sanitize, SessionOutcome, MAX_PAYLOAD};
+use crate::{MAX_PAYLOAD, SessionOutcome, sanitize};
 
 const COMPUTER: &str = "prod-app-01";
 const DOMAIN: &str = "PROD";
@@ -60,7 +60,10 @@ pub(crate) fn parse_smb1_dialects(msg: &[u8]) -> Vec<String> {
 fn utf16le(bytes: &[u8]) -> String {
     let (pairs, _) = bytes.as_chunks::<2>();
     String::from_utf16_lossy(
-        &pairs.iter().map(|c| u16::from_le_bytes(*c)).collect::<Vec<u16>>(),
+        &pairs
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
+            .collect::<Vec<u16>>(),
     )
 }
 
@@ -104,9 +107,18 @@ fn hex(bytes: &[u8]) -> String {
 
 /// NTLMSSP CHALLENGE（type2）：目标名 + AV pairs + 服务器挑战。
 pub(crate) fn build_ntlm_type2(challenge: &[u8; 8], target: &str, computer: &str) -> Vec<u8> {
-    let target_u16: Vec<u8> = target.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
-    let comp_u16: Vec<u8> = computer.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
-    let dom_u16: Vec<u8> = DOMAIN.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+    let target_u16: Vec<u8> = target
+        .encode_utf16()
+        .flat_map(|c| c.to_le_bytes())
+        .collect();
+    let comp_u16: Vec<u8> = computer
+        .encode_utf16()
+        .flat_map(|c| c.to_le_bytes())
+        .collect();
+    let dom_u16: Vec<u8> = DOMAIN
+        .encode_utf16()
+        .flat_map(|c| c.to_le_bytes())
+        .collect();
     let mut av = Vec::new();
     for (t, v) in [(1u16, &comp_u16), (2u16, &dom_u16)] {
         av.extend_from_slice(&t.to_le_bytes());
@@ -259,7 +271,8 @@ pub(crate) async fn smb_session(s: &mut TcpStream) -> std::io::Result<SessionOut
             // SMB2 头最小 64：短消息常见为 SMB1 协商（FF SMB 0x72）——记录方言后收场
             let mut msg = vec![0u8; len];
             if len > 0 {
-                s.read_exact(&mut msg).await?;
+                // 慢连接防护：帧体与包头同一超时——发完头即停发的连接不得永久占住并发许可
+                tokio::time::timeout(Duration::from_secs(10), s.read_exact(&mut msg)).await??;
             }
             payloads.push(sanitize(&msg, MAX_PAYLOAD));
             let dialects = parse_smb1_dialects(&nbss_head(nb, &msg));
@@ -275,7 +288,10 @@ pub(crate) async fn smb_session(s: &mut TcpStream) -> std::io::Result<SessionOut
             break 'outer;
         }
         let mut msg = vec![0u8; len];
-        if s.read_exact(&mut msg).await.is_err() {
+        if tokio::time::timeout(Duration::from_secs(10), s.read_exact(&mut msg))
+            .await
+            .is_err()
+        {
             break;
         }
         payloads.push(sanitize(&msg, MAX_PAYLOAD));
@@ -287,15 +303,15 @@ pub(crate) async fn smb_session(s: &mut TcpStream) -> std::io::Result<SessionOut
             msg[24], msg[25], msg[26], msg[27], msg[28], msg[29], msg[30], msg[31],
         ]);
         let (resp, label, deny): (Vec<u8>, String, bool) = match command {
-            0 => {
-                (
-                    build_negotiate_response(&challenge, session_id, message_id),
-                    "negotiate".into(),
-                    false,
-                )
-            }
-            1 => {
-                // SESSION_SETUP：security blob 在 SecBufOff（自 SMB2 头起）
+            0 => (
+                build_negotiate_response(&challenge, session_id, message_id),
+                "negotiate".into(),
+                false,
+            ),
+            1 if msg.len() >= 72 => {
+                // SESSION_SETUP：security blob 在 SecBufOff（自 SMB2 头起）。
+                // 最小长度守卫：SecBufOff/SecBufLen 在 68..72，短包直接拒
+                //（否则攻击者一个 64 字节包即可越界 panic 打崩连接任务）。
                 let off = u16le(&msg, 68) as usize;
                 let blen = u16le(&msg, 70) as usize;
                 let blob = if off < msg.len() && blen > 0 && off + blen <= msg.len() {
@@ -322,8 +338,16 @@ pub(crate) async fn smb_session(s: &mut TcpStream) -> std::io::Result<SessionOut
                                 creds.push(format!(
                                     "{}@{} ws={} ntlmv2={}",
                                     t3.user,
-                                    if t3.domain.is_empty() { "-" } else { &t3.domain },
-                                    if t3.workstation.is_empty() { "-" } else { &t3.workstation },
+                                    if t3.domain.is_empty() {
+                                        "-"
+                                    } else {
+                                        &t3.domain
+                                    },
+                                    if t3.workstation.is_empty() {
+                                        "-"
+                                    } else {
+                                        &t3.workstation
+                                    },
                                     &t3.ntlmv2[..t3.ntlmv2.len().min(24)]
                                 ));
                                 (
@@ -338,26 +362,46 @@ pub(crate) async fn smb_session(s: &mut TcpStream) -> std::io::Result<SessionOut
                                 )
                             }
                             None => (
-                                build_session_setup_response(STATUS_LOGON_FAILURE, None, session_id, message_id),
+                                build_session_setup_response(
+                                    STATUS_LOGON_FAILURE,
+                                    None,
+                                    session_id,
+                                    message_id,
+                                ),
                                 "session_setup(malformed_type3)→logon_denied".into(),
                                 true,
                             ),
                         }
                     } else {
                         (
-                            build_session_setup_response(STATUS_LOGON_FAILURE, None, session_id, message_id),
+                            build_session_setup_response(
+                                STATUS_LOGON_FAILURE,
+                                None,
+                                session_id,
+                                message_id,
+                            ),
                             "session_setup(unknown_type)→logon_denied".into(),
                             true,
                         )
                     }
                 } else {
                     (
-                        build_session_setup_response(STATUS_LOGON_FAILURE, None, session_id, message_id),
+                        build_session_setup_response(
+                            STATUS_LOGON_FAILURE,
+                            None,
+                            session_id,
+                            message_id,
+                        ),
                         "session_setup(no_ntlm)→logon_denied".into(),
                         true,
                     )
                 }
             }
+            1 => (
+                build_session_setup_response(STATUS_LOGON_FAILURE, None, session_id, message_id),
+                "session_setup(malformed_short)→logon_denied".into(),
+                true,
+            ),
             2 => (
                 build_session_setup_response(STATUS_SUCCESS, None, session_id, message_id),
                 "logoff".into(),
@@ -366,7 +410,12 @@ pub(crate) async fn smb_session(s: &mut TcpStream) -> std::io::Result<SessionOut
             _ => {
                 // TreeConnect/Create 等一律拒绝：会话未通过认证
                 (
-                    build_session_setup_response(STATUS_LOGON_FAILURE, None, session_id, message_id),
+                    build_session_setup_response(
+                        STATUS_LOGON_FAILURE,
+                        None,
+                        session_id,
+                        message_id,
+                    ),
                     format!("cmd_{command:#06x}→logon_denied"),
                     true,
                 )
@@ -427,11 +476,11 @@ mod tests {
     #[test]
     fn smb1_dialects_parsed_from_negotiate() {
         let mut msg = Vec::new();
-        msg.extend_from_slice(&[0x00, 0x00]);           // NBSS type/flags
-        msg.extend_from_slice(&0u16.to_be_bytes());     // len 占位后填
+        msg.extend_from_slice(&[0x00, 0x00]); // NBSS type/flags
+        msg.extend_from_slice(&0u16.to_be_bytes()); // len 占位后填
         msg.extend_from_slice(&[0xFF, 0x53, 0x4D, 0x42]); // SMB1 魔数（FF SMB）
         msg.extend_from_slice(&[0x72, 0x00, 0x00, 0x00, 0x00]); // COM_NEGOTIATE + 状态
-        msg.extend_from_slice(&[0u8; 23]);              // 头部其余（flags2/pid/tid/mid）
+        msg.extend_from_slice(&[0u8; 23]); // 头部其余（flags2/pid/tid/mid）
         let dialects: [&[u8]; 3] = [b"LANMAN1.0", b"LM1.2X002", b"NT LM 0.12"];
         let mut bytes_area = Vec::new();
         for d in dialects {
@@ -439,7 +488,7 @@ mod tests {
             bytes_area.extend_from_slice(d);
             bytes_area.push(0x00);
         }
-        msg.extend_from_slice(&[0x00]);                 // WordCount = 0
+        msg.extend_from_slice(&[0x00]); // WordCount = 0
         msg.extend_from_slice(&(bytes_area.len() as u16).to_le_bytes());
         msg.extend_from_slice(&bytes_area);
         let len = (msg.len() - 4) as u16;
@@ -477,9 +526,18 @@ mod tests {
     #[test]
     fn type3_parse_extracts_user_domain_ws() {
         // 手工构造 type3：头 64B（8 魔数 + 4 类型 + 6 三元组@12..60 + flags@60..64）+ 载荷
-        let user: Vec<u8> = "admin".encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
-        let domain: Vec<u8> = "PROD".encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
-        let ws: Vec<u8> = "KALI".encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+        let user: Vec<u8> = "admin"
+            .encode_utf16()
+            .flat_map(|c| c.to_le_bytes())
+            .collect();
+        let domain: Vec<u8> = "PROD"
+            .encode_utf16()
+            .flat_map(|c| c.to_le_bytes())
+            .collect();
+        let ws: Vec<u8> = "KALI"
+            .encode_utf16()
+            .flat_map(|c| c.to_le_bytes())
+            .collect();
         let nt = [0xaau8; 32];
         let mut patch = Vec::new();
         let mut payload = Vec::new();
@@ -523,7 +581,16 @@ mod tests {
     }
 
     fn u64le_from(b: &[u8], at: usize) -> u64 {
-        u64::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3], b[at + 4], b[at + 5], b[at + 6], b[at + 7]])
+        u64::from_le_bytes([
+            b[at],
+            b[at + 1],
+            b[at + 2],
+            b[at + 3],
+            b[at + 4],
+            b[at + 5],
+            b[at + 6],
+            b[at + 7],
+        ])
     }
 
     #[test]

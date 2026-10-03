@@ -208,10 +208,9 @@ impl CorroborationEngine {
         state.last_emitted = Some(now);
         let mut nodes: Vec<String> = active.into_iter().cloned().collect();
         nodes.sort();
-        let (first_ts, last_ts) = state
-            .nodes
-            .values()
-            .fold((obs.ts, obs.ts), |(f, l), o| (f.min(o.first_ts), l.max(o.last_ts)));
+        let (first_ts, last_ts) = state.nodes.values().fold((obs.ts, obs.ts), |(f, l), o| {
+            (f.min(o.first_ts), l.max(o.last_ts))
+        });
         let oc = OrgCorroboration {
             id: self.next_id,
             ts: now,
@@ -232,12 +231,7 @@ impl CorroborationEngine {
     pub fn reporter_count(&self, ip: &str, since: i64) -> u32 {
         self.keys
             .get(&(Dim::Ip, ip.to_string()))
-            .map(|s| {
-                s.nodes
-                    .values()
-                    .filter(|o| o.last_ts >= since)
-                    .count() as u32
-            })
+            .map(|s| s.nodes.values().filter(|o| o.last_ts >= since).count() as u32)
             .unwrap_or(0)
     }
 
@@ -345,9 +339,18 @@ mod tests {
         let mut e = CorroborationEngine::default();
         let now = 10_000;
         // 单节点三次观测：独立性不满足
-        assert!(e.record(&obs("a", now, Dim::Ip, "203.0.113.7"), now).is_none());
-        assert!(e.record(&obs("a", now + 10, Dim::Ip, "203.0.113.7"), now + 10).is_none());
-        assert!(e.record(&obs("a", now + 20, Dim::Ip, "203.0.113.7"), now + 20).is_none());
+        assert!(
+            e.record(&obs("a", now, Dim::Ip, "203.0.113.7"), now)
+                .is_none()
+        );
+        assert!(
+            e.record(&obs("a", now + 10, Dim::Ip, "203.0.113.7"), now + 10)
+                .is_none()
+        );
+        assert!(
+            e.record(&obs("a", now + 20, Dim::Ip, "203.0.113.7"), now + 20)
+                .is_none()
+        );
         // 第二个节点 → 印证产出
         let oc = e
             .record(&obs("b", now + 30, Dim::Ip, "203.0.113.7"), now + 30)
@@ -364,20 +367,26 @@ mod tests {
         let now = 10_000;
         e.record(&obs("a", now, Dim::Ip, "9.9.9.9"), now);
         // 窗口外（默认 600s）第二节点 → 不触发
-        assert!(e
-            .record(&obs("b", now + 700, Dim::Ip, "9.9.9.9"), now + 700)
-            .is_none());
+        assert!(
+            e.record(&obs("b", now + 700, Dim::Ip, "9.9.9.9"), now + 700)
+                .is_none()
+        );
         // 窗口内第二节点 → 触发；冷却期内第三节点加入 → 不再产
         let oc = e
             .record(&obs("b", now + 100, Dim::Ip, "9.9.9.9"), now + 100)
             .expect("应触发");
         assert_eq!(oc.id, 1);
-        assert!(e
-            .record(&obs("c", now + 110, Dim::Ip, "9.9.9.9"), now + 110)
-            .is_none(), "冷却期内不重复产出");
+        assert!(
+            e.record(&obs("c", now + 110, Dim::Ip, "9.9.9.9"), now + 110)
+                .is_none(),
+            "冷却期内不重复产出"
+        );
         // 冷却期过后再触发 → 新 id
         let oc2 = e
-            .record(&obs("d", now + 100 + 601, Dim::Ip, "9.9.9.9"), now + 100 + 601)
+            .record(
+                &obs("d", now + 100 + 601, Dim::Ip, "9.9.9.9"),
+                now + 100 + 601,
+            )
             .expect("冷却后应再产出");
         assert_eq!(oc2.id, 2);
     }
@@ -388,9 +397,11 @@ mod tests {
         let now = 10_000;
         e.set_offset("bad", 30); // 偏移 30s > 5s 阈值
         e.record(&obs("bad", now, Dim::Ip, "8.8.8.8"), now);
-        assert!(e
-            .record(&obs("good", now, Dim::Ip, "8.8.8.8"), now)
-            .is_none(), "被降权节点的观测不参与独立性计数");
+        assert!(
+            e.record(&obs("good", now, Dim::Ip, "8.8.8.8"), now)
+                .is_none(),
+            "被降权节点的观测不参与独立性计数"
+        );
         assert!(e.is_demoted("bad"));
         // 偏移恢复（NTP 校正）后自动解除
         e.set_offset("bad", 1);
@@ -412,9 +423,10 @@ mod tests {
         assert_eq!(oc.dim, Dim::Fingerprint);
         // 凭证维度（v1 用户名）
         e.record(&obs("a", now, Dim::Credential, "admin"), now);
-        assert!(e
-            .record(&obs("b", now, Dim::Credential, "admin"), now)
-            .is_some());
+        assert!(
+            e.record(&obs("b", now, Dim::Credential, "admin"), now)
+                .is_some()
+        );
         // 蜜饵维度 = critical
         e.record(&obs("a", now, Dim::Canary, "10.1.2.3"), now);
         let oc = e
@@ -432,7 +444,11 @@ mod tests {
         e.record(&obs("b", now + 2, Dim::Ip, "203.0.113.7"), now + 2);
         e.record(&obs("a", now, Dim::Ip, "1.2.3.4"), now); // 别的 IP 不计
         assert_eq!(e.reporter_count("203.0.113.7", now - 10), 2);
-        assert_eq!(e.reporter_count("203.0.113.7", now + 5), 0, "since 之后无观测");
+        assert_eq!(
+            e.reporter_count("203.0.113.7", now + 5),
+            0,
+            "since 之后无观测"
+        );
         assert_eq!(e.reporter_count("无此IP", now - 10), 0);
     }
 
@@ -467,7 +483,10 @@ mod tests {
         assert!(a.record("n1", 6, "block:7.7.7.7:any", "applied"));
         assert!(a.record("n2", 7, "block:7.7.7.7:any", "applied"));
         assert!(a.record("n3", 8, "block:7.7.7.7:any", "fp"));
-        assert!(!a.recommended("block:7.7.7.7:any", 60, 2), "误报必须否决推荐");
+        assert!(
+            !a.recommended("block:7.7.7.7:any", 60, 2),
+            "误报必须否决推荐"
+        );
         // promoted 计入采纳
         assert!(a.record("n1", 9, "block:6.6.6.6:any", "promoted"));
         assert!(a.record("n2", 10, "block:6.6.6.6:any", "applied"));
@@ -481,7 +500,10 @@ mod tests {
         assert!(!b.recommended("block:5.5.5.5:any", 60, 2));
         // mark_recommended 冷却
         a.mark_recommended("block:9.9.9.9:any");
-        assert!(a.recommended("block:9.9.9.9:any", 99, 100), "已推荐的键保持推荐态");
+        assert!(
+            a.recommended("block:9.9.9.9:any", 99, 100),
+            "已推荐的键保持推荐态"
+        );
     }
 
     #[test]
@@ -491,7 +513,10 @@ mod tests {
         e.record(&obs("a", now, Dim::Ip, "10.0.0.1"), now);
         e.record(&obs("b", now, Dim::Ip, "10.0.0.1"), now);
         // 25h 后全部过期（保留窗 24h）
-        e.record(&obs("a", now + 25 * 3600, Dim::Ip, "10.0.0.2"), now + 25 * 3600);
+        e.record(
+            &obs("a", now + 25 * 3600, Dim::Ip, "10.0.0.2"),
+            now + 25 * 3600,
+        );
         assert_eq!(e.reporter_count("10.0.0.1", 0), 0, "超保留窗的观测被清扫");
     }
 
@@ -513,8 +538,10 @@ mod tests {
         let obj = oc.to_json();
         for k in obj.as_object().unwrap().keys() {
             assert!(
-                ["id", "ts", "dim", "key", "nodes", "first_ts", "last_ts", "severity"]
-                    .contains(&k.as_str()),
+                [
+                    "id", "ts", "dim", "key", "nodes", "first_ts", "last_ts", "severity"
+                ]
+                .contains(&k.as_str()),
                 "非白名单字段: {k}"
             );
         }

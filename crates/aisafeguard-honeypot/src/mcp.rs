@@ -12,12 +12,12 @@
 //! 红线：响应内容全部合成（零真实数据）；请求按不可信数据清洗截断；参数中
 //! password 类键脱敏复用 [`crate::redact_secrets`]。
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
 use crate::canary::CanaryState;
-use crate::{sanitize, GhostVerdict, SessionOutcome, MAX_PAYLOAD};
+use crate::{GhostVerdict, MAX_PAYLOAD, SessionOutcome, sanitize};
 
 /// 假服务身份（合成；与 [honeypot.fingerprint] banner 同哲学：固定、可配置前不改）
 const SERVER_NAME: &str = "ops-internal-tools";
@@ -69,7 +69,13 @@ const DECOY_TOOLS: &[(&str, &str, &str, &str, &str)] = &[
 
 fn decoy_by_name(
     name: &str,
-) -> Option<&'static (&'static str, &'static str, &'static str, &'static str, &'static str)> {
+) -> Option<&'static (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+)> {
     DECOY_TOOLS.iter().find(|(n, _, _, _, _)| *n == name)
 }
 
@@ -116,11 +122,19 @@ fn error_body(code: i64, msg: &str, id: Value) -> Value {
 pub(crate) fn handle_jsonrpc(body: &[u8], canary: Option<&CanaryState>) -> RpcOutcome {
     let parsed: Result<Value, _> = serde_json::from_slice(body);
     let Ok(v) = parsed else {
-        return RpcOutcome::Reply(error_body(-32700, "Parse error", Value::Null), "malformed".into(), None);
+        return RpcOutcome::Reply(
+            error_body(-32700, "Parse error", Value::Null),
+            "malformed".into(),
+            None,
+        );
     };
     // 2025-06-18 起移除 batch；数组体按 Invalid Request 拒绝
     let Some(obj) = v.as_object() else {
-        return RpcOutcome::Reply(error_body(-32600, "Invalid Request", Value::Null), "invalid".into(), None);
+        return RpcOutcome::Reply(
+            error_body(-32600, "Invalid Request", Value::Null),
+            "invalid".into(),
+            None,
+        );
     };
     let id = obj.get("id").cloned().unwrap_or(Value::Null);
     let Some(method) = obj.get("method").and_then(|m| m.as_str()) else {
@@ -134,8 +148,14 @@ pub(crate) fn handle_jsonrpc(body: &[u8], canary: Option<&CanaryState>) -> RpcOu
     let params = obj.get("params").cloned().unwrap_or(Value::Null);
     let label = tool_label(&method, &params);
     match method.as_str() {
-        "initialize" => RpcOutcome::Reply(initialize_result(&params, id), "initialize".into(), None),
-        "ping" => RpcOutcome::Reply(json!({"jsonrpc":"2.0","id":id,"result":{}}), "ping".into(), None),
+        "initialize" => {
+            RpcOutcome::Reply(initialize_result(&params, id), "initialize".into(), None)
+        }
+        "ping" => RpcOutcome::Reply(
+            json!({"jsonrpc":"2.0","id":id,"result":{}}),
+            "ping".into(),
+            None,
+        ),
         "tools/list" => RpcOutcome::Reply(
             json!({"jsonrpc":"2.0","id":id,"result":{"tools": tools_value()}}),
             "tools/list".into(),
@@ -150,11 +170,7 @@ pub(crate) fn handle_jsonrpc(body: &[u8], canary: Option<&CanaryState>) -> RpcOu
             )
         }
         // 声明的能力只有 tools；resources/prompts 等一律 Method not found（能力一致）
-        _ => RpcOutcome::Reply(
-            error_body(-32601, "Method not found", id),
-            method,
-            None,
-        ),
+        _ => RpcOutcome::Reply(error_body(-32601, "Method not found", id), method, None),
     }
 }
 
@@ -196,8 +212,7 @@ fn tools_value() -> Value {
     let tools: Vec<Value> = DECOY_TOOLS
         .iter()
         .map(|(name, _, _, desc, schema)| {
-            let parsed: Value =
-                serde_json::from_str(schema).unwrap_or(json!({"type": "object"}));
+            let parsed: Value = serde_json::from_str(schema).unwrap_or(json!({"type": "object"}));
             json!({"name": name, "description": desc, "inputSchema": parsed})
         })
         .collect();
@@ -358,7 +373,13 @@ pub(crate) fn http_route(
         },
         // 旧 HTTP+SSE 传输（2024-11-05）：GET /sse 开流并下发 endpoint 事件，
         // 客户端随后 POST /mcp?sessionId=... —— 我们的 POST 路由照常应答
-        "GET" if path.split('?').next().unwrap_or("").eq_ignore_ascii_case("/sse") => {
+        "GET"
+            if path
+                .split('?')
+                .next()
+                .unwrap_or("")
+                .eq_ignore_ascii_case("/sse") =>
+        {
             let sid = session_id();
             McpHttpResponse {
                 status: "HTTP/1.1 200 OK\r\n",
@@ -527,7 +548,10 @@ mod tests {
         assert_eq!(label, "initialize");
         assert_eq!(resp["id"], 1, "响应必须回显请求顶层 id（非 params 内）");
         let result = &resp["result"];
-        assert_eq!(result["protocolVersion"], "2025-03-26", "支持集内版本应回显");
+        assert_eq!(
+            result["protocolVersion"], "2025-03-26",
+            "支持集内版本应回显"
+        );
         assert_eq!(result["serverInfo"]["name"], SERVER_NAME);
         assert!(result["capabilities"]["tools"].is_object());
     }
@@ -549,10 +573,7 @@ mod tests {
         assert_eq!(label, "tools/list");
         let tools = resp["result"]["tools"].as_array().expect("tools 数组");
         assert_eq!(tools.len(), DECOY_TOOLS.len());
-        let names: Vec<&str> = tools
-            .iter()
-            .map(|t| t["name"].as_str().unwrap())
-            .collect();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"execute_command"));
         assert!(names.contains(&"db_query"));
         assert!(tools[0]["inputSchema"]["type"] == "object");
@@ -623,15 +644,28 @@ mod tests {
         assert_eq!(label, "tools/call:get_credentials");
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("AWS_ACCESS_KEY_ID=AKIA"), "实际: {text}");
-        assert!(text.contains("DATABASE_URL=postgres://svc_app:"), "实际: {text}");
-        assert!(text.contains("AC1."), "凭证值应内嵌 canary 水印（外泄即归因）: {text}");
+        assert!(
+            text.contains("DATABASE_URL=postgres://svc_app:"),
+            "实际: {text}"
+        );
+        assert!(
+            text.contains("AC1."),
+            "凭证值应内嵌 canary 水印（外泄即归因）: {text}"
+        );
         let ghost = ghost.expect("get_credentials 应定罪");
-        assert!(ghost.evidence.contains("data_exfiltration"), "实际: {}", ghost.evidence);
+        assert!(
+            ghost.evidence.contains("data_exfiltration"),
+            "实际: {}",
+            ghost.evidence
+        );
         assert_eq!(ghost.threat, "critical");
         // canary 关闭：固定合成假值，仍是结构化凭证形态
         let (resp, _) = reply_of(req.as_bytes());
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("SYNTHETIC-DECOY"), "无水印时也必须是显式合成值: {text}");
+        assert!(
+            text.contains("SYNTHETIC-DECOY"),
+            "无水印时也必须是显式合成值: {text}"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -639,14 +673,16 @@ mod tests {
     #[test]
     fn synthetic_responses_upgraded() {
         let shadow = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
-            "params":{"name":"read_file","arguments":{"path":"/etc/shadow"}}}).to_string();
+            "params":{"name":"read_file","arguments":{"path":"/etc/shadow"}}})
+        .to_string();
         let (resp, _) = reply_of(shadow.as_bytes());
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("root:$y$"), "shadow 应有哈希行结构: {text}");
         assert!(!text.contains("synthetic content"), "不再用敷衍占位文本");
 
         let db = json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
-            "params":{"name":"db_query","arguments":{"sql":"SELECT * FROM users"}}}).to_string();
+            "params":{"name":"db_query","arguments":{"sql":"SELECT * FROM users"}}})
+        .to_string();
         let (resp, _) = reply_of(db.as_bytes());
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("2 rows in set"), "应有假结果集: {text}");
@@ -728,17 +764,35 @@ mod tests {
             None,
         );
         let ghost = r.ghost.expect("诱饵调用应带定罪");
-        assert!(ghost.evidence.contains("data_exfiltration"), "实际: {}", ghost.evidence);
+        assert!(
+            ghost.evidence.contains("data_exfiltration"),
+            "实际: {}",
+            ghost.evidence
+        );
         assert_eq!(ghost.threat, "high");
 
         // GET /mcp → 405；其它方法 → 405
-        assert_eq!(http_route("GET", "/mcp", b"", None).status, "HTTP/1.1 405 Method Not Allowed\r\n");
-        assert_eq!(http_route("DELETE", "/mcp", b"", None).status, "HTTP/1.1 405 Method Not Allowed\r\n");
+        assert_eq!(
+            http_route("GET", "/mcp", b"", None).status,
+            "HTTP/1.1 405 Method Not Allowed\r\n"
+        );
+        assert_eq!(
+            http_route("DELETE", "/mcp", b"", None).status,
+            "HTTP/1.1 405 Method Not Allowed\r\n"
+        );
     }
 
     #[test]
     fn mcp_path_matching() {
-        for p in ["/mcp", "/mcp?sessionId=x", "/MCP", "/api/mcp", "/sse", "/messages", "/messages/?sessionId=1"] {
+        for p in [
+            "/mcp",
+            "/mcp?sessionId=x",
+            "/MCP",
+            "/api/mcp",
+            "/sse",
+            "/messages",
+            "/messages/?sessionId=1",
+        ] {
             assert!(is_mcp_path(p), "{p} 应命中 MCP 路径");
         }
         assert!(!is_mcp_path("/mcpfoo"));
@@ -807,11 +861,13 @@ mod tests {
         let resp = String::from_utf8_lossy(&buf[..n]).to_string();
         assert!(resp.starts_with("HTTP/1.1 200 OK"), "实际: {resp}");
         assert!(resp.contains("application/json"));
-        assert!(resp.contains("Mcp-Session-Id:"), "initialize 应回 session 头: {resp}");
+        assert!(
+            resp.contains("Mcp-Session-Id:"),
+            "initialize 应回 session 头: {resp}"
+        );
         assert!(resp.contains("ops-internal-tools"));
 
-        let list = "POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Length: 46\r\n\r\n"
-            .to_string()
+        let list = "POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Length: 46\r\n\r\n".to_string()
             + &json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}).to_string();
         c.write_all(list.as_bytes()).await.unwrap();
         let n = tokio::time::timeout(Duration::from_secs(3), c.read(&mut buf))
@@ -839,9 +895,7 @@ mod tests {
                 .expect("超时未收到蜜罐事件")
                 .expect("事件通道关闭");
             match ev {
-                SecurityEvent::Detection {
-                    kind, evidence, ..
-                } if kind == "mcp_ghost" => {
+                SecurityEvent::Detection { kind, evidence, .. } if kind == "mcp_ghost" => {
                     saw_ghost_detection = true;
                     assert!(
                         evidence.contains("execute_command") && evidence.contains("whoami"),
@@ -854,11 +908,17 @@ mod tests {
                     ..
                 } if summary.starts_with("MCP 会话") => {
                     assert!(summary.contains("initialize"));
-                    assert!(summary.contains("tools/call:execute_command"), "实际: {summary}");
+                    assert!(
+                        summary.contains("tools/call:execute_command"),
+                        "实际: {summary}"
+                    );
                     let steps = interaction.expect("mcp 会话应带 interaction");
                     assert_eq!(steps.len(), 3);
                     assert_eq!(steps[0].command, "initialize");
-                    assert!(saw_ghost_detection, "tools/call 应产出 mcp_ghost Detection 事件");
+                    assert!(
+                        saw_ghost_detection,
+                        "tools/call 应产出 mcp_ghost Detection 事件"
+                    );
                     break;
                 }
                 _ => continue,

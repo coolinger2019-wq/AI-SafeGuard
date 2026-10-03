@@ -336,13 +336,12 @@ impl Firewall for CompositeFirewall {
         // 否则 XDP map 会残留"nft 看不见的封禁"；原样返回 base 的结果保持 API 诚实
         let base_result = self.base.remove(name, spec);
         #[cfg(target_os = "linux")]
-        if spec.direction == Direction::In && spec.local_port.is_none() {
-            // 端口级规则不进 XDP map（只镜像 IP 级），无需清理
-            if let Some(IpAddr::V4(ip)) = spec.remote_ip {
-                if let Some(fast) = self.fast.lock().expect("XDP 状态锁中毒").as_mut() {
-                    if let Err(e) = fast.unblock(ip) {
-                        tracing::warn!("XDP 解封 {ip} 失败: {e}");
-                    }
+        // 镜像资格与 add 对称（mirrorable：In+Any+无端口+非保护 IP）——
+        // 旧实现只查 In+无端口，会给从未镜像的细粒度/保护 IP 规则调 unblock
+        if let Some(ip) = mirrorable(spec) {
+            if let Some(fast) = self.fast.lock().expect("XDP 状态锁中毒").as_mut() {
+                if let Err(e) = fast.unblock(ip) {
+                    tracing::warn!("XDP 解封 {ip} 失败: {e}");
                 }
             }
         }
@@ -353,14 +352,9 @@ impl Firewall for CompositeFirewall {
         self.base.resync(specs)?;
         #[cfg(target_os = "linux")]
         {
-            let desired: Vec<Ipv4Addr> = specs
-                .iter()
-                .filter(|s| s.direction == Direction::In && s.local_port.is_none())
-                .filter_map(|s| match s.remote_ip {
-                    Some(IpAddr::V4(v4)) => Some(v4),
-                    _ => None,
-                })
-                .collect();
+            // 对账期望与 add 的镜像资格同口径（mirrorable）：细粒度/保护 IP
+            // 规则不得经重启对账进入 XDP map（G2 红线：内网永不进高速丢弃表）
+            let desired: Vec<Ipv4Addr> = specs.iter().filter_map(|s| mirrorable(s)).collect();
             if let Some(fast) = self.fast.lock().expect("XDP 状态锁中毒").as_mut() {
                 fast.reconcile(&desired)
                     .map_err(aisafeguard_core::error::Error::Firewall)?;

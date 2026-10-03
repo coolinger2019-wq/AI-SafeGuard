@@ -7,7 +7,7 @@
 
 use aisafeguard_core::event::ShellStep;
 
-use crate::{read_with_timeout, sanitize, SessionOutcome, MAX_PAYLOAD, READ_TIMEOUT};
+use crate::{MAX_PAYLOAD, READ_TIMEOUT, SessionOutcome, read_with_timeout, sanitize};
 
 const REDIS_VERSION: &str = "7.2.4";
 /// 单会话命令数上限（与假 Shell 同款防刷纪律）
@@ -84,7 +84,10 @@ fn parse_resp_array(buf: &[u8]) -> RespParse {
         args.push(sanitize(&buf[data_start..data_end], MAX_ARG_CHARS));
         pos = arg_end;
     }
-    RespParse::Complete { args, consumed: pos }
+    RespParse::Complete {
+        args,
+        consumed: pos,
+    }
 }
 
 fn parse_inline(buf: &[u8]) -> RespParse {
@@ -131,7 +134,11 @@ pub(crate) fn respond(args: &[String]) -> (String, Option<String>, bool) {
             let info = format!(
                 "# Server\r\nredis_version:{REDIS_VERSION}\r\nredis_git_sha1:00000000\r\nredis_git_dirty:0\r\nos:Linux 6.1.0-18-amd64 x86_64\r\nrun_id:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\r\ntcp_port:6379\r\nuptime_in_seconds:86400\r\n\r\n# Clients\r\nconnected_clients:1\r\n\r\n# Memory\r\nused_memory_human:2.05M\r\n\r\n# Replication\r\nrole:master\r\nconnected_slaves:0\r\n\r\n# Keyspace\r\ndb0:keys=1,expires=0\r\n"
             );
-            (format!("${}\r\n{info}\r\n", info.len()), Some(render_line(args)), false)
+            (
+                format!("${}\r\n{info}\r\n", info.len()),
+                Some(render_line(args)),
+                false,
+            )
         }
         "CONFIG" => {
             if rest.first().map(|s| s.to_ascii_uppercase()).as_deref() == Some("GET") {
@@ -183,7 +190,9 @@ fn render_line(args: &[String]) -> String {
     args.join(" ")
 }
 
-pub(crate) async fn redis_session(s: &mut tokio::net::TcpStream) -> std::io::Result<SessionOutcome> {
+pub(crate) async fn redis_session(
+    s: &mut tokio::net::TcpStream,
+) -> std::io::Result<SessionOutcome> {
     use tokio::io::AsyncWriteExt;
     let mut steps: Vec<ShellStep> = Vec::new();
     let mut credentials: Vec<crate::cred::RawCredential> = Vec::new();
@@ -203,9 +212,11 @@ pub(crate) async fn redis_session(s: &mut tokio::net::TcpStream) -> std::io::Res
                     // AUTH 凭证采集（H200）：AUTH [user] password——口令进凭证对，
                     // 留痕行仍走 respond 的脱敏（***）
                     if args.first().map(|s| s.to_ascii_uppercase()).as_deref() == Some("AUTH") {
+                        // AUTH <password>（2 词）或 AUTH <user> <password>（3 词）；
+                        // 更多参数 = 畸形，不采集（避免把 b 当口令记成 a 的错位材料）
                         let (user, pw) = match args.len() {
                             2 => ("default".to_string(), args[1].clone()),
-                            n if n >= 3 => (args[1].clone(), args[2].clone()),
+                            3 => (args[1].clone(), args[2].clone()),
                             _ => (String::new(), String::new()),
                         };
                         if !user.is_empty() {
@@ -250,11 +261,7 @@ pub(crate) async fn redis_session(s: &mut tokio::net::TcpStream) -> std::io::Res
         summary,
         payload,
         http_hint: None,
-        interaction: if steps.is_empty() {
-            None
-        } else {
-            Some(steps)
-        },
+        interaction: if steps.is_empty() { None } else { Some(steps) },
         credentials,
     })
 }
@@ -377,7 +384,7 @@ mod tests {
 
     #[tokio::test]
     async fn redis_listener_roundtrip() {
-        use crate::{start, HoneypotHandle};
+        use crate::{HoneypotHandle, start};
         use aisafeguard_core::config::{HoneypotConfig, ListenerConfig};
         use aisafeguard_core::event::{EventBus, SecurityEvent};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
