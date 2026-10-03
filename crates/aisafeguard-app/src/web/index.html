@@ -583,7 +583,8 @@ async function refreshProp() {
     const sev = (p.severity === 'high' || p.severity === 'critical') ? 'err'
               : p.severity === 'medium' ? 'warn' : 'acc';
     const acts = p.status === 'pending'
-      ? '<button class="act" style="padding:2px 10px;font-size:11.5px" data-apply="' + p.id + '">应用</button> ' +
+      ? '<button class="act" style="padding:2px 10px;font-size:11.5px" data-apply="' + p.id + '">' +
+        (p.action === 'credential_spray' ? '确认封禁' : '应用') + '</button> ' +
         '<button class="act ghost" style="padding:2px 10px;font-size:11.5px" data-dismiss="' + p.id + '">驳回</button>'
       : '';
     const main = '<tr data-pid="' + p.id + '">' +

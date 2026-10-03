@@ -721,11 +721,10 @@ impl EngineHandle {
             .store
             .get_proposal(id)?
             .ok_or_else(|| Error::Store(format!("建议 #{id} 不存在")))?;
-        if p.action == "credential_spray" {
-            return Err(Error::Store(
-                "观察类建议（credential_spray）不走防火墙，请用「确认战役」".into(),
-            ));
-        }
+        // F793 补全：观察类（credential_spray）的人工应用 = 「确认封禁」——人工点击
+        // 即构成 H310 所等的人工确认，走正常 block 路径按建议自带 TTL 灰度封禁。
+        // 红线不变：AI 自动应用仍只作用于 block（auto_apply_policy_ok 门控）；
+        // 仅登记不封的「确认战役」语义保留在 confirm 端点（egui）。
         if p.status != "pending" {
             return Err(Error::Store(format!(
                 "建议 #{id} 状态为 {}，无法应用",
@@ -2248,60 +2247,43 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                         reason: p.reason.clone(),
                     });
                     created += 1;
-                    let severity_ok = aisafeguard_ai::severity_rank(&p.severity)
-                        >= aisafeguard_ai::severity_rank(&cfg.ai.auto_apply_min_severity);
-                    // 自动应用尊重误报反馈（人工确认的应用不受影响）；
-                    // fp_ignore_min_severity 配置后，达到该档及以上的建议忽略抑制
-                    let ignore_fp = !cfg.ai.fp_ignore_min_severity.is_empty()
-                        && aisafeguard_ai::severity_rank(&p.severity)
-                            >= aisafeguard_ai::severity_rank(&cfg.ai.fp_ignore_min_severity);
-                    let fp_suppressed = p
-                        .remote_ip
-                        .parse::<IpAddr>()
-                        .map(|ip| {
-                            eng.store
-                                .active_fp(
-                                    &ip.to_string(),
-                                    now_ts(),
-                                    cfg.ai.fp_suppress_secs as i64,
-                                    p.local_port,
-                                )
-                                .unwrap_or(false)
-                        })
-                        .unwrap_or(false);
-                    // quorum（0.4.0 C3）：来源有协同上报但独立节点数不足时不自动应用；
-                    // 无任何上报（本地判断）不阻塞——单节点部署不假死
-                    let quorum_ok = if cfg.fed.min_peers == 0 {
-                        true
-                    } else {
-                        match p.remote_ip.parse::<IpAddr>() {
-                            Ok(ip) => {
-                                let reporters = eng
-                                    .corroboration
-                                    .lock()
-                                    .map(|c| c.reporter_count(&ip.to_string(), now_ts() - 86_400))
-                                    .unwrap_or(0) as i64;
-                                reporters == 0 || reporters as u32 >= cfg.fed.min_peers
-                            }
-                            Err(_) => true,
-                        }
-                    };
-                    // AI 不自动处置红线：观察类建议（credential_spray）只等人确认，
-                    // 自动应用只作用于 block
-                    if p.action == "block"
-                        && cfg.ai.auto_apply
-                        && severity_ok
-                        && quorum_ok
-                        && (ignore_fp || !fp_suppressed)
-                        && auto_apply_guard_ok(&eng.store, &cfg.ai, &p.remote_ip, now_ts())
+                    if auto_apply_policy_ok(eng, &cfg, &p.action, &p.severity, &p.remote_ip, p.local_port)
                         && eng.apply_proposal(pid).is_ok()
                     {
                         auto_applied += 1;
                     }
                 }
+                // 存量建议回扫（F793 补全）：策略开启/阈值调整后，pending 的 block 类
+                // 建议按当前门控补处理——证据（24h 窗）已老化的自然留在 pending，
+                // 攻击者仍在活动的被补上。观察类只等人工「确认封禁」，fed:* 组织
+                // 建议走自身四关管线，均不在此列。
+                let mut rescan_applied = 0i64;
+                if cfg.ai.auto_apply
+                    && let Ok(pending) = eng.store.list_proposals(Some("pending"), 200)
+                {
+                    for row in pending {
+                        if row.action != "block" || row.model.starts_with("fed:") {
+                            continue;
+                        }
+                        if auto_apply_policy_ok(
+                            eng,
+                            &cfg,
+                            &row.action,
+                            &row.severity,
+                            &row.remote_ip,
+                            row.local_port,
+                        ) && eng.apply_proposal(row.id).is_ok()
+                        {
+                            rescan_applied += 1;
+                        }
+                    }
+                }
                 let mut summary = format!("分析完成：生成 {created} 条建议");
                 if auto_applied > 0 {
                     summary.push_str(&format!("，自动应用 {auto_applied} 条"));
+                }
+                if rescan_applied > 0 {
+                    summary.push_str(&format!("，回扫补应用 {rescan_applied} 条"));
                 }
                 let _ = eng
                     .store
@@ -2316,6 +2298,65 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
         },
         Err(e) => analysis_failed(eng, &cfg.ai.model, &e.to_string()),
     }
+}
+
+/// auto_apply 全套政策判定（新鲜建议与存量回扫共用，F793 补全）：只作用于
+/// block 类（观察类 credential_spray 走人工「确认封禁」或「确认战役」，永不
+/// 自动应用）+ 总开关 + 严重度门槛 + quorum + 误报抑制 + 证据门控。
+fn auto_apply_policy_ok(
+    eng: &EngineHandle,
+    cfg: &AppConfig,
+    action: &str,
+    severity: &str,
+    remote_ip: &str,
+    local_port: Option<u16>,
+) -> bool {
+    // AI 不自动处置红线：观察类建议只等人确认，自动应用只作用于 block
+    if action != "block" || !cfg.ai.auto_apply {
+        return false;
+    }
+    if aisafeguard_ai::severity_rank(severity)
+        < aisafeguard_ai::severity_rank(&cfg.ai.auto_apply_min_severity)
+    {
+        return false;
+    }
+    // 误报抑制（0.4.0 B3）：人工标记过误报的来源跳过；
+    // fp_ignore_min_severity 配置后，达到该档及以上的建议忽略抑制
+    let ignore_fp = !cfg.ai.fp_ignore_min_severity.is_empty()
+        && aisafeguard_ai::severity_rank(severity)
+            >= aisafeguard_ai::severity_rank(&cfg.ai.fp_ignore_min_severity);
+    let fp_suppressed = remote_ip
+        .parse::<IpAddr>()
+        .ok()
+        .map(|ip| {
+            eng.store
+                .active_fp(
+                    &ip.to_string(),
+                    now_ts(),
+                    cfg.ai.fp_suppress_secs as i64,
+                    local_port,
+                )
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    if !ignore_fp && fp_suppressed {
+        return false;
+    }
+    // quorum（0.4.0 C3）：来源有协同上报但独立节点数不足时不自动应用；
+    // 无任何上报（本地判断）不阻塞——单节点部署不假死
+    if cfg.fed.min_peers > 0
+        && let Ok(ip) = remote_ip.parse::<IpAddr>()
+    {
+        let reporters = eng
+            .corroboration
+            .lock()
+            .map(|c| c.reporter_count(&ip.to_string(), now_ts() - 86_400))
+            .unwrap_or(0) as i64;
+        if reporters > 0 && reporters < cfg.fed.min_peers as i64 {
+            return false;
+        }
+    }
+    auto_apply_guard_ok(&eng.store, &cfg.ai, remote_ip, now_ts())
 }
 
 /// auto_apply 证据门控（F791 补全，2026-10-03 用户拍板）：AI 只提名，本机证据
