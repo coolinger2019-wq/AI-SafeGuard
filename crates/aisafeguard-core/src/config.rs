@@ -22,6 +22,19 @@ pub struct AppConfig {
     pub notify: NotifyConfig,
     pub exposure: ExposureConfig,
     pub ui: UiConfig,
+    pub store: StoreConfig,
+}
+
+/// 事件存储保留与归档（F795 方案 B）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct StoreConfig {
+    /// 事件保留天数：超过该天数的启动时归档（JSONL）后从 DB 删除。
+    /// 默认 365（SQLite 在此量级毫无压力）；0 = 永不修剪（DB 无界增长，慎用）。
+    pub event_retention_days: u32,
+    /// 归档目录：被修剪事件先整行导出追加到 <dir>/events-archive.jsonl 再删除
+    ///（JSONL 与 `aisafeguard export-events` 同格式）。空 = <数据目录>/archive。
+    pub archive_dir: String,
 }
 
 /// 界面外观（GUI 设置页可切换，保存后即时生效并保持）。
@@ -865,6 +878,9 @@ impl AppConfig {
         }
         if old.xdp != new.xdp {
             out.push("XDP 快速执行层");
+        }
+        if old.store != new.store {
+            out.push("事件保留/归档（启动时执行）");
         }
         if old.fed.enabled != new.fed.enabled
             || old.fed.role != new.fed.role

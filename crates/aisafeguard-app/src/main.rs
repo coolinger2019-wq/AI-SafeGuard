@@ -752,9 +752,22 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
     init_tracing(&data_dir)?;
 
     let store = Arc::new(Store::open(&cfg.db_path())?);
-    let pruned = store.prune_events(30)?;
-    if pruned > 0 {
-        tracing::info!("清理 {pruned} 条超过 30 天的事件");
+    // 事件保留与归档（F795 方案 B）：retention_days=0 = 永不修剪；
+    // 归档目录空 = <数据目录>/archive，被修剪事件先整行 JSONL 追加再删除
+    let retention = cfg.store.event_retention_days;
+    if retention > 0 {
+        let archive_dir = if cfg.store.archive_dir.is_empty() {
+            data_dir.join("archive")
+        } else {
+            std::path::PathBuf::from(&cfg.store.archive_dir)
+        };
+        let pruned = store.prune_events(retention, Some(&archive_dir))?;
+        if pruned > 0 {
+            tracing::info!(
+                "清理 {pruned} 条超过 {retention} 天的事件（已归档至 {}）",
+                archive_dir.display()
+            );
+        }
     }
 
     let rt = tokio::runtime::Builder::new_multi_thread()

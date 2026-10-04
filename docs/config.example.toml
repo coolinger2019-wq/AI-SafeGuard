@@ -595,6 +595,20 @@ sign = false
 # 主机暴露面自动扫描间隔（秒）；0 = 关闭（手动扫描不受影响），300-86400 = 定时扫描并入库。
 auto_scan_secs = 0
 
+# ── 事件保留与归档（F795 方案 B）──
+[store]
+# 事件保留天数：超过该天数的启动时归档（JSONL）后从 DB 删除。默认 365——
+# SQLite 在几十万行量级毫无压力；0 = 永不修剪（DB 无界增长，慎用）。
+# Event retention in days: events older than this are archived (JSONL) then
+# removed from the DB at startup. Default 365; 0 = never prune (DB grows unbounded).
+event_retention_days = 365
+# 归档目录：被修剪事件先整行追加到 <dir>/events-archive.jsonl（含哈希链字段，
+# 离线可自验；与 export-events 同格式）再删除。空 = <数据目录>/archive。
+# Archive directory: pruned rows are appended to <dir>/events-archive.jsonl
+# (hash-chain fields included, segment verifiable offline; same format as
+# export-events) before deletion. Empty = <data dir>/archive.
+archive_dir = ""
+
 [ui]
 # UI theme: deep_blue | light | warm | contrast. Switchable in the GUI settings page.
 # 界面主题：deep_blue | light | warm | contrast。GUI 设置页可切换。

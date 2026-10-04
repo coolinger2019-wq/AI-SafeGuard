@@ -8,6 +8,7 @@
 
 pub mod credentials;
 
+use std::io::Write;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
@@ -769,7 +770,10 @@ impl Store {
 
     /// 修剪过期事件。删除会断链——只做整段修剪，并把断点行的 prev_hash 置空，
     /// 校验器把 prev_hash = '' 的行视为新链起点。
-    pub fn prune_events(&self, keep_days: u32) -> Result<usize> {
+    /// 修剪超保留期事件（F795 方案 B）：删除前先把将删行整行 JSONL 追加到
+    /// 归档文件（与 `export-events` 同格式，含哈希链字段，离线可自验段内链），
+    /// 证据永续——DB 只保留热数据。`archive` 为 None = 不归档直接删。
+    pub fn prune_events(&self, keep_days: u32, archive: Option<&std::path::Path>) -> Result<usize> {
         let cutoff = aisafeguard_core::now_ts() - (keep_days as i64) * 86400;
         let conn = self.lock()?;
         let boundary: Option<i64> = conn
@@ -782,6 +786,37 @@ impl Store {
         let Some(boundary) = boundary else {
             return Ok(0);
         };
+        // 归档先于删除：追加整行 JSONL（含 prev_hash/hash，段内链可离线自验）
+        if let Some(dir) = archive {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| Error::Store(format!("创建归档目录失败: {e}")))?;
+            let path = dir.join("events-archive.jsonl");
+            let mut stmt = conn
+                .prepare(&format!(
+                    "SELECT {EVENT_COLUMNS} FROM events WHERE id <= ?1 ORDER BY id"
+                ))
+                .map_err(|e| Error::Store(e.to_string()))?;
+            let rows = stmt
+                .query_map(params![boundary], event_row)
+                .map_err(|e| Error::Store(e.to_string()))?;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|e| Error::Store(format!("打开归档文件失败: {e}")))?;
+            for row in rows {
+                let r = row.map_err(|e| Error::Store(e.to_string()))?;
+                let line = serde_json::to_string(&r).map_err(|e| Error::Store(e.to_string()))?;
+                f.write_all(line.as_bytes())
+                    .and_then(|_| {
+                        f.write_all(
+                            b"
+",
+                        )
+                    })
+                    .map_err(|e| Error::Store(format!("写入归档失败: {e}")))?;
+            }
+        }
         let successor: Option<i64> = conn
             .query_row(
                 "SELECT MIN(id) FROM events WHERE id > ?1",
@@ -901,7 +936,6 @@ impl Store {
 
     /// 导出全部事件（含哈希字段）为 JSONL，供离线留档。
     pub fn export_events(&self, out: &Path) -> Result<usize> {
-        use std::io::Write;
         let rows = self.recent_events(u32::MAX, None)?;
         let mut f = std::fs::File::create(out)
             .map_err(|e| Error::Store(format!("创建导出文件失败: {e}")))?;
@@ -1789,7 +1823,7 @@ mod tests {
             conn.execute("UPDATE events SET ts = ts - 86400 WHERE id <= 3", [])
                 .unwrap();
         }
-        assert_eq!(store.prune_events(0).unwrap(), 3);
+        assert_eq!(store.prune_events(0, None).unwrap(), 3);
         let report = store.verify_chain().unwrap();
         assert!(
             report.ok,
@@ -1797,6 +1831,48 @@ mod tests {
             report.broken_at
         );
         assert_eq!(report.rows, 2);
+    }
+
+    /// F795 方案 B：prune 归档——被删行整行 JSONL 追加到归档文件，
+    /// 与 DB 剩余部分哈希链各自完整。
+    #[test]
+    fn prune_archives_rows_before_delete() {
+        let store = tmp_store("prune-archive");
+        for i in 0..4 {
+            store
+                .insert_event(&aisafeguard_core::event::SecurityEvent::engine(
+                    "info",
+                    format!("待归档 {i}"),
+                ))
+                .unwrap();
+        }
+        let dir = std::env::temp_dir().join(format!("asg-archive-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // 全部 4 条回拨一天并修剪（带归档）
+        {
+            let conn = store.lock().unwrap();
+            conn.execute("UPDATE events SET ts = ts - 86400", [])
+                .unwrap();
+        }
+        assert_eq!(store.prune_events(0, Some(&dir)).unwrap(), 4);
+        // 归档文件含全部 4 行，JSONL 可解析且哈希链字段在
+        let archive = std::fs::read_to_string(dir.join("events-archive.jsonl")).unwrap();
+        let lines: Vec<&str> = archive.lines().collect();
+        assert_eq!(lines.len(), 4, "4 行都应归档: {archive}");
+        for l in &lines {
+            let v: serde_json::Value = serde_json::from_str(l).unwrap();
+            assert!(v["prev_hash"].is_string() && v["hash"].is_string());
+            assert!(v["summary"].as_str().unwrap().contains("待归档"));
+        }
+        // DB 空 + 链完整；再写入新事件从空链生长
+        assert!(store.verify_chain().unwrap().ok);
+        store
+            .insert_event(&aisafeguard_core::event::SecurityEvent::engine(
+                "info", "tail",
+            ))
+            .unwrap();
+        assert!(store.verify_chain().unwrap().ok);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A1 串联场景：修剪中间段（保留期边界内存在新老两段）不断链
