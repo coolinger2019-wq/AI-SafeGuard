@@ -1,40 +1,68 @@
 # ==============================================================================
+# AI-SafeGuard Configuration Example (docs/config.example.toml)
 # AI-SafeGuard 配置示例（docs/config.example.toml）
 #
+# Usage: copy the sections you need into your own config.toml (default path in
+# [general] below) and tweak one line. Each field: what it does + default +
+# consequences of changing it.
 # 用法：把需要的段落抄进你自己的 config.toml（默认路径见下方 [general]），
 # 复制后改一行就能用。每个字段：一句话人话说明 + 默认值 + 改了会怎样。
 #
-# 三条纪律：
-#   1. 配置文件不承载任何秘密——AI Key 在系统凭据管理器或环境变量
+# Three rules / 三条纪律：
+#   1. Config files never carry secrets — AI keys live in the system credential
+#      manager or env var AISAFEGUARD_AI_KEY; API token via `aisafeguard --print-token`.
+#      配置文件不承载任何秘密——AI Key 在系统凭据管理器或环境变量
 #      AISAFEGUARD_AI_KEY，API token 用 `aisafeguard --print-token` 查看。
-#   2. 默认安全基线有自动化测试守护：深检/规则/XDP/蜜饵/协同等默认永远关闭。
-#   3. 标注「需重启」的字段保存后要重启程序；其余保存即热更生效。
+#   2. The secure-by-default baseline is enforced by automated tests: deep
+#      inspection / rules / XDP / canary / federation default to OFF.
+#      默认安全基线有自动化测试守护：深检/规则/XDP/蜜饵/协同等默认永远关闭。
+#   3. Fields marked "restart required" need a program restart; everything else
+#      hot-reloads on save.
+#      标注「需重启」的字段保存后要重启程序；其余保存即热更生效。
 #
+# This file and the AppConfig struct are kept in sync by a CI test (new fields
+# must appear here, anti-drift).
 # 本文件与 AppConfig 结构由 CI 测试校验同步（新增字段必须进本示例，防漂移）。
 # ==============================================================================
 
 [general]
+# Data directory (event store / certs / honeypot host key live here).
 # 数据目录（事件库/证书/蜜罐 host key 等都在这里）。
+# Default empty = %LOCALAPPDATA%\aisafeguard (Windows) / ~/.local/share/aisafeguard (Linux).
 # 默认空 = %LOCALAPPDATA%\aisafeguard（Windows）/ ~/.local/share/aisafeguard（Linux）。
+# Effect: data is not migrated, old dir is kept; restart required.
 # 改了会怎样：数据不会自动迁移，旧目录保留；需重启。
 data_dir = ""
 
 [api]
+# Local REST API (listens on 127.0.0.1 only, for GUI/scripts on this machine). On by default.
 # 本机 REST API（只监听 127.0.0.1，供 GUI/脚本本机查询）。默认开。
+# Effect: when off, the GUI still runs embedded but scripts lose HTTP access. Restart required.
 # 改了会怎样：关闭后 GUI 仍可本地内嵌运行，但脚本无法用 HTTP 查询。需重启。
 enabled = true
+# API port. Default 7420. Restart required.
 # API 端口。默认 7420。改了会怎样：需重启。
 port = 7420
 
 [honeypot]
+# Honeypot master switch (the only data plane on by default — bait exposure is the product).
 # 蜜罐总开关（唯一默认开启的数据面——诱捕面对攻击者暴露是产品语义）。
+# Effect: all listeners stop, no more honeypot hits. Restart required.
 # 改了会怎样：关闭后所有监听器停止，事件页不再有蜜罐命中。需重启。
 enabled = true
 
+# Listener table: one row per listener (name/port/protocol/on-off).
+# Protocol values: ssh | http | telnet | generic | mysql | redis | mcp | smb | rdp |
+# docker | elasticsearch (unknown protocols fall back to generic).
+# enabled = false keeps the row configured but unbound (handy to pause one).
+# By default only the four high-port rows below; listening on 22/80/23 etc.
+# requires elevated privileges.
 # 监听表：每行 = 一个监听器（名称/端口/协议/启停）。
-# 协议取值：ssh | http | telnet | generic | mysql | redis（未知协议按 generic 处理）。
+# 协议取值：ssh | http | telnet | generic | mysql | redis | mcp | smb | rdp |
+# docker | elasticsearch（未知协议按 generic 处理）。
 # enabled = false 表示保留这行配置但不绑定端口（方便临时停一个）。
 # 默认只有下面四行高位端口；要监听 22/80/23 等标准端口需管理员身份运行。
+# Effect: any change (add/remove/port/on-off) requires a restart.
 # 改了会怎样：任何改动（增删行/改端口/改启停）需重启。
 [[honeypot.listeners]]
 name = "ssh"
@@ -60,6 +88,7 @@ port = 1337
 kind = "generic"
 enabled = true
 
+# Want to catch database botnets? Uncomment (off by default — explicit opt-in):
 # 想抓数据库僵尸网络？取消注释即可（默认关闭——显式开启才算数）：
 # [[honeypot.listeners]]
 # name = "mysql"
@@ -73,8 +102,13 @@ enabled = true
 # kind = "redis"
 # enabled = true
 
+# MCP honeypot (F791): emulates an "internal ops toolbox" MCP Server (JSON-RPC 2.0)
+# to trap probes against AI infrastructure (MCP endpoints) and agent tool calls —
+# tools/call arguments ARE the TTP.
 # MCP 蜜罐（F791）：仿真「内部运维工具箱」MCP Server（JSON-RPC 2.0），诱捕
 # 针对 AI 基础设施（MCP 端点）的探测与 agent 工具调用——tools/call 的参数就是 TTP。
+# Dedicated listener covers port scans; the http listener also serves decoy paths
+# /mcp, /api/mcp, /sse out of the box (no config needed).
 # 独立监听器给端口级扫描；http 监听器另内建 /mcp、/api/mcp、/sse 诱饵路径（无需配置）。
 # [[honeypot.listeners]]
 # name = "mcp"
@@ -82,6 +116,9 @@ enabled = true
 # kind = "mcp"
 # enabled = true
 
+# F794a protocol honeypots (off by default, explicit opt-in): SMB/RDP = the main
+# Windows lateral-movement channels; Docker API = malicious image deployment
+# (the create-container payload IS the TTP); ES = high-frequency public scans.
 # F794a 新协议蜜罐（默认关，显式开启）：SMB/RDP=Windows 内网横向主通道，
 # Docker API=恶意镜像部署入口（创建容器的配置即 TTP），ES=公网高频扫描+内网开发机。
 # [[honeypot.listeners]]
@@ -106,81 +143,160 @@ enabled = true
 # enabled = true
 
 [honeypot.shell]
+# SSH fake shell (mid-interaction): after auth, the ssh listener enters a command
+# emulation session; every command is logged into events. Whitelisted commands
+# return emulated output — real commands are NEVER executed. Off by default.
 # SSH 假 Shell（中交互）：开启后 ssh 监听器认证通过即进入命令仿真会话，
 # 逐命令留痕进事件。白名单命令返回仿真结果，永不执行真实命令。
 # 默认 false。改了会怎样：需重启。
 enabled = false
+# Fake shell username/hostname (shown in the prompt, makes the disguise match
+# your environment). Restart required.
 # 假 Shell 用户名/主机名（prompt 显示，让伪装更像你的环境）。改了会怎样：需重启。
 username = "deploy"
 hostname = "debian-11"
+# Per-session command cap (stops automation scripts parking sessions forever),
+# 1-500. Restart required.
 # 单会话命令数上限（防自动化脚本无限挂会话刷事件），1-500。改了会怎样：需重启。
 max_commands = 50
+# SSH host key path; empty = <data dir>/honeypot/hostkey.ed25519 (auto-generated
+# and persisted on first start).
 # SSH host key 路径；空 = <数据目录>/honeypot/hostkey.ed25519（首次自动生成并持久化）。
 host_key_path = ""
+# Telnet fake shell independent switch (off by default, banner behavior unchanged).
 # Telnet 假 Shell 独立开关（默认 false，banner 级行为不变）。改了会怎样：需重启。
 telnet_enabled = false
 
 [honeypot.credentials]
+# Credential capture & local spray detection (on by default): user/password pairs
+# seen by the honeypot are stored salted (argon2id) in a separate credential
+# store (plaintext never touches disk) and compared against local account names.
 # 凭证采集与本地喷洒检测（默认开）：蜜罐收到的用户名/口令对以 argon2id 加盐
 # 哈希落独立凭证库（口令明文永不落盘），与本机账号做同名比对。
+# Effect: off = no credential store, no credential_spray events. Restart required.
 # 改了会怎样：关闭 = 不建凭证库、不发 credential_spray 事件。需重启。
 enabled = true
+# Local account snapshot refresh period (s); 0 = enumerate once at start. Hot-reload.
 # 本机账号快照刷新周期（秒）；0 = 仅启动时枚举一次。改了会怎样：热更。
 snapshot_interval_secs = 3600
 
 [honeypot.canary]
+# Canary bait (off by default): the HTTP honeypot serves /backup.zip, /.git/config,
+# /id_rsa, /db.sql decoys (watermarked tokens) — the download itself is a
+# high-value event.
 # 蜜饵 canary（默认关）：HTTP 蜜罐内置 /backup.zip、/.git/config、/id_rsa、
 # /db.sql 诱饵资源（带水印 token），下载行为本身即高价值事件。
+# Effect: restart required.
 # 改了会怎样：需重启。
 enabled = false
+# Watermark key (any non-empty string); empty = auto-generated to
+# <data dir>/honeypot/canary.key. Cross-node attribution via canary-decode
+# requires the same key or a copied key file.
 # 水印密钥（任意非空字符串）；空 = 自动生成并落 <数据目录>/honeypot/canary.key。
 # 跨节点溯源：让 canary-decode 能解码，需配相同密钥或拷贝密钥文件。
 key = ""
+# Filesystem canary absolute paths (Linux v1 only; ignored with a warning on
+# Windows). At start: missing files are written as synthetic bait and watched
+# (reads alert); existing files are rejected (never overwrite real files).
+# Example: fs_paths = ["/srv/app/.env", "/opt/app/config.yml"]
 # 文件系统蜜饵绝对路径（仅 Linux v1，Windows 忽略并告警）。启动时：缺失则写入
 # 合成诱饵并监控读取（读取即告警）；已存在则拒绝该条（防止覆盖真实文件）。
 # 例：fs_paths = ["/srv/app/.env", "/opt/app/config.yml"]
 fs_paths = []
 
 [honeypot.templates]
+# Honeypot templates (0.5.11 H300, off by default): "fake business systems" as
+# configurable assets — one directory per template (template.toml + assets)
+# describing the page/form fields/banner/sensitive paths; the loader spawns the
+# matching listener. Add a fake Grafana or fake OA login page without touching code.
+# A broken template rejects only that template (warns), never the others or the
+# built-ins; template content changes hot-reload (adding/removing templates
+# requires a restart).
 # 蜜罐模板（0.5.11 H300，默认关）：把「假业务系统」做成可配置资产——每个模板
 # 一个目录（template.toml + 资源文件），描述页面/表单字段/banner/敏感路径，
 # 由加载器生成对应监听器。不改一行代码即可新增假 Grafana/假 OA 登录页。
 # 单模板损坏只拒绝该模板（告警），不影响其他模板与内置默认；模板内容变更
 # 自动热重载（增删模板需重启）。
+# Effect: restart required.
 # 改了会怎样：需重启。
 enabled = false
+# Template root; empty = <data dir>/honeypot/templates. Directory layout in
+# docs/deployment.md.
 # 模板根目录；空 = <数据目录>/honeypot/templates。目录约定见 docs/deployment.md。
 dir = ""
 
 [honeypot.fingerprint]
+# Anti-fingerprinting banner parameters (0.5.11 H320): defaults are byte-identical
+# to the built-ins (zero behavior change on upgrade). Set versions that match the
+# real services in your environment to lower the chance of being fingerprinted.
 # 反识别 banner/指纹参数（0.5.11 H320）：默认与内置值逐字节一致（升级零行为
 # 变化）。改成贴近你环境真实服务的版本，降低被指纹库标记的概率。
+# SSH protocol version string (CRLF appended automatically when sent).
 # SSH 协议版本串（发送时自动补 CRLF）。
 ssh_banner = "SSH-2.0-OpenSSH_9.6"
+# Telnet greeting (sent verbatim; write your own line endings).
 # Telnet 问候语（按字面原样发送，换行要自己写转义）。
 telnet_greeting = "Welcome to Ubuntu 22.04 LTS\r\nlogin: "
+# MySQL greeting version.
 # MySQL greeting 版本号。
 mysql_version = "8.0.36"
+# HTTP Server response header.
 # HTTP Server 响应头。
 http_server = "nginx"
 
 [ai]
+# AI slow-path analysis (off by default): honeypot evidence goes to an LLM which
+# produces reasoned blocking proposals.
 # AI 慢路径分析（默认关）：把蜜罐证据交给大模型分析，产出带理由的封禁建议。
+# Keys never go here — system credential manager (paste in the GUI settings page)
+# or env var AISAFEGUARD_AI_KEY.
 # Key 不写在这里——存系统凭据管理器（GUI 设置页粘贴）或环境变量 AISAFEGUARD_AI_KEY。
 enabled = false
+# OpenAI-compatible endpoint (defaults to Zhipu GLM; air-gapped networks can point
+# at local inference servers).
 # OpenAI 兼容端点（默认智谱 GLM；封闭内网可指向本地推理服务）。
 base_url = "https://open.bigmodel.cn/api/paas/v4"
 model = "glm-4.7"
+# Auto-apply proposals (off by default = manual confirm per proposal). Even when
+# on, applies only as short-TTL grey bans that auto-unban at expiry.
 # 自动应用建议（默认 false = 每条人工确认）。开启后也只做短 TTL 灰度 + 到期解封。
 auto_apply = false
+# Minimum severity for auto-apply: low | medium | high | critical.
 # 自动应用生效的最低严重度：low | medium | high | critical。
 auto_apply_min_severity = "high"
+# Operator exempt list: proposals targeting these IPs are NEVER auto-applied
+# (manual approval unaffected). Put admin/ops egress IPs here — proposals caused
+# by an operator poking the honeypot should not lock the operator out. Exact IP match.
 # 运营者豁免清单：清单内 IP 的建议永不自动应用（人工批准不受限）。填管理/运维
 # 出口 IP——操作者误碰蜜罐产生的建议不该把操作者自己封出去。精确 IP 匹配。
 auto_apply_exempt_ips = []
+# Daily cap: auto-apply pauses when AI-origin firewall rules in a rolling 24h
+# reach this limit (0 = unlimited) — stops a runaway model from flooding the
+# firewall.
 # 日限额：滚动 24h 内 AI 来源防火墙规则数达到上限即暂停自动应用（0 = 不限），
 # 防模型异常输出打爆防火墙。
 auto_apply_max_per_day = 20
+# ── Evidence gating (the core of auto_apply; ANY conviction channel met = apply) ──
+#
+# The AI only nominates (creates proposals); whether to auto-ban is decided by
+# deterministic local evidence (the AI never grades its own homework):
+#
+#   Channel 1 "convicted by fast path": the source triggered >=
+#     auto_apply_min_detections fast-path detections in 24h (scan / bruteforce /
+#     credential_spray / mcp_ghost / docker_ghost / payload_signature —
+#     deterministic rule verdicts, zero false positives).
+#   Channel 2 "payload-bearing honeypot hits": the source actually sent data to
+#     a honeypot (non-empty payload, e.g. binary blobs in telnet logins, HTTP
+#     exploit strings) >= auto_apply_min_honey_payload times in 24h. Bare port
+#     probes (connect-and-drop, empty payload) do not count — mostly scan noise.
+#   Channel 3 "intel hit": the source is in the threat intel store (from
+#     auto-block-allowed sources) AND was observed by the honeypot >=
+#     auto_apply_intel_min_hits times in 24h (listed but never observed = no ban,
+#     protects stale/reassigned IPs).
+#
+# None met = single signal, the proposal stays pending for human review. All
+# thresholds are tunable by attack intensity (raise during floods to reduce
+# noise); 0 is clamped to 1 — zero-evidence conviction is not allowed.
 # ── 证据门控（auto_apply 的核心机制，三条定罪通道满足任一即自动应用）──
 #
 # AI 只提名（产建议），是否自动封禁由本机确定性证据决定（防 AI 自评自裁）：
@@ -198,92 +314,146 @@ auto_apply_max_per_day = 20
 #
 # 三通道全不满足 = 单信号，建议留在「待处理」等人工确认。阈值均可按攻击
 # 强度调（洪水期调高降噪）；0 值一律按防呆视为 1——不允许零证据定罪。
-auto_apply_min_detections = 1      # 通道一：快路径 detection 次数门槛
-auto_apply_min_honey_payload = 3   # 通道二：带载荷蜜罐命中次数门槛
-auto_apply_intel_min_hits = 1      # 通道三：情报层最少蜜罐观测数
-# ── 证据门控说明结束 ──
+auto_apply_min_detections = 1      # Channel 1: fast-path detection count / 通道一：快路径 detection 次数门槛
+auto_apply_min_honey_payload = 3   # Channel 2: payload-bearing honeypot hits / 通道二：带载荷蜜罐命中次数门槛
+auto_apply_intel_min_hits = 1      # Channel 3: min honeypot observations for intel / 通道三：情报层最少蜜罐观测数
+# ── end evidence gating / 证据门控说明结束 ──
+# Auto-analysis interval (s), 30-86400. Hot-reload.
 # 自动分析间隔（秒），30-86400。热更。
 analyze_interval_secs = 900
+# Max chars of payload uploaded to the LLM per item (40-2000). Hot-reload.
 # 单条 payload 上送给 LLM 的最大字符数（40-2000，控制上送量）。热更。
 max_snippet_chars = 200
+# Output language: zh | en — language of the proposal analysis/reason text
+# (matches your UI language). Hot-reload; unknown values fall back to zh.
 # 输出语言：zh | en——AI 建议的 analysis/reason 文本语言（配合界面语言）。
 # 热更；未知值按 zh 处理。
 output_language = "zh"
+# FP suppression period (s, default 14 days): sources you marked as false
+# positive are skipped by auto-ban/auto-apply.
 # 误报抑制期（秒，默认 14 天）：标记过误报的来源，自动封禁/自动应用期间跳过。
 fp_suppress_secs = 1209600
+# High-severity ignores suppression: medium|high|critical — proposals at/above
+# this tier bypass FP suppression; empty = never bypass (default).
 # 高严重度忽略抑制：设为 medium|high|critical 时该档以上 AI 自动应用不受误报
 # 抑制约束；空 = 不忽略（默认）。
 fp_ignore_min_severity = ""
+# Grey enforcement: default ban duration (s) when an AI proposal is applied;
+# auto-unbans at expiry.
 # 灰度执行：AI 建议应用时的默认封禁时长（秒），到期自动解封。
 trial_ttl_secs = 900
+# Promotion duration (s): ban duration after a human "promotes" a grey rule.
 # 转正时长（秒）：灰度规则经人工「转正」后的封禁时长。
 promote_ttl_secs = 2592000
 
 [detect]
+# Fast-path frequency detection (on by default): port scan / brute-force
+# verdicts, thresholds below. Hot-reload.
 # 快路径频次检测（默认开）：端口扫描 / 暴力探测判定，阈值见下。热更。
 enabled = true
+# Auto-ban on verdict (TTL expiry auto-unbans; private IPs are never banned).
+# On by default.
 # 触发后自动封禁（TTL 到期自动解封 + 内网地址永不封禁）。默认开。
 auto_block = true
+# Port scan verdict: >= N distinct honeypot ports touched within window_secs.
 # 端口扫描判定：window_secs 内触达 ≥ N 个不同蜜罐端口。
 scan_distinct_ports = 5
+# Brute-force verdict: >= N hits on the same (source, listener) within window_secs.
 # 暴力探测判定：同一 (来源, 监听器) window_secs 内 ≥ N 次。
 bruteforce_hits = 10
+# Verdict window (s).
 # 判定窗口（秒）。
 window_secs = 60
+# Auto-ban TTL (s), auto-unbans at expiry.
 # 自动封禁 TTL（秒），到期自动解封。
 ttl_secs = 1800
 
 [detect.capture]
+# Real traffic packet capture (off by default: needs a driver/elevation and
+# touches the local network plane). Restart required.
 # 真实流量采样捕获（默认关：需要驱动/提权，是对本机网络面的行为）。需重启。
 enabled = false
+# control = TCP SYN headers only (metadata) | full = all TCP segments (flow
+# reassembly forensics). Restart required.
 # control = 仅 TCP 纯 SYN 包头（元数据）| full = 全 TCP 段（流重组取证）。需重启。
 mode = "control"
+# Port-scan verdict on the capture path: >= N distinct target ports SYNned
+# within window_secs.
 # 采样路径的端口扫描判定：window_secs 内对 ≥ N 个不同目标端口发 SYN。
 scan_distinct_ports = 15
+# Windows driver integrity check: expected SHA-256 of WinDivert64.sys (lowercase
+# hex); empty = no check.
 # Windows 驱动完整性校验：期望的 WinDivert64.sys SHA-256（hex 小写）；空 = 不校验。
 driver_sha256 = ""
+# SYN flood verdict: >= N SYNs from one (source, dst ip:port) within window_secs.
 # SYN flood 判定：同一 (来源, 目标 IP:端口) window_secs 内 ≥ N 个 SYN。
 syn_flood_rate = 100
 window_secs = 60
+# Flow table idle reclaim (s).
 # 流表空闲回收（秒）。
 flow_idle_secs = 120
+# Flow table capacity (evicts oldest flow when exceeded).
 # 流表容量上限（超限驱逐最旧流）。
 flow_table_cap = 65536
 
 [detect.l7]
+# L7 parsing & fingerprints (produced in full capture mode only; deep inspection
+# off by default). Hot-reload.
 # L7 解析与指纹（仅 full 采样模式下产出；深检默认关）。热更。
 enabled = false
+# JA3 client fingerprint (TLS ClientHello).
 # JA3 客户端指纹（TLS ClientHello）。
 ja3 = true
+# JA4 client fingerprint (FoxIO spec).
 # JA4 客户端指纹（FoxIO 规范）。
 ja4 = false
 
 [detect.rules]
+# Rule subset engine (Suricata/ET style, off by default). Hot-reload (pack
+# changes hot-reload atomically).
 # 规则子集引擎（Suricata/ET 风格，默认关）。热更（文件变化整包热重载）。
 enabled = false
+# Local rule pack path (single file; any invalid rule rejects the whole pack —
+# no half-loaded rule sets).
+# Sample pack: crates/aisafeguard-rules/demo.rules.
 # 本地规则包路径（单文件；任何一条不合法即整包拒绝，不加载半套规则）。
 # 示范包见仓库 crates/aisafeguard-rules/demo.rules。
 path = ""
+# Whether rule hits auto-ban (false = alert only; still subject to private-IP
+# protection + FP suppression).
 # 规则命中是否自动封禁（默认 false 只告警；仍受内网保护 + 误报抑制约束）。
 auto_block = false
+# Rule count cap (whole-pack validation).
 # 规则条数上限（整包校验）。
 max_rules = 5000
 
 [xdp]
+# XDP fast path (off by default, Linux only, needs root/CAP_BPF): drops packets
+# in the kernel receive path, microsecond effectiveness; nftables is always the
+# fallback, auto-degrades if attach fails. Restart required.
 # XDP 快速执行层（默认关，仅 Linux，需 root/CAP_BPF）：内核收包路径直接丢弃，
 # 微秒级生效；nftables 永远兜底，附加失败自动降级。需重启。
 enabled = false
+# NIC to attach the XDP program to.
 # 附加 XDP 程序的网卡名。
 iface = "eth0"
+# skb (generic XDP, works on all NICs) | native (driver-level, needs NIC support).
 # skb（generic XDP，所有网卡可用）| native（驱动级，需网卡支持）。
 mode = "skb"
 
 [intel]
+# Threat intel (off by default: makes outbound requests): multi-source feeds
+# intersected with local observations.
 # 威胁情报（默认关：对外网络请求）：多源名单与本机观测求交。
 enabled = false
+# Fetch interval (s).
 # 拉取间隔（秒）。
 interval_secs = 21600
 
+# F710 multi-source tiers: each source carries its own confidence and an
+# explicit auto-block permission — auto-block = source auto_block=true AND
+# confidence="high"; private IPs are rejected from any source; privileged
+# entries are never overwritten by less privileged ones (conflicts by priority).
 # F710 多源分级：每源自带置信度与「能否自动封禁」的显式许可——
 # 自动封禁 = 该源 auto_block=true 且 confidence="high" 双条件；内网地址任何源都拒收；
 # 特权条目不被非特权源覆盖（冲突按源优先级）。
@@ -294,11 +464,18 @@ confidence = "high"
 kind = "c2"
 auto_block = true
 ttl_secs = 259200
+# Fetch format: feodo (plain text) | crowdsec (CTI security-blocklist)
 # 拉取格式：feodo（纯文本）| crowdsec（CTI security-blocklist）
 format = "feodo"
+# Per-fetch entry cap (prevents feed explosions; overflow is truncated and counted)
 # 单轮入库上限（防名单爆炸；超出截断并计入丢弃）
 max_entries = 1000
 
+# CrowdSec community blocklist example (F720; auto-block semantics match the
+# official bouncer; needs a free API key):
+# Keys never go in config — env var AISAFEGUARD_CROWDSEC_KEY or credential
+# manager crowdsec-key; a missing key skips the source with a clear warning
+# (no silent degradation). CIDR entries are dropped and counted in v1.
 # CrowdSec 社区名单示例（F720，自动封禁语义与官方 bouncer 一致；需免费 API key）：
 # 密钥不入配置——环境变量 AISAFEGUARD_CROWDSEC_KEY 或凭据管理器 crowdsec-key；
 # 缺 key 时该源跳过并明确告警（不做静默降级）。网段条目一期丢弃并计数。
@@ -312,6 +489,7 @@ max_entries = 1000
 # format = "crowdsec"
 # max_entries = 1000
 
+# Second source example (label only, no auto-block):
 # 第二个源示例（仅标注不自动封）：
 # [[intel.sources]]
 # name = "my_mirror"
@@ -324,51 +502,87 @@ max_entries = 1000
 # max_entries = 1000
 
 [fed]
+# Federation (off by default): multiple nodes share observations and proposals
+# over mTLS.
 # 组织协同（默认关）：多节点经 mTLS 共享观测与建议。
 enabled = false
+# off | coordinator | agent.
 # off | coordinator | agent。
 role = "off"
+# Node name ([a-zA-Z0-9_-]{1,32}, must match the issued certificate).
 # 节点名（[a-zA-Z0-9_-]{1,32}，需与签发证书时一致）。
 node = ""
+# agent role: coordinator address.
 # agent 角色：协调者地址。
 coordinator = ""
+# Quorum (default 0 = disabled): >0 blocks auto-apply of AI proposals without
+# enough independent nodes.
 # quorum（默认 0 = 不启用）：>0 时独立节点数不足的 AI 建议不自动应用。
 min_peers = 0
+# agent report interval (s).
 # agent 上报间隔（秒）。
 interval_secs = 60
+# coordinator role: /fed mTLS listen address (separate from the local API).
 # coordinator 角色：/fed 面 mTLS 监听地址（独立于本地 API）。
 listen_addr = "0.0.0.0:7421"
+# Certificate material paths; empty = ca.pem / cert.pem / key.pem under
+# <data dir>/fed/.
 # 证书材料路径；空 = <数据目录>/fed/ 下的 ca.pem / cert.pem / key.pem。
 ca_path = ""
 cert_path = ""
 key_path = ""
+# F300: whether local FP flags are shared with the org (off by default).
+# Sharing = FP flags are broadcast as proposals; other nodes only get a GUI hint
+# and decide manually — never force-removes local handling.
 # F300：本地误报标记是否组织共享（默认不共享）。共享 = 误报标记以建议性质
 # 广播给组织，他节点仅 GUI 提示、人工决定是否跟进，绝不强制解除本地方案。
 share_fp = false
+# F300: org recommendation upgrade threshold (adoption percent, default 60).
+# Zero FP + adopted by >=2 nodes + adoption met → upgraded to "org
+# recommendation"; later re-verifications raise default severity (still a proposal).
 # F300：组织推荐升级阈值（采纳率百分比，默认 60）。零误报且采纳 ≥2 个节点
 # 且采纳率达标 → 升级「组织推荐」，后续复验默认严重度提高（仍为建议）。
 org_adoption_percent = 60
+# F400: coordinator per-node inbound rate limit (msgs/min, default 240,
+# 0 = unlimited). Over the limit degrades to "heartbeat only" for 5 minutes —
+# stops a compromised node from using the org as a broadcast amplifier.
 # F400：协调者对单节点入站消息限频（条/分钟，默认 240，0 = 不限）。
 # 超限降级「仅心跳」5 分钟——防被攻陷节点把组织当广播放大器。
 inbound_rate_per_min = 240
 
 [syslog]
+# Remote log forwarding (off by default): event bus → RFC 5424 syslog
+# (best-effort, never blocks the engine).
 # 远程日志转发（默认关）：事件总线 → RFC 5424 syslog（best-effort 不阻塞引擎）。
 enabled = false
+# Collector address.
 # 收集器地址。
 target = "127.0.0.1:514"
+# udp (RFC 5426) | tcp (one line per event).
 # udp（RFC 5426）| tcp（每条一行分帧）。
 protocol = "udp"
 
 [notify]
+# Webhook alerts (off by default): events at/above the threshold are POSTed as
+# JSON to the receiver.
 # 告警通知（默认关）：达到阈值的事件 POST JSON 到接收端。
 enabled = false
+# Receiver URL (WeCom/DingTalk/Slack-compatible gateways or your own receiver).
 # 接收端 URL（企业微信/钉钉/Slack 兼容网关或自建接收器）。
 url = ""
+# Min forwarded severity: error | warning | notice | info (inclusive).
 # 最低转发严重度：error | warning | notice | info（含更严重者）。
 min_severity = "warning"
+# Request timeout (s).
 # 请求超时（秒）。
 timeout_secs = 10
+# HMAC-SHA256 request signing (off by default): covers "{timestamp}.{raw body}",
+# the receiver recomputes with the same key + time window anti-replay. Keys
+# never go in config files — env var AISAFEGUARD_WEBHOOK_SECRET (highest
+# priority) or credential manager webhook-secret; enabled without a key =
+# dropped, not sent.
+# Note: HMAC only proves transport integrity, not auditable evidence (see
+# THREAT_MODEL "evidence semantics").
 # HMAC-SHA256 请求签名（默认关）：覆盖 "{timestamp}.{原始字节}"，接收方同密钥
 # 重算比对 + 时间窗防重放。密钥不入配置文件——环境变量 AISAFEGUARD_WEBHOOK_SECRET
 # （最高优先）或凭据管理器 webhook-secret；开而不设密钥 = 丢弃不发送。
@@ -376,14 +590,19 @@ timeout_secs = 10
 sign = false
 
 [exposure]
+# Host exposure auto-scan interval (s); 0 = off (manual scan unaffected),
+# 300-86400 = scheduled scan stored for AI & API.
 # 主机暴露面自动扫描间隔（秒）；0 = 关闭（手动扫描不受影响），300-86400 = 定时扫描并入库。
 auto_scan_secs = 0
 
 [ui]
+# UI theme: deep_blue | light | warm | contrast. Switchable in the GUI settings page.
 # 界面主题：deep_blue | light | warm | contrast。GUI 设置页可切换。
 theme = "deep_blue"
+# Global font scale (0.85-1.6).
 # 全局字号缩放（0.85-1.6）。
 font_scale = 1.15
 
+# UI language (egui desktop): zh | en. Hot-reload (switch in the settings page).
 # 界面语言（egui 桌面端）：zh | en。热更（设置页可切换）。
 language = "zh"
