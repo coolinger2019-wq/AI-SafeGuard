@@ -7,7 +7,7 @@ use super::*;
 
 impl AisafeApp {
     pub(crate) fn org_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label(title("组织协同").strong());
+        ui.label(title(t("组织协同", "Organization")).strong());
         ui.add_space(space::M);
 
         let Some(panel) = self.cache.fed_panel.clone() else {
@@ -26,7 +26,7 @@ impl AisafeApp {
                 .num_columns(2)
                 .spacing([14.0, space::S])
                 .show(ui, |ui| {
-                    ui.label("本机节点名");
+                    ui.label(t("本机节点名", "Local Node Name"));
                     ui.add(
                         egui::TextEdit::singleline(&mut self.org_node_name)
                             .hint_text(t(
@@ -149,7 +149,7 @@ impl AisafeApp {
                 ui.add_space(space::M);
                 card(
                     ui,
-                    "隔离中",
+                    t("隔离中", "Quarantined"),
                     &panel
                         .members
                         .iter()
@@ -179,10 +179,10 @@ impl AisafeApp {
                 .num_columns(5)
                 .spacing([16.0, 4.0])
                 .show(ui, |ui| {
-                    ui.strong("节点");
-                    ui.strong("状态");
+                    ui.strong(t("节点", "Node"));
+                    ui.strong(t("状态", "Status"));
                     ui.strong(t("最后在线", "Last Seen"));
-                    ui.strong("证书指纹");
+                    ui.strong(t("证书指纹", "Cert Fingerprint"));
                     ui.strong(t("操作", "Actions"));
                     ui.end_row();
 
@@ -191,9 +191,9 @@ impl AisafeApp {
                         let (status_text, color) = if m.revoked {
                             (t("已吊销", "Revoked"), danger())
                         } else if m.status == "quarantined" {
-                            ("隔离中", warn())
+                            (t("隔离中", "Quarantined"), warn())
                         } else {
-                            ("正常", accent())
+                            (t("正常", "Normal"), accent())
                         };
                         ui.label(RichText::new(status_text).color(color));
                         let ago = now - m.last_seen;
@@ -212,7 +212,7 @@ impl AisafeApp {
                         ));
                         // 操作：与 CLI 同一 DB 通路（POST /api/fed/members/{node}/…）
                         if m.revoked {
-                            ui.label(caption("连接已拒绝"));
+                            ui.label(caption(t("连接已拒绝", "Connection refused")));
                         } else if m.status == "quarantined" {
                             ui.horizontal(|ui| {
                                 ui.add(
@@ -220,7 +220,7 @@ impl AisafeApp {
                                         .hint_text(t("指纹前缀 ≥16 位", "Fingerprint prefix ≥16 chars"))
                                         .desired_width(180.0),
                                 );
-                                if ui.button("解除隔离").clicked() {
+                                if ui.button(t("解除隔离", "Lift Quarantine")).clicked() {
                                     let fp = self.org_lift_fp.trim().to_string();
                                     if fp.is_empty() {
                                         self.set_toast(
@@ -255,7 +255,7 @@ impl AisafeApp {
                                         .hint_text("隔离原因（可选）")
                                         .desired_width(180.0),
                                 );
-                                if ui.button("软隔离").clicked() {
+                                if ui.button(t("软隔离", "Quarantine")).clicked() {
                                     let node = m.node.clone();
                                     let reason = self.org_reason.trim().to_string();
                                     match self.eng.quarantine_member(&node, false, "", &reason) {
@@ -286,7 +286,9 @@ impl AisafeApp {
         if panel.role == "coordinator" {
             section(ui, t("处理入伙申请", "Process Join Request"));
             ui.horizontal(|ui| {
-                if ui.button("选择成员的申请文件…").clicked()
+                if ui
+                    .button(t("选择成员的申请文件…", "Select member request file…"))
+                    .clicked()
                     && let Some(p) = rfd::FileDialog::new().pick_file()
                 {
                     match std::fs::read_to_string(&p) {
@@ -345,7 +347,7 @@ impl AisafeApp {
         }
 
         // 组织事件流（本节点账本：印证/建议/误报提示/推荐/隔离广播）
-        section(ui, "组织事件流");
+        section(ui, t("组织事件流", "Org Event Stream"));
         ui.label(caption(
             "本节点收到的组织消息与复验结果（只读；处置仍走本地路径）",
         ));
@@ -358,9 +360,9 @@ impl AisafeApp {
                 .spacing([16.0, 4.0])
                 .show(ui, |ui| {
                     ui.strong(t("时间", "Time"));
-                    ui.strong("类型");
+                    ui.strong(t("类型", "Type"));
                     ui.strong(t("对象", "Target"));
-                    ui.strong("详情");
+                    ui.strong(t("详情", "Detail"));
                     ui.end_row();
                     for e in panel.org_events.iter().take(30) {
                         let ago = panel.data_as_of.saturating_sub(e.ts);
@@ -440,7 +442,9 @@ impl AisafeApp {
                     }
                     if ui
                         .add(egui::Button::new(
-                            RichText::new("确认吊销驱离").color(danger()).strong(),
+                            RichText::new(t("确认吊销驱离", "Confirm Revocation"))
+                                .color(danger())
+                                .strong(),
                         ))
                         .clicked()
                     {

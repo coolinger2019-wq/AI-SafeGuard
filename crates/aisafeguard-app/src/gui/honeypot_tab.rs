@@ -36,7 +36,11 @@ const KIND_DEFAULT_PORT: [u16; 6] = [2222, 8081, 2323, 1337, 3307, 6379];
 
 impl AisafeApp {
     pub(crate) fn honeypot_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("蜜罐").size(type_scale::TITLE).strong());
+        ui.label(
+            RichText::new(t("蜜罐", "Honeypot"))
+                .size(type_scale::TITLE)
+                .strong(),
+        );
         ui.add_space(space::M);
 
         // 与设置页共用同一份草稿：这里改、设置页看得到
@@ -44,7 +48,13 @@ impl AisafeApp {
         let status = self.cache.status.clone();
         let enabled = status.as_ref().map(|s| s.honeypot_enabled).unwrap_or(false);
         if !enabled {
-            warn_banner(ui, "蜜罐功能已禁用——下方打开总开关并保存，重启后生效。");
+            warn_banner(
+                ui,
+                t(
+                    "蜜罐功能已禁用——下方打开总开关并保存，重启后生效。",
+                    "Honeypot is disabled — toggle the master switch below and save; takes effect after restart.",
+                ),
+            );
         }
         let listeners = status
             .as_ref()
@@ -66,8 +76,11 @@ impl AisafeApp {
         section(
             ui,
             format!(
-                "监听器（运行中 {running_n} / 已配置 {} / 共 {} 种协议）",
+                "{} {running_n} / {} {} / {} {}",
+                t("监听器（运行中 ", "Listeners (running "),
+                t("已配置 ", "configured "),
                 listeners.len(),
+                t("共 ", "of "),
                 LISTENER_KINDS.len()
             ),
         );
@@ -83,7 +96,13 @@ impl AisafeApp {
         let panel_action = self.honeypot_config_panel(ui);
 
         ui.add_space(space::L);
-        section(ui, "全局设置（改动需重启）");
+        section(
+            ui,
+            t(
+                "全局设置（改动需重启）",
+                "Global Settings (restart required)",
+            ),
+        );
         let Some(mut draft) = self.settings_draft.clone() else {
             return;
         };
@@ -118,8 +137,10 @@ impl AisafeApp {
         section(
             ui,
             format!(
-                "监听表（{} 行，改动需重启生效）",
-                draft.honeypot.listeners.len()
+                "{} ({} {})",
+                t("监听表", "Listener Table"),
+                draft.honeypot.listeners.len(),
+                t("行，改动需重启生效", "rows; restart to apply changes")
             ),
         );
         // 端口列文本缓冲与监听表行数对齐（增删行时同步维护，此处兜底重建）
@@ -146,7 +167,13 @@ impl AisafeApp {
             .min_col_width(cell_w)
             .max_col_width(cell_w * 2.0)
             .show(ui, |ui| {
-                for h in ["启用", "名称", "协议", "端口", ""] {
+                for h in [
+                    t("启用", "Enable"),
+                    t("名称", "Name"),
+                    t("协议", "Protocol"),
+                    t("端口", "Port"),
+                    "",
+                ] {
                     ui.label(caption(h).color(text_dim()));
                 }
                 ui.end_row();
@@ -166,7 +193,7 @@ impl AisafeApp {
                         egui::TextEdit::singleline(&mut self.settings_listener_ports[i])
                             .desired_width(56.0),
                     );
-                    if ui.small_button("删除").clicked() {
+                    if ui.small_button(t("删除", "Delete")).clicked() {
                         remove_idx = Some(i);
                     }
                     ui.end_row();
@@ -177,7 +204,7 @@ impl AisafeApp {
             self.settings_listener_ports.remove(i);
         }
         ui.horizontal_wrapped(|ui| {
-            if ui.button("+ 添加监听器").clicked() {
+            if ui.button(t("+ 添加监听器", "+ Add Listener")).clicked() {
                 draft.honeypot.listeners.push(ListenerConfig {
                     name: "mysql".into(),
                     port: 3307,
@@ -199,38 +226,44 @@ impl AisafeApp {
 
     /// 假 Shell（中交互）编辑器
     pub(crate) fn honeypot_shell_editor(&mut self, ui: &mut egui::Ui, draft: &mut AppConfig) {
-        section(ui, "假 Shell（中交互，需重启）");
+        section(
+            ui,
+            t(
+                "假 Shell（中交互，需重启）",
+                "Fake Shell (mid-interaction, restart required)",
+            ),
+        );
         egui::Grid::new("shell-settings")
             .num_columns(2)
             .spacing([14.0, space::S])
             .show(ui, |ui| {
-                ui.label("SSH 假 Shell");
+                ui.label(t("SSH 假 Shell", "SSH Fake Shell"));
                 ui.checkbox(
                     &mut draft.honeypot.shell.enabled,
-                    "（默认关；开启后 ssh 监听器认证后进入命令仿真会话）",
+                    t("（默认关；开启后 ssh 监听器认证后进入命令仿真会话）", "(off by default; when on, the SSH listener enters command emulation after auth)"),
                 );
                 ui.end_row();
-                ui.label("Telnet 假 Shell");
+                ui.label(t("Telnet 假 Shell", "Telnet Fake Shell"));
                 ui.checkbox(
                     &mut draft.honeypot.shell.telnet_enabled,
-                    "（默认关；开启后 telnet 监听器进入命令仿真会话）",
+                    t("（默认关；开启后 telnet 监听器进入命令仿真会话）", "(off by default; when on, the Telnet listener enters command emulation)"),
                 );
                 ui.end_row();
-                ui.label("假 Shell 用户名");
+                ui.label(t("假 Shell 用户名", "Fake Shell Username"));
                 ui.add(
                     egui::TextEdit::singleline(&mut draft.honeypot.shell.username)
                         .desired_width(160.0)
                         .hint_text("deploy"),
                 );
                 ui.end_row();
-                ui.label("假 Shell 主机名");
+                ui.label(t("假 Shell 主机名", "Fake Shell Hostname"));
                 ui.add(
                     egui::TextEdit::singleline(&mut draft.honeypot.shell.hostname)
                         .desired_width(160.0)
                         .hint_text("debian-11"),
                 );
                 ui.end_row();
-                ui.label("单会话命令上限");
+                ui.label(t("单会话命令上限", "Commands per Session"));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.settings_shell_max_cmds)
                         .desired_width(120.0),
@@ -249,10 +282,16 @@ impl AisafeApp {
 
     /// 凭证采集与喷洒检测编辑器
     pub(crate) fn honeypot_credentials_editor(&mut self, ui: &mut egui::Ui, draft: &mut AppConfig) {
-        section(ui, "凭证采集与喷洒检测（需重启）");
+        section(
+            ui,
+            t(
+                "凭证采集与喷洒检测（需重启）",
+                "Credential Capture & Spray Detection (restart required)",
+            ),
+        );
         ui.checkbox(
             &mut draft.honeypot.credentials.enabled,
-            "启用（默认开）：蜜罐收到的用户名/口令对以加盐哈希入库，口令明文永不落盘",
+            t("启用（默认开）：蜜罐收到的用户名/口令对以加盐哈希入库，口令明文永不落盘", "Enable (on by default): captured user/password pairs are stored salted-hashed; plaintext never touches disk"),
         );
         ui.label(
             RichText::new(
@@ -267,10 +306,10 @@ impl AisafeApp {
 
     /// 蜜饵 canary 编辑器
     pub(crate) fn honeypot_canary_editor(&mut self, ui: &mut egui::Ui, draft: &mut AppConfig) {
-        section(ui, "蜜饵 canary（需重启）");
+        section(ui, t("蜜饵 canary（需重启）", "Canary (restart required)"));
         ui.checkbox(
             &mut draft.honeypot.canary.enabled,
-            "启用蜜饵（默认关）：HTTP 蜜罐内置 /backup.zip 等诱饵资源，下载行为即高价值事件",
+            t("启用蜜饵（默认关）：HTTP 蜜罐内置 /backup.zip 等诱饵资源，下载行为即高价值事件", "Enable canaries (off by default): the HTTP honeypot serves /backup.zip etc.; downloads are high-value events"),
         );
         ui.label(
             RichText::new(
@@ -299,12 +338,12 @@ fn listener_status_list(
     // 表头：与下面每行的列顺序一一对应（协议 / 监听器 / 端口 / 状态 / 操作 / 24h）
     ui.horizontal(|ui| {
         for (h, w) in [
-            ("协议", 86.0),
-            ("监听器", 150.0),
-            ("端口", 62.0),
-            ("状态", 96.0),
-            ("操作", 130.0),
-            ("24h 触发", 84.0),
+            (t("协议", "Protocol"), 86.0),
+            (t("监听器", "Listener"), 150.0),
+            (t("端口", "Port"), 62.0),
+            (t("状态", "Status"), 96.0),
+            (t("操作", "Actions"), 130.0),
+            (t("24h 触发", "24h Hits"), 84.0),
         ] {
             ui.allocate_ui_with_layout(
                 egui::vec2(w, 0.0),
@@ -359,7 +398,7 @@ fn listener_status_list(
                             }
                             None => {
                                 ui.label(
-                                    RichText::new("未配置")
+                                    RichText::new(t("未配置", "Not configured"))
                                         .size(type_scale::BODY)
                                         .color(text_dim()),
                                 );
@@ -385,7 +424,7 @@ fn listener_status_list(
                                         .size(type_scale::BODY)
                                         .color(text_dim()),
                                 )
-                                .on_hover_text("该协议的建议端口（添加后即使用此端口）");
+                                .on_hover_text(t("该协议的建议端口（添加后即使用此端口）", "Suggested port for this protocol (used on add)"));
                             }
                         },
                     );
@@ -395,12 +434,12 @@ fn listener_status_list(
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
                             let (state, color) = match (cfg, info) {
-                                (None, _) => ("○ 未配置".to_string(), text_dim()),
+                                (None, _) => (t("○ 未配置", "○ 未配置").to_string(), text_dim()),
                                 (Some(_), Some(l)) => {
                                     let (s, c) = running_state(l, honeypot_enabled);
                                     (format!("● {s}"), c)
                                 }
-                                (Some(_), None) => ("● 已停止".to_string(), text_dim()),
+                                (Some(_), None) => (t("● 已停止", "● 已停止").to_string(), text_dim()),
                             };
                             ui.label(RichText::new(state).size(type_scale::CAPTION).color(color));
                         },
@@ -415,20 +454,20 @@ fn listener_status_list(
                                 // 运行中给「停止」，否则（含绑定失败重试）给「启动」
                                 let running_now =
                                     info.map(|l| l.running && honeypot_enabled).unwrap_or(false);
-                                let label = if running_now { "停止" } else { "启动" };
+                                let label = if running_now { t("停止", "Stop") } else { t("启动", "Start") };
                                 if ui
                                     .button(label)
-                                    .on_hover_text("热切换：立即生效，并写入 config.toml 保持一致")
+                                    .on_hover_text(t("热切换：立即生效，并写入 config.toml 保持一致", "Hot toggle: takes effect now and is written to config.toml"))
                                     .clicked()
                                 {
                                     action = Some(ListenerAction::Toggle(i));
                                 }
-                                if ui.button("配置").clicked() {
+                                if ui.button(t("配置", "Config")).clicked() {
                                     action = Some(ListenerAction::OpenConfig(i));
                                 }
                             }
                             None => {
-                                if ui.button("+ 添加").clicked() {
+                                if ui.button(t("+ 添加", "+ Add")).clicked() {
                                     action = Some(ListenerAction::Add(ki));
                                 }
                             }
@@ -460,14 +499,14 @@ fn running_state(
     l: &crate::engine::ListenerInfo,
     honeypot_enabled: bool,
 ) -> (&'static str, Color32) {
-    if l.mode == "未启用" {
-        ("未启用", text_dim())
+    if l.mode == t("未启用", "Disabled") {
+        (t("未启用", "Disabled"), text_dim())
     } else if l.running && honeypot_enabled {
-        ("运行中", ok())
+        (t("运行中", "Running"), ok())
     } else if honeypot_enabled {
-        ("已停止", warn())
+        (t("已停止", "Stopped"), warn())
     } else {
-        ("已停止", text_dim())
+        (t("已停止", "Stopped"), text_dim())
     }
 }
 
@@ -503,9 +542,9 @@ impl AisafeApp {
                             .size(type_scale::SECTION)
                             .strong(),
                     );
-                    chip(ui, "重启后生效", warn());
+                    chip(ui, t("重启后生效", "effective after restart"), warn());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("收起").clicked() {
+                        if ui.button(t("收起", "Collapse")).clicked() {
                             action = Some(ListenerAction::OpenConfig(usize::MAX));
                         }
                     });
@@ -514,13 +553,13 @@ impl AisafeApp {
 
                 // 名称 / 协议 / 端口：每行一个字段，避免横向布局里换行标签拿不到宽度
                 ui.horizontal(|ui| {
-                    ui.label(caption("名称").color(text_dim()));
+                    ui.label(caption(t("名称", "Name")).color(text_dim()));
                     ui.add(egui::TextEdit::singleline(&mut self.hp_name_buf).desired_width(180.0));
                 });
                 let kinds: Vec<String> = LISTENER_KINDS.iter().map(|k| (*k).to_string()).collect();
                 let mut kind = cur.kind.clone();
                 ui.horizontal(|ui| {
-                    ui.label(caption("协议").color(text_dim()));
+                    ui.label(caption(t("协议", "Protocol")).color(text_dim()));
                     egui::ComboBox::from_id_salt("hp-config-kind")
                         .selected_text(kind_display(&kind))
                         .show_ui(ui, |ui| {
@@ -530,9 +569,9 @@ impl AisafeApp {
                         });
                 });
                 ui.horizontal(|ui| {
-                    ui.label(caption("端口").color(text_dim()));
+                    ui.label(caption(t("端口", "Port")).color(text_dim()));
                     ui.add(egui::TextEdit::singleline(&mut self.hp_port_buf).desired_width(80.0));
-                    if ui.button("保存该监听器").clicked() {
+                    if ui.button(t("保存该监听器", "Save Listener")).clicked() {
                         match self.hp_save_edits(idx, &kind) {
                             Ok(()) => {
                                 self.hp_config_open = None;
@@ -592,20 +631,28 @@ impl AisafeApp {
                         // 已写入配置后尝试立即热启动（失败不回滚——重启后会按配置自动尝试）
                         match self.eng.toggle_listener(kind, true) {
                             Ok(()) => self.set_toast(format!(
-                                "已添加 {} 监听器（端口 {}）并立即启动",
+                                "{} {} {} {}",
+                                t("已添加", "Added"),
                                 kind_display(kind),
+                                t("监听器（端口 ", "listener (port "),
                                 KIND_DEFAULT_PORT[ki]
                             )),
                             Err(e) => self.set_toast(format!(
-                                "已添加 {} 监听器（端口 {}）；立即启动未成功: {e}（重启后自动尝试）",
+                                "{} {} {} {} {e}{}",
+                                t("已添加", "Added"),
                                 kind_display(kind),
-                                KIND_DEFAULT_PORT[ki]
+                                t("监听器（端口 ", "listener (port "),
+                                KIND_DEFAULT_PORT[ki],
+                                t(
+                                    "）；立即启动未成功（重启后自动尝试）",
+                                    "); immediate start failed (will retry on restart)"
+                                )
                             )),
                         }
                         self.refresh_cache();
                         self.hp_config_open = Some(idx);
                     }
-                    Err(e) => self.set_toast(format!("添加失败: {e}")),
+                    Err(e) => self.set_toast(format!("{}{}", t("添加失败: ", "Add failed: "), e)),
                 }
             }
             ListenerAction::Toggle(i) => {
@@ -641,12 +688,21 @@ impl AisafeApp {
                             row.enabled = target;
                         }
                         self.set_toast(format!(
-                            "蜜罐「{name}」已热{}（即时生效，已写入配置）",
-                            if target { "启动" } else { "停止" }
+                            "{} '{}': {} ({})",
+                            t("蜜罐", "Honeypot"),
+                            name,
+                            if target {
+                                t("启动", "started")
+                            } else {
+                                t("停止", "stopped")
+                            },
+                            t("即时生效，已写入配置", "effective now, written to config")
                         ));
                         self.refresh_cache();
                     }
-                    Err(e) => self.set_toast(format!("热切换失败: {e}")),
+                    Err(e) => {
+                        self.set_toast(format!("{}{}", t("热切换失败: ", "Hot-toggle failed: "), e))
+                    }
                 }
             }
         }
@@ -655,22 +711,22 @@ impl AisafeApp {
     /// 保存配置面板的名称/协议/端口（只校验监听表，不牵连其它页的输入框）。
     fn hp_save_edits(&mut self, idx: usize, kind: &str) -> Result<(), String> {
         let Some(draft) = self.settings_draft.as_mut() else {
-            return Err("配置草稿未就绪".into());
+            return Err(t("配置草稿未就绪", "Config draft not ready").into());
         };
         if idx >= draft.honeypot.listeners.len() {
-            return Err("监听器已不存在".into());
+            return Err(t("监听器已不存在", "Listener no longer exists").into());
         }
         let port: u16 = self
             .hp_port_buf
             .trim()
             .parse()
-            .map_err(|_| "端口非法（需 1-65535）".to_string())?;
+            .map_err(|_| t("端口非法（需 1-65535）", "端口非法（需 1-65535）").to_string())?;
         if port == 0 {
-            return Err("端口非法（需 1-65535）".into());
+            return Err(t("端口非法（需 1-65535）", "端口非法（需 1-65535）").into());
         }
         let name = self.hp_name_buf.trim().to_string();
         if name.is_empty() {
-            return Err("监听器名称不能为空".into());
+            return Err(t("监听器名称不能为空", "Listener name cannot be empty").into());
         }
         // 端口去重（与设置页监听表同一规则）
         if draft
@@ -680,7 +736,12 @@ impl AisafeApp {
             .enumerate()
             .any(|(j, l)| j != idx && l.port == port)
         {
-            return Err(format!("端口 {port} 已被其它监听器占用"));
+            return Err(format!(
+                "{}{} {}",
+                t("端口 ", "Port "),
+                port,
+                t(" 已被其它监听器占用", " already used by another listener")
+            ));
         }
         {
             let l = &mut draft.honeypot.listeners[idx];
@@ -691,10 +752,14 @@ impl AisafeApp {
         let cfg = draft.clone();
         self.eng
             .save_config(cfg)
-            .map_err(|e| format!("保存失败: {e}"))?;
+            .map_err(|e| format!("{}{}", t("保存失败: ", "Save failed: "), e))?;
         self.set_toast(format!(
-            "监听器「{name}」已保存（{} / {port}）；重启程序后生效",
-            kind_display(kind)
+            "{} '{}': {} / {port} ({} {})",
+            t("监听器", "Listener"),
+            name,
+            t("已保存", "saved"),
+            kind_display(kind),
+            t("重启后生效", "effective after restart")
         ));
         Ok(())
     }
@@ -703,12 +768,30 @@ impl AisafeApp {
 /// 未配置协议的一句能力介绍（让「还有哪些蜜罐可用」自解释）
 fn kind_pitch(kind: &str) -> &'static str {
     match kind {
-        "ssh" => "SSH 假服务：抓爆破与漏洞扫描",
-        "http" => "HTTP 假站点：抓 Web 探测与蜜饵下载",
-        "telnet" => "Telnet 假服务：抓弱口令爆破",
-        "generic" => "通用 TCP 记录器：抓任意端口探测",
-        "mysql" => "MySQL 蜜罐：抓数据库爆破与僵尸网络",
-        "redis" => "Redis 蜜罐：抓未授权访问与写命令",
+        "ssh" => t(
+            "SSH 假服务：抓爆破与漏洞扫描",
+            "Fake SSH: brute-force & vuln scanning",
+        ),
+        "http" => t(
+            "HTTP 假站点：抓 Web 探测与蜜饵下载",
+            "Fake HTTP site: web probes & canary downloads",
+        ),
+        "telnet" => t(
+            "Telnet 假服务：抓弱口令爆破",
+            "Fake Telnet: weak-credential brute-force",
+        ),
+        "generic" => t(
+            "通用 TCP 记录器：抓任意端口探测",
+            "Generic TCP logger: probes on any port",
+        ),
+        "mysql" => t(
+            "MySQL 蜜罐：抓数据库爆破与僵尸网络",
+            "Fake MySQL: DB brute-force & botnets",
+        ),
+        "redis" => t(
+            "Redis 蜜罐：抓未授权访问与写命令",
+            "Fake Redis: unauth access & write commands",
+        ),
         _ => "",
     }
 }

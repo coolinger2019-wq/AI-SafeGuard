@@ -17,11 +17,15 @@ const MANUAL: &str = include_str!("../../../../docs/MANUAL.md");
 
 impl AisafeApp {
     pub(crate) fn help_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label(title("帮助"));
+        ui.label(title(t("帮助", "Help")));
         ui.add_space(space::S);
         ui.label(
             RichText::new(format!(
-                "集成操作手册（随版本 v{} 内置更新）",
+                "{} v{}",
+                t(
+                    "集成操作手册（随版本内置更新）",
+                    "Integrated manual (bundled with version"
+                ),
                 env!("CARGO_PKG_VERSION")
             ))
             .size(type_scale::CAPTION)
