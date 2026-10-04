@@ -181,29 +181,29 @@
         ① 快路径已定罪（24h 内 detection 达「定罪阈值」）② 带载荷蜜罐命中（真发过数据，纯端口探测不算）达「载荷阈值」
         ③ 情报库命中且被观测达「情报观测」次数。三通道全不满足 = 单信号，留人工。保存即热更。</div>
         <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-top:10px">
-          <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="pol-auto"> 自动应用</label>
-          <label style="display:flex;align-items:center;gap:6px">最低严重度
+          <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="pol-auto"> <span data-i18n="自动应用">自动应用</span></label>
+          <label style="display:flex;align-items:center;gap:6px"><span data-i18n="最低严重度">最低严重度</span>
             <select id="pol-sev">
               <option value="low">low</option>
               <option value="medium">medium</option>
               <option value="high">high</option>
               <option value="critical">critical</option>
             </select></label>
-          <label style="display:flex;align-items:center;gap:6px">日限额
-            <input type="number" id="pol-cap" min="0" max="100000" step="1" style="width:76px"> 条/24h
-            <span class="hint">0=不限；攻击强度高（扫描洪水期）调高，平日 10-20</span></label>
-          <label style="display:flex;align-items:center;gap:6px">定罪阈值
-            <input type="number" id="pol-det" min="1" max="1000" step="1" style="width:60px"> 检测/24h
-            <span class="hint">通道① 快路径 detection 达 N 次</span></label>
-          <label style="display:flex;align-items:center;gap:6px">载荷阈值
-            <input type="number" id="pol-honey" min="1" max="1000" step="1" style="width:60px"> 次/24h
-            <span class="hint">通道② 带载荷蜜罐命中（真发过数据）达 N 次；纯端口探测不算</span></label>
-          <label style="display:flex;align-items:center;gap:6px">情报观测
-            <input type="number" id="pol-intel" min="1" max="1000" step="1" style="width:60px"> 次/24h
-            <span class="hint">情报命中层要求的最少蜜罐观测</span></label>
-          <label style="display:flex;align-items:center;gap:6px">豁免清单
+          <label style="display:flex;align-items:center;gap:6px"><span data-i18n="日限额">日限额</span>
+            <input type="number" id="pol-cap" min="0" max="100000" step="1" style="width:76px"> <span data-i18n=" 条/24h"> 条/24h</span>
+            <span class="hint" data-i18n="0=不限；攻击强度高（扫描洪水期）调高，平日 10-20">0=不限；攻击强度高（扫描洪水期）调高，平日 10-20</span></label>
+          <label style="display:flex;align-items:center;gap:6px"><span data-i18n="定罪阈值">定罪阈值</span>
+            <input type="number" id="pol-det" min="1" max="1000" step="1" style="width:60px"> <span data-i18n=" 检测/24h"> 检测/24h</span>
+            <span class="hint" data-i18n="通道① 快路径 detection 达 N 次">通道① 快路径 detection 达 N 次</span></label>
+          <label style="display:flex;align-items:center;gap:6px"><span data-i18n="载荷阈值">载荷阈值</span>
+            <input type="number" id="pol-honey" min="1" max="1000" step="1" style="width:60px"> <span data-i18n=" 次/24h"> 次/24h</span>
+            <span class="hint" data-i18n="通道② 带载荷蜜罐命中（真发过数据）达 N 次；纯端口探测不算">通道② 带载荷蜜罐命中（真发过数据）达 N 次；纯端口探测不算</span></label>
+          <label style="display:flex;align-items:center;gap:6px"><span data-i18n="情报观测">情报观测</span>
+            <input type="number" id="pol-intel" min="1" max="1000" step="1" style="width:60px"> <span data-i18n=" 次/24h"> 次/24h</span>
+            <span class="hint" data-i18n="情报命中层要求的最少蜜罐观测">情报命中层要求的最少蜜罐观测</span></label>
+          <label style="display:flex;align-items:center;gap:6px"><span data-i18n="豁免清单">豁免清单</span>
             <input type="text" id="pol-exempt" placeholder="运营/管理出口 IP，逗号分隔" style="width:230px">
-            <span class="hint">永不自动应用</span></label>
+            <span class="hint" data-i18n="永不自动应用">永不自动应用</span></label>
           <button class="act" id="pol-save">保存策略</button>
         </div>
         <div id="pol-msg"></div>
@@ -216,7 +216,7 @@
           <option value="applied">已应用</option>
           <option value="dismissed">已驳回</option>
         </select>
-        <label style="margin-left:16px"><input type="checkbox" id="prop-pause"> 暂停刷新</label>
+        <label style="margin-left:16px"><input type="checkbox" id="prop-pause"> <span data-i18n="暂停刷新">暂停刷新</span></label>
       </p>
       <div id="prop-msg" style="margin-bottom:8px"></div>
       <table id="prop"></table>
@@ -253,7 +253,7 @@ const EN = {
   '仪表盘': 'Dashboard', '事件': 'Events', '建议': 'Proposals', '防火墙': 'Firewall', '配置': 'Config',
   '引擎状态': 'Engine Status', '蜜罐监听': 'Honeypot Listeners', '快捷操作': 'Quick Actions',
   'Top 来源（24h）': 'Top Sources (24h)',
-  '　点「详情」查归属（第三方 ip-api.com，仅查询攻击者 IP）': ' Click "Detail" for geo lookup (third-party ip-api.com, attacker IPs only)',
+  '点「详情」查归属（第三方 ip-api.com，仅查询攻击者 IP）': ' Click "Detail" for geo lookup (third-party ip-api.com, attacker IPs only)',
   '防火墙当前生效的封禁规则（含 AI 灰度/自动封禁/手动/组织来源），每 3 秒自动刷新。': 'Active firewall block rules (AI trial / auto / manual / org origins), auto-refresh every 3s.',
   '暂停刷新': 'Pause refresh',
   '每 3 秒自动刷新，点击行展开载荷。': 'Auto-refresh every 3s. Click a row to expand payload.',
@@ -278,7 +278,8 @@ const EN = {
   '运行时长': 'Uptime', '防火墙后端': 'Firewall Backend', '检测快路径': 'Detect Fast Path',
   '（未提权）': ' (not elevated)', '开': 'On', '关': 'Off', '开 ≥': 'On ≥', '关（人工确认）': 'Off (manual confirm)',
   'AI 慢路径': 'AI Slow Path', 'XDP 快速层': 'XDP Fast Layer', 'AI 自动应用': 'AI Auto Apply',
-  '监听': 'Listener', '端口': 'Port', '交互': 'Interaction', '状态': 'Status', '操作': 'Actions',
+  '监听': 'Listener', '端口': 'Port', '类型': 'Type', '交互': 'Interaction', '状态': 'Status', '操作': 'Actions',
+  '中交互': 'Mid-int',
   '低交互': 'Low-int', '运行中': 'Running', '未运行': 'Not Running', '未启用': 'Disabled', '空闲': 'Idle', '分析中…': 'Analyzing…',
   'AI 立即分析': 'Analyze Now', '情报立即刷新': 'Refresh Intel Now', '暴露面立即扫描': 'Scan Exposure Now',
   '执行中…': 'Working…', '分析已开始（结果见事件与建议页）': 'Analysis started (see Events & Proposals)',
@@ -330,7 +331,15 @@ const EN = {
   'cfg.hint': 'Edits the raw config.toml on the node; server validates before saving, invalid is rejected. Items marked hot-reload take effect on save; others need a service restart.',
   'top.title': 'Top Sources (24h)',
 };
-function t(s) { return LANG === 'en' ? (EN[s] ?? s) : s; }
+const ZH = {
+  'pol.intro': 'AI 自动处置策略 —— 三条定罪通道满足任一才自动灰度封禁（到期自动解封）：\n        ① 快路径已定罪（24h 内 detection 达「定罪阈值」）② 带载荷蜜罐命中（真发过数据，纯端口探测不算）达「载荷阈值」\n        ③ 情报库命中且被观测达「情报观测」次数。三通道全不满足 = 单信号，留人工。保存即热更。',
+  'fw.hint': '防火墙当前生效的封禁规则（含 AI 灰度/自动封禁/手动/组织来源），每 3 秒自动刷新。',
+  'ev.hint': '每 3 秒自动刷新，点击行展开载荷。',
+  'prop.hint': 'AI 慢路径产出：证据 → 建议 → 人工确认。应用 = 按灰度 TTL 封禁（到期自动解封）。',
+  'cfg.hint': '编辑的是节点上的 config.toml 原文；保存时服务端先校验解析，非法不落盘。\n        标注「热更」的项保存即生效；其余项会明确列出、需重启服务。',
+  'top.title': 'Top 来源（24h）',
+};
+function t(s) { return LANG === 'en' ? (EN[s] ?? s) : (ZH[s] ?? s); }
 function fmtTs(ts) {
   const d = new Date(ts * 1000);
   const locale = LANG === 'en' ? 'en-GB' : 'zh-CN';
@@ -583,7 +592,7 @@ async function refreshDash() {
       ? '<button class="act ghost" style="padding:2px 10px;font-size:11.5px" data-ls="stop" data-name="' + esc(l.name) + '">' + t('停止') + '</button>'
       : '<button class="act" style="padding:2px 10px;font-size:11.5px" data-ls="start" data-name="' + esc(l.name) + '">' + t('启动') + '</button>';
     return '<tr><td class="mono">' + esc(l.name) + '</td><td class="mono">' + l.port + '</td><td>' +
-      esc(l.kind) + '</td><td>' + esc(l.mode || t('低交互')) + '</td><td>' +
+      esc(l.kind) + '</td><td>' + esc(t(l.mode || '低交互')) + '</td><td>' +
       (l.running ? '<span class="badge ok">' + t('运行中') + '</span>' : '<span class="badge err">' + t('未运行') + '</span>') +
       '</td><td>' + act + '</td></tr>';
   }).join('');
@@ -657,7 +666,7 @@ function syncKindFilter(rows) {
   if (key === evKindsKey) return;   // 选项没变化就不重建，避免打断用户正在展开的下拉
   evKindsKey = key;
   const sel = $('ev-kind'), cur = sel.value;
-  sel.innerHTML = '<option value="">全部类型</option>' +
+  sel.innerHTML = '<option value="">' + t('全部类型') + '</option>' +
     kinds.map((k) => '<option' + (k === cur ? ' selected' : '') + '>' + esc(k) + '</option>').join('');
 }
 async function refreshEvents() {
