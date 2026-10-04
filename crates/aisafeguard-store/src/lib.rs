@@ -701,6 +701,21 @@ impl Store {
         })
     }
 
+    /// 全量口径（F795 补全）：部署至今的事件总数与独立来源数（任意 kind，
+    /// remote_ip 非空）。与 24h 的 stats_since 是两个口径——仪表盘两类卡片
+    /// 曾因共用同一 24h 查询而恒等（用户实测发现）。
+    pub fn totals_all(&self) -> Result<(i64, i64)> {
+        let conn = self.lock()?;
+        let (total, unique) = conn
+            .query_row(
+                "SELECT COUNT(*), COUNT(DISTINCT remote_ip) FROM events WHERE remote_ip <> ''",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok((total, unique))
+    }
+
     pub fn stats_since(&self, since: i64) -> Result<StatsSummary> {
         let conn = self.lock()?;
         let (total, unique) = conn

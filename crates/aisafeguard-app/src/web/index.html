@@ -563,8 +563,8 @@ async function refreshDash() {
   $('stats').innerHTML =
     statCard(t('24h 命中'), st.hits_24h) +
     statCard(t('24h 攻击者'), st.attackers_24h) +
-    statCard(t('事件总数'), stats.total) +
-    statCard(t('独立来源'), stats.unique_ips) +
+    statCard(t('事件总数'), st.total_events) +
+    statCard(t('独立来源'), st.unique_sources) +
     statCard(t('待处理建议'), st.pending_proposals) +
     statCard(t('生效规则'), st.rule_count);
 

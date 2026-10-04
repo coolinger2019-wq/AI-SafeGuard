@@ -32,7 +32,7 @@ impl AisafeApp {
             ui.add_space(space::M);
             card(
                 ui,
-                t("攻击源 IP", "Attacker IPs"),
+                t("攻击源 IP（24h）", "Attacker IPs (24h)"),
                 &attackers.to_string(),
                 if attackers > 0 { danger() } else { text_dim() },
             );

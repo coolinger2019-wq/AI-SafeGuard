@@ -239,6 +239,9 @@ pub struct StatusReport {
     pub pending_proposals: i64,
     pub hits_24h: i64,
     pub attackers_24h: i64,
+    /// 全量口径（部署至今，F795 补全）：事件总数（任意 kind）与独立来源数
+    pub total_events: i64,
+    pub unique_sources: i64,
     pub detect_enabled: bool,
     pub capture: CaptureStatus,
     /// 价值指标（0.4.0 B5）：口径见 store::ValueMetrics，比率由展示层算
@@ -348,6 +351,7 @@ impl EngineHandle {
             .count_events_kind_since("honeypot_hit", since)
             .unwrap_or(0);
         let stats = self.store.stats_since(since).unwrap_or_default();
+        let (total_events, unique_sources) = self.store.totals_all().unwrap_or((0, 0));
         StatusReport {
             version: self.version.to_string(),
             uptime_secs: self.started.elapsed().as_secs(),
@@ -370,6 +374,8 @@ impl EngineHandle {
             pending_proposals: self.store.count_proposals("pending").unwrap_or(0),
             hits_24h,
             attackers_24h: stats.unique_ips,
+            total_events,
+            unique_sources,
             detect_enabled: cfg.detect.enabled,
             capture: CaptureStatus {
                 enabled: cfg.detect.capture.enabled,
