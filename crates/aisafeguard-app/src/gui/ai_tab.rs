@@ -2,7 +2,11 @@ use super::*;
 
 impl AisafeApp {
     pub(crate) fn ai_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("AI 助手").size(type_scale::TITLE).strong());
+        ui.label(
+            RichText::new(t("AI 助手", "AI Assistant"))
+                .size(type_scale::TITLE)
+                .strong(),
+        );
         ui.add_space(space::M);
 
         let status = self.cache.status.clone();
@@ -13,16 +17,16 @@ impl AisafeApp {
                 chip(
                     ui,
                     if ai.enabled {
-                        "AI 已启用"
+                        t("AI 已启用", "AI Enabled")
                     } else {
-                        "AI 未启用"
+                        t("AI 未启用", "AI Disabled")
                     },
                     if ai.enabled { ok() } else { text_dim() },
                 );
                 chip(
                     ui,
                     &format!("Key: {}", ai.key_source),
-                    if ai.key_source == "未配置" {
+                    if ai.key_source == t("未配置", "Not configured") {
                         warn()
                     } else {
                         text_dim()
@@ -32,9 +36,13 @@ impl AisafeApp {
                 chip(
                     ui,
                     &if ai.auto_apply {
-                        format!("自动应用 ≥{}", ai.auto_apply_min_severity)
+                        format!(
+                            "{}{}",
+                            t("自动应用 ≥", "Auto apply ≥"),
+                            ai.auto_apply_min_severity
+                        )
                     } else {
-                        "自动应用关闭".to_string()
+                        t("自动应用关闭", "Auto apply off").to_string()
                     },
                     if ai.auto_apply { warn() } else { text_dim() },
                 );
@@ -46,69 +54,86 @@ impl AisafeApp {
             let running = ai.as_ref().map(|a| a.running).unwrap_or(false);
             let resp = ui.add_enabled(
                 !running,
-                egui::Button::new(RichText::new("立即分析").color(on_accent()))
+                egui::Button::new(RichText::new(t("立即分析", "Analyze Now")).color(on_accent()))
                     .fill(accent())
                     .corner_radius(CornerRadius::same(6)),
             );
             if running {
                 ui.spinner();
-                ui.label(RichText::new("分析中…").color(text_dim()));
+                ui.label(RichText::new(t("分析中…", "Analyzing…")).color(text_dim()));
             }
             if resp.clicked() {
                 if self.eng.trigger_analysis() {
-                    self.set_toast("AI 分析已开始");
+                    self.set_toast(t("AI 分析已开始", "AI analysis started"));
                 } else {
-                    self.set_toast("已有分析在运行");
+                    self.set_toast(t("已有分析在运行", "An analysis is already running"));
                 }
             }
             if let Some(ai) = &ai {
                 ui.label(
-                    RichText::new(format!("自动分析间隔 {} 秒", ai.analyze_interval_secs))
-                        .size(type_scale::CAPTION)
-                        .color(text_dim()),
+                    RichText::new(format!(
+                        "{}{} {}",
+                        t("自动分析间隔", "Auto-analysis every"),
+                        ai.analyze_interval_secs,
+                        t("秒", "s")
+                    ))
+                    .size(type_scale::CAPTION)
+                    .color(text_dim()),
                 );
             }
         });
         ui.label(
-            RichText::new("分析内容仅为 24h 聚合统计与最近 20 条截断记录；建议需人工确认，蜜罐数据按不可信输入隔离。")
+            RichText::new(t("分析内容仅为 24h 聚合统计与最近 20 条截断记录；建议需人工确认，蜜罐数据按不可信输入隔离。", "Analysis input is 24h aggregate stats and the latest 20 truncated records; proposals need human confirmation; honeypot data is treated as untrusted input."))
                 .size(type_scale::MICRO)
                 .color(text_dim()),
         );
 
         ui.add_space(space::L);
-        // 主机暴露面（0.2 P1："自动分析功能接口"第一步）
-        section(ui, "主机暴露面");
+        // 主机暴露面（0.2 P1：t("自动分析功能接口", "Auto-analysis API")第一步）
+        section(ui, t("主机暴露面", "Host Exposure"));
         let exposure = self.eng.latest_exposure().ok().flatten();
         match &exposure {
             Some(snap) => {
                 ui.label(
                     RichText::new(format!(
-                        "上次扫描 {} · {} 个监听端点（数据已随下次 AI 分析送评）",
+                        "{} {} · {} {}",
+                        t("上次扫描", "Last scan"),
                         fmt_ts(snap.ts),
-                        snap.entries.len()
+                        snap.entries.len(),
+                        t(
+                            "个监听端点（数据已随下次 AI 分析送评）",
+                            "listening endpoints (data sent to next AI analysis)"
+                        )
                     ))
                     .size(type_scale::CAPTION)
                     .color(text_dim()),
                 );
-                egui::CollapsingHeader::new(egui::RichText::new("监听清单").size(type_scale::BODY))
-                    .id_salt("exposure-list")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        for e in snap.entries.iter().take(30) {
-                            ui.label(
-                                RichText::new(format!("{}  {}  [{}]", e.addr, e.process, e.proto))
-                                    .monospace()
-                                    .size(type_scale::CAPTION),
-                            );
-                        }
-                        if snap.entries.len() > 30 {
-                            ui.label(
-                                RichText::new(format!("…其余 {} 项", snap.entries.len() - 30))
-                                    .size(type_scale::MICRO)
-                                    .color(text_dim()),
-                            );
-                        }
-                    });
+                egui::CollapsingHeader::new(
+                    egui::RichText::new(t("监听清单", "Listening Endpoints"))
+                        .size(type_scale::BODY),
+                )
+                .id_salt("exposure-list")
+                .default_open(false)
+                .show(ui, |ui| {
+                    for e in snap.entries.iter().take(30) {
+                        ui.label(
+                            RichText::new(format!("{}  {}  [{}]", e.addr, e.process, e.proto))
+                                .monospace()
+                                .size(type_scale::CAPTION),
+                        );
+                    }
+                    if snap.entries.len() > 30 {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} {}",
+                                t("…其余", "…and"),
+                                snap.entries.len() - 30
+                            ))
+                            .size(type_scale::MICRO)
+                            .color(text_dim()),
+                        );
+                    }
+                });
             }
             None => {
                 ui.label(
@@ -121,25 +146,36 @@ impl AisafeApp {
             }
         }
         ui.horizontal(|ui| {
-            if ui.button("立即扫描暴露面").clicked() {
+            if ui
+                .button(t("立即扫描暴露面", "Scan Exposure Now"))
+                .clicked()
+            {
                 match self.eng.scan_exposure() {
-                    Ok(entries) => {
-                        self.set_toast(format!("扫描完成：{} 个监听端点", entries.len()))
-                    }
-                    Err(e) => self.set_toast(format!("扫描失败: {e}")),
+                    Ok(entries) => self.set_toast(format!(
+                        "{} {}",
+                        t("扫描完成：", "Scan done: "),
+                        entries.len()
+                    )),
+                    Err(e) => self.set_toast(format!("{}{}", t("扫描失败: ", "Scan failed: "), e)),
                 }
                 self.refresh_cache();
             }
-            if ui.button("扫描并让 AI 评估").clicked() {
+            if ui
+                .button(t("扫描并让 AI 评估", "Scan & Let AI Assess"))
+                .clicked()
+            {
                 let scanned = self.eng.scan_exposure().is_ok();
                 if scanned {
                     if self.eng.trigger_analysis() {
-                        self.set_toast("暴露面已扫描，AI 分析已开始");
+                        self.set_toast(t(
+                            "暴露面已扫描，AI 分析已开始",
+                            "Exposure scanned, AI analysis started",
+                        ));
                     } else {
-                        self.set_toast("已有分析在运行");
+                        self.set_toast(t("已有分析在运行", "An analysis is already running"));
                     }
                 } else {
-                    self.set_toast("扫描失败");
+                    self.set_toast(t("扫描失败", "Scan failed"));
                 }
                 self.refresh_cache();
             }
@@ -153,11 +189,18 @@ impl AisafeApp {
             .filter(|p| p.status == "pending")
             .cloned()
             .collect();
-        section(ui, format!("待处理建议（{}）", pending.len()));
+        section(
+            ui,
+            format!(
+                "{} {})",
+                t("待处理建议（", "Pending Proposals ("),
+                pending.len()
+            ),
+        );
         if pending.is_empty() {
             ui.label(
                 RichText::new(
-                    "暂无待处理建议。蜜罐捕获到攻击行为后，点击「立即分析」生成封禁建议。",
+                    t("暂无待处理建议。蜜罐捕获到攻击行为后，点击「立即分析」生成封禁建议。", "No pending proposals. Once honeypots capture attacks, click 'Analyze Now' to generate proposals."),
                 )
                 .color(text_dim())
                 .size(type_scale::BODY),
@@ -173,12 +216,16 @@ impl AisafeApp {
                     ui.horizontal(|ui| {
                         chip(ui, &p.severity, severity_color(&p.severity));
                         let title = if p.action == "credential_spray" {
-                            format!("确认喷洒战役 来源 {}", p.remote_ip)
+                            format!(
+                                "{}{}",
+                                t("确认喷洒战役 来源 ", "Confirm Spray Campaign, source "),
+                                p.remote_ip
+                            )
                         } else {
                             format!(
-                                "封禁 {} {} {}",
-                                dir_cn(&p.direction),
-                                proto_up(&p.protocol),
+                                "{} {} {}",
+                                t("封禁", "Block"),
+                                format!("{} {}", dir_cn(&p.direction), proto_up(&p.protocol)),
                                 target_desc(&p.remote_ip, p.local_port)
                             )
                         };
@@ -190,7 +237,8 @@ impl AisafeApp {
                                 if ui
                                     .add(
                                         egui::Button::new(
-                                            RichText::new("确认战役").color(on_accent()),
+                                            RichText::new(t("确认战役", "Confirm Campaign"))
+                                                .color(on_accent()),
                                         )
                                         .fill(warn())
                                         .corner_radius(CornerRadius::same(6))
@@ -201,18 +249,31 @@ impl AisafeApp {
                                     match self.eng.confirm_campaign(pid) {
                                         Ok(()) => {
                                             self.set_toast(format!(
-                                                "已确认凭证喷洒战役 {}（进入观察，不封禁）",
-                                                p.remote_ip
+                                                "{}{} {}",
+                                                t(
+                                                    "已确认凭证喷洒战役 ",
+                                                    "Confirmed credential-spray campaign "
+                                                ),
+                                                p.remote_ip,
+                                                t(
+                                                    "（进入观察，不封禁）",
+                                                    "(observation only, no ban)"
+                                                )
                                             ));
                                         }
-                                        Err(e) => self.set_toast(format!("确认失败: {e}")),
+                                        Err(e) => self.set_toast(format!(
+                                            "{}{}",
+                                            t("确认失败: ", "Confirm failed: "),
+                                            e
+                                        )),
                                     }
                                     self.refresh_cache();
                                 }
                             } else if ui
                                 .add(
                                     egui::Button::new(
-                                        RichText::new("灰度应用").color(on_accent()),
+                                        RichText::new(t("灰度应用", "Grey Apply"))
+                                            .color(on_accent()),
                                     )
                                     .fill(danger())
                                     .corner_radius(CornerRadius::same(6))
@@ -233,30 +294,48 @@ impl AisafeApp {
                                             })
                                             .unwrap_or_default();
                                         self.set_toast(format!(
-                                            "已灰度应用为规则 {row}（{until} 自动解封，可在防火墙页转正）",
-                                            row = row.name
+                                            "{} {} ({} {})",
+                                            t("已灰度应用为规则", "Applied as grey rule"),
+                                            row.name,
+                                            t("自动解封", "auto-unban"),
+                                            until
                                         ));
                                     }
-                                    Err(e) => self.set_toast(format!("应用失败: {e}")),
+                                    Err(e) => self.set_toast(format!(
+                                        "{}{}",
+                                        t("应用失败: ", "Apply failed: "),
+                                        e
+                                    )),
                                 }
                                 self.refresh_cache();
                             }
-                            if !p.remote_ip.is_empty() && ui.button("误报").clicked() {
+                            if !p.remote_ip.is_empty()
+                                && ui.button(t("误报", "False Positive")).clicked()
+                            {
                                 // 误报一键入口（0.5.5 F7）：与事件页 / 防火墙规则行同一逻辑
                                 let ip = p.remote_ip.clone();
                                 self.mark_fp(&ip);
                             }
-                            if ui.button("忽略").clicked() {
+                            if ui.button(t("忽略", "Ignore")).clicked() {
                                 let _ = self.eng.dismiss_proposal(pid);
                                 self.refresh_cache();
                             }
                         });
                     });
-                    ui.label(RichText::new(&p.reason).size(type_scale::BODY).color(text_dim()));
                     ui.label(
-                        RichText::new(format!("#{} · {} · {}", p.id, p.model, fmt_ts(p.created_ts)))
-                            .size(type_scale::MICRO)
+                        RichText::new(&p.reason)
+                            .size(type_scale::BODY)
                             .color(text_dim()),
+                    );
+                    ui.label(
+                        RichText::new(format!(
+                            "#{} · {} · {}",
+                            p.id,
+                            p.model,
+                            fmt_ts(p.created_ts)
+                        ))
+                        .size(type_scale::MICRO)
+                        .color(text_dim()),
                     );
                 });
             ui.add_space(space::S);
@@ -265,10 +344,16 @@ impl AisafeApp {
         ui.add_space(space::M);
         section(
             ui,
-            "价值指标（口径：采纳率 = 采纳/建议，误报率 = 误报/采纳）",
+            t(
+                "价值指标（口径：采纳率 = 采纳/建议，误报率 = 误报/采纳）",
+                "Value Metrics (adoption = applied/proposals, FP rate = FP/applied)",
+            ),
         );
         if let Some(st) = &self.cache.status {
-            for (label, m) in [("近 24h", &st.metrics_24h), ("近 7 天", &st.metrics_7d)] {
+            for (label, m) in [
+                (t("近 24h", "Last 24h"), &st.metrics_24h),
+                (t("近 7 天", "Last 7 days"), &st.metrics_7d),
+            ] {
                 let adopt_rate = if m.proposed > 0 {
                     format!("{:.0}%", m.applied as f32 / m.proposed as f32 * 100.0)
                 } else {
@@ -293,10 +378,10 @@ impl AisafeApp {
         }
 
         ui.add_space(space::M);
-        section(ui, "误报 / 白名单抑制");
+        section(ui, t("误报 / 白名单抑制", "FP / Suppression"));
         if self.cache.feedback.is_empty() {
             ui.label(
-                RichText::new("无（标记误报的来源在此列出，抑制期内自动封禁跳过；可随时取消）。")
+                RichText::new(t("无（标记误报的来源在此列出，抑制期内自动封禁跳过；可随时取消）。", "None (FP-flagged sources are listed here; auto-ban skips them during suppression; cancel anytime)."))
                     .color(text_dim())
                     .size(type_scale::BODY),
             );
@@ -318,9 +403,11 @@ impl AisafeApp {
                 ui.label(RichText::new(&f.value).strong().size(type_scale::BODY));
                 ui.label(
                     RichText::new(format!(
-                        "标记 {} 次 · 最近 {} · 抑制至 {}",
+                        "{} {} · {} · {} {}",
+                        t("标记", "Flagged"),
                         f.count,
                         fmt_ts(f.last_ts),
+                        t("抑制至", "suppressed until"),
                         until
                     ))
                     .size(type_scale::MICRO)
@@ -333,12 +420,14 @@ impl AisafeApp {
                             .color(text_dim()),
                     );
                 }
-                if ui.button("取消抑制").clicked() {
+                if ui.button(t("取消抑制", "Cancel Suppression")).clicked() {
                     match self.eng.clear_false_positive(&f.value) {
                         Ok(1) => {
                             self.set_toast(format!(
-                                "已取消 {} 的误报抑制（恢复自动封禁资格）",
-                                f.value
+                                "{}{} {}",
+                                t("已取消 ", "Cancelled FP suppression for "),
+                                f.value,
+                                t("（恢复自动封禁资格）", "(auto-ban eligibility restored)")
                             ));
                             self.refresh_cache();
                         }
@@ -350,10 +439,10 @@ impl AisafeApp {
         }
 
         ui.add_space(space::M);
-        section(ui, "运行记录");
+        section(ui, t("运行记录", "Run History"));
         if self.cache.runs.is_empty() {
             ui.label(
-                RichText::new("尚无 AI 分析记录。")
+                RichText::new(t("尚无 AI 分析记录。", "No AI analysis runs yet."))
                     .color(text_dim())
                     .size(type_scale::BODY),
             );
