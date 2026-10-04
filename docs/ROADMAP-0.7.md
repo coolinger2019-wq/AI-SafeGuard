@@ -334,6 +334,48 @@ Postgres/MongoDB、SMTP、UDP 反射类（NTP/SSDP）、K8s API、IoT TR-069、I
 
 ---
 
+## 追加批次：国际化与时区自定（F796，2026-10-04 用户提出「面向全球用户」，**计划待排期**）
+
+### 现状盘点（先说清什么在哪一层）
+
+| 层 | 现状 | i18n 难度 |
+|---|---|---|
+| Web 控制台 UI 文案 | 全部硬编码中文（标签/提示/toast/徽标，vanilla JS 单文件） | 低——字典替换 |
+| Web 控制台时间 | `toLocaleString` 按浏览器本地渲染——已是用户本地时区，但**无自定选择** | 低 |
+| egui GUI 文案 | 全部硬编码中文（含内嵌 MANUAL 帮助页） | 中——Rust 侧字典 |
+| egui GUI 时间 | `chrono::Local` 写死系统时区 | 低 |
+| AI 分析输出 | 提示词硬编码「简短中文分析结论/理由」——建议理由中文 | 低——输出语言可配 |
+| **后端证据文本** | 事件 summary/detection evidence/explain 文案（ttl_text/reason_summary）是产品数据，中文 | **高——大头，单独阶段** |
+| DB 时间戳 | Unix ts（UTC）——存储层天然正确，无需改动 | 已达标 |
+
+### 交付切片（按序）
+
+- **F796a 时区自定（S，先做——两边共用设计）**：数据层不动（Unix ts）；显示层统一。
+  Web 控制台：header/登录页加时区选择器（默认=浏览器本地，可选 UTC/常见时区+固定偏移），
+  `Intl.DateTimeFormat` 带 timeZone 选项，选择存 localStorage；egui：设置→外观页加时区
+  下拉（默认=系统，config 持久化）。v1 用固定偏移+常用时区白名单（不引 chrono-tz 依赖，
+  DST 复杂度显式不背）；v2 评估 chrono-tz 具名时区。VPS 系统时区（timedownctl）与产品
+  解耦——面板自选后服务器时区无所谓。
+- **F796b Web 控制台 UI 多语言（S-M）**：内嵌 i18n 字典（zh/en 起步，JSON/JS 对象零构建链），
+  `t(key)` 替换硬编码文案；语言选择器与 F796a 同位置，localStorage 持久化。默认语言=
+  浏览器 navigator.language。linux 面板=同一份 index.html（磁盘覆盖/内嵌双通道自动覆盖）。
+- **F796c egui GUI 多语言（M）**：Rust 侧 `t!`/fn 简单字典（语言枚举进 config 外观段）；
+  MANUAL 帮助页分语言版本（markdown 按语言选择加载）。
+- **F796d AI 输出语言（S）**：`[ai].output_language`（默认 zh），提示词语言指令随配置；
+  建议理由/分析结论随用户语言输出。
+- **F796e 后端证据文本多语言（M-L，挂起待需求验证）**：事件 summary/检测 evidence/explain
+  文案是取证数据的一部分，翻译可靠性要求高。路线：事件 summary 结构化（机器可读字段 +
+  展示层渲染文案），替代现在的中文字符串拼接；涉及 insert_event/哈希链 canonical 语义——
+  **canonical 不变（结构化字段进 payload 侧不进链）**，等海外真实用户出现再立项。
+
+### 明确不做
+
+- 不引前端 i18n 框架（react-intl 等）——违反零构建链哲学；字典就是嵌对象。
+- 不做机器翻译兜底——翻译质量不可控，宁可缺翻译回退英文/中文。
+- 不改 DB 时间戳存储（已是 UTC Unix ts）。
+
+---
+
 ## 跨任务红线汇总（0.7 全批次适用）
 
 1. 0.6 全部红线不变：内网/回环永不自动封；跨节点建议而非命令；AI 不自动处置；凭证材料不出节点；`forbid(unsafe_code)`。
