@@ -2,21 +2,28 @@ use super::*;
 
 impl AisafeApp {
     pub(crate) fn events_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("事件流水").size(type_scale::TITLE).strong());
+        ui.label(
+            RichText::new(t("事件流水", "Event Stream"))
+                .size(type_scale::TITLE)
+                .strong(),
+        );
         ui.add_space(space::M);
 
         ui.horizontal(|ui| {
-            ui.label("过滤：");
+            ui.label(t("过滤：", "Filter: "));
             ui.add(
                 egui::TextEdit::singleline(&mut self.event_filter)
                     .desired_width(240.0)
-                    .hint_text("按 IP/内容过滤，如 203.0.113"),
+                    .hint_text(t(
+                        "按 IP/内容过滤，如 203.0.113",
+                        "Filter by IP/content, e.g. 203.0.113",
+                    )),
             );
-            if ui.button("刷新").clicked() {
+            if ui.button(t("刷新", "Refresh")).clicked() {
                 self.refresh_cache();
             }
             ui.label(
-                RichText::new(format!("{} 条", self.cache.events.len()))
+                RichText::new(format!("{} {}", self.cache.events.len(), t("条", "rows")))
                     .size(type_scale::CAPTION)
                     .color(text_dim()),
             );
@@ -33,7 +40,14 @@ impl AisafeApp {
             .column(egui_extras::Column::exact(110.0))
             .column(egui_extras::Column::remainder())
             .header(HEADER_H, |mut header| {
-                for name in ["时间", "类型", "蜜罐", "来源", "操作", "摘要"] {
+                for name in [
+                    t("时间", "Time"),
+                    t("类型", "Type"),
+                    t("蜜罐", "Honeypot"),
+                    t("来源", "Source"),
+                    t("操作", "Actions"),
+                    t("摘要", "Summary"),
+                ] {
                     header.col(|ui| {
                         ui.strong(name);
                     });
@@ -75,7 +89,7 @@ impl AisafeApp {
                                     && !ev.remote_ip.is_empty()
                                     && ui
                                         .add(egui::Button::new(
-                                            RichText::new("误报")
+                                            RichText::new(t("误报", "False Positive"))
                                                 .size(type_scale::MICRO)
                                                 .color(warn()),
                                         ))
@@ -87,7 +101,7 @@ impl AisafeApp {
                                 // 事件详情（0.5.6 F14）：再点一次收起
                                 if ui
                                     .add(egui::Button::new(
-                                        RichText::new("详情")
+                                        RichText::new(t("详情", "Detail"))
                                             .size(type_scale::MICRO)
                                             .color(accent()),
                                     ))
@@ -111,9 +125,12 @@ impl AisafeApp {
         ui.add_space(space::S);
         if rows.is_empty() && !self.event_filter.trim().is_empty() {
             ui.label(
-                RichText::new("暂无关联事件（过滤条件无匹配记录）")
-                    .size(type_scale::BODY)
-                    .color(text_dim()),
+                RichText::new(t(
+                    "暂无关联事件（过滤条件无匹配记录）",
+                    "No matching events",
+                ))
+                .size(type_scale::BODY)
+                .color(text_dim()),
             );
         }
         // 详情面板（F14）：点开看结构化字段；不可信内容等宽展示 + 截断；再点「详情」收起
@@ -124,9 +141,12 @@ impl AisafeApp {
             event_detail_ui(ui, &ev);
         }
         ui.label(
-            RichText::new("完整 payload（截断存储）可通过本地 API 查看：GET /api/events")
-                .size(type_scale::MICRO)
-                .color(text_dim()),
+            RichText::new(t(
+                "完整 payload（截断存储）可通过本地 API 查看：GET /api/events",
+                "Full payload (stored truncated) via local API: GET /api/events",
+            ))
+            .size(type_scale::MICRO)
+            .color(text_dim()),
         );
     }
 }
@@ -142,30 +162,34 @@ fn event_detail_ui(ui: &mut egui::Ui, ev: &EventRow) {
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
-                    RichText::new(format!("事件详情 #{}", ev.id))
+                    RichText::new(format!("{}{}", t("事件详情 #", "Event Detail #"), ev.id))
                         .size(type_scale::BODY)
                         .strong(),
                 );
                 chip(ui, &ev.kind, event_color(&ev.kind));
             });
             ui.add_space(space::XS);
-            kv_row(ui, "时间", &fmt_ts(ev.ts));
+            kv_row(ui, t("时间", "Time"), &fmt_ts(ev.ts));
             if !ev.listener.is_empty() {
-                kv_row(ui, "蜜罐", &ev.listener);
+                kv_row(ui, t("蜜罐", "Honeypot"), &ev.listener);
             }
             if !ev.remote_ip.is_empty() {
-                kv_row(ui, "来源", &format!("{}:{}", ev.remote_ip, ev.remote_port));
+                kv_row(
+                    ui,
+                    t("来源", "Source"),
+                    &format!("{}:{}", ev.remote_ip, ev.remote_port),
+                );
             }
-            kv_row(ui, "摘要", &ev.summary);
+            kv_row(ui, t("摘要", "Summary"), &ev.summary);
             // http 提示（v1/v2 兼容：按 JSON 值读，不依赖版本化结构反序列化）
             if !ev.http_hint.is_empty()
                 && let Ok(h) = serde_json::from_str::<serde_json::Value>(&ev.http_hint)
             {
                 if let Some(m) = h["method"].as_str() {
-                    kv_row(ui, "HTTP 方法", m);
+                    kv_row(ui, t("HTTP 方法", "HTTP Method"), m);
                 }
                 if let Some(p) = h["path"].as_str() {
-                    kv_row(ui, "路径", p);
+                    kv_row(ui, t("路径", "Path"), p);
                 }
                 if let Some(hv) = h["host"].as_str() {
                     kv_row(ui, "Host", hv);
@@ -181,7 +205,7 @@ fn event_detail_ui(ui: &mut egui::Ui, ev: &EventRow) {
                         .filter_map(|t| t.as_str())
                         .collect::<Vec<_>>()
                         .join("  ");
-                    kv_row(ui, "标签", &joined);
+                    kv_row(ui, t("标签", "Tags"), &joined);
                 }
             }
             if !ev.tls_fp.is_empty() {
@@ -197,8 +221,13 @@ fn event_detail_ui(ui: &mut egui::Ui, ev: &EventRow) {
             {
                 ui.add_space(space::XS);
                 egui::CollapsingHeader::new(
-                    RichText::new(format!("交互序列（{} 条命令）", steps.len()))
-                        .size(type_scale::CAPTION),
+                    RichText::new(format!(
+                        "{} ({} {})",
+                        t("交互序列", "Interaction Sequence"),
+                        steps.len(),
+                        t("条命令", "commands")
+                    ))
+                    .size(type_scale::CAPTION),
                 )
                 .id_salt(egui::Id::new("event-interaction").with(ev.id))
                 .default_open(true)
@@ -220,8 +249,10 @@ fn event_detail_ui(ui: &mut egui::Ui, ev: &EventRow) {
                     if steps.len() > MAX_STEPS {
                         ui.label(
                             RichText::new(format!(
-                                "…其余 {} 条命令可通过 API 查看",
-                                steps.len() - MAX_STEPS
+                                "{} …{} {}",
+                                steps.len() - MAX_STEPS,
+                                t("条命令", "commands"),
+                                t("可通过 API 查看", "viewable via API")
                             ))
                             .size(type_scale::MICRO)
                             .color(text_dim()),
@@ -232,7 +263,8 @@ fn event_detail_ui(ui: &mut egui::Ui, ev: &EventRow) {
             if !ev.payload.is_empty() {
                 ui.add_space(space::XS);
                 egui::CollapsingHeader::new(
-                    egui::RichText::new("载荷（清洗截断）").size(type_scale::CAPTION),
+                    egui::RichText::new(t("载荷（清洗截断）", "Payload (sanitized, truncated)"))
+                        .size(type_scale::CAPTION),
                 )
                 .id_salt(egui::Id::new("event-payload").with(ev.id))
                 .default_open(true)
@@ -250,8 +282,10 @@ fn event_detail_ui(ui: &mut egui::Ui, ev: &EventRow) {
                     if truncated {
                         ui.label(
                             RichText::new(format!(
-                                "…已截断（完整 {} 字符，API 可查）",
-                                ev.payload.chars().count()
+                                "{} {} {}",
+                                t("…已截断", "…truncated"),
+                                ev.payload.chars().count(),
+                                t("字符，API 可查", "chars total, via API")
                             ))
                             .size(type_scale::MICRO)
                             .color(text_dim()),
