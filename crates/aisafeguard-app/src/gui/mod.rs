@@ -4,8 +4,10 @@ mod events_tab;
 mod firewall_tab;
 mod help_tab;
 mod honeypot_tab;
+pub(crate) mod i18n;
 mod org_tab;
 mod settings_tab;
+pub(crate) use i18n::t;
 pub(crate) mod theme;
 
 use std::collections::VecDeque;
@@ -176,6 +178,8 @@ pub struct AisafeApp {
     hp_port_buf: String,
     // 已保存的界面偏好（缓存值；每 2 秒随 cache 刷新）
     ui_prefs: (ThemeId, f32),
+    // 界面语言（F796c：zh | en，设置页切换即改配置并热生效）
+    language: String,
     // 上一帧已应用的主题+缩放（变化才重新 apply，避免每帧重建样式）
     applied_ui: Option<(ThemeId, f32)>,
 }
@@ -183,10 +187,21 @@ pub struct AisafeApp {
 pub fn run(console: Arc<dyn Console>) -> anyhow::Result<()> {
     let rx = console.live_events();
     // 主题与字号来自持久化配置（读不到时用默认值，界面照常可打开）
-    let (theme_id, font_scale) = console
+    let (theme_id, font_scale, language) = console
         .config()
-        .map(|c| (ThemeId::from_str(&c.ui.theme), c.ui.font_scale))
-        .unwrap_or((ThemeId::default(), theme::FONT_SCALE_DEFAULT));
+        .map(|c| {
+            (
+                ThemeId::from_str(&c.ui.theme),
+                c.ui.font_scale,
+                c.ui.language.clone(),
+            )
+        })
+        .unwrap_or((
+            ThemeId::default(),
+            theme::FONT_SCALE_DEFAULT,
+            "zh".to_string(),
+        ));
+    i18n::set_lang(&language);
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -206,6 +221,7 @@ pub fn run(console: Arc<dyn Console>) -> anyhow::Result<()> {
                 console,
                 rx,
                 (theme_id, font_scale),
+                language,
             )))
         }),
     )
@@ -213,7 +229,12 @@ pub fn run(console: Arc<dyn Console>) -> anyhow::Result<()> {
 }
 
 impl AisafeApp {
-    fn new(eng: Arc<dyn Console>, rx: Receiver<LiveEvent>, ui_prefs: (ThemeId, f32)) -> Self {
+    fn new(
+        eng: Arc<dyn Console>,
+        rx: Receiver<LiveEvent>,
+        ui_prefs: (ThemeId, f32),
+        language: String,
+    ) -> Self {
         Self {
             eng,
             tab: Tab::Dashboard,
@@ -262,6 +283,7 @@ impl AisafeApp {
             hp_port_buf: String::new(),
             ui_prefs,
             applied_ui: Some(ui_prefs),
+            language,
         }
     }
 
@@ -349,14 +371,14 @@ impl AisafeApp {
                 ui.add_space(space::L);
 
                 let tabs = [
-                    (Tab::Dashboard, "⌂  仪表盘"),
-                    (Tab::Events, "≡  事件"),
-                    (Tab::Firewall, "⛨  防火墙"),
-                    (Tab::Honeypot, "◉  蜜罐"),
-                    (Tab::Org, "⇄  组织"),
-                    (Tab::Ai, "✦  AI 助手"),
-                    (Tab::Settings, "⚙  设置"),
-                    (Tab::Help, "?  帮助"),
+                    (Tab::Dashboard, t("⌂  仪表盘", "⌂  Dashboard")),
+                    (Tab::Events, t("≡  事件", "≡  Events")),
+                    (Tab::Firewall, t("⛨  防火墙", "⛨  Firewall")),
+                    (Tab::Honeypot, t("◉  蜜罐", "◉  Honeypot")),
+                    (Tab::Org, t("⇄  组织", "⇄  Org")),
+                    (Tab::Ai, t("✦  AI 助手", "✦  AI")),
+                    (Tab::Settings, t("⚙  设置", "⚙  Settings")),
+                    (Tab::Help, t("?  帮助", "?  Help")),
                 ];
                 for (tab, label) in tabs {
                     let selected = self.tab == tab;
@@ -457,6 +479,14 @@ impl eframe::App for AisafeApp {
             theme::apply(&ctx, want.0, want.1);
             self.applied_ui = Some(want);
         }
+        // 语言跟随设置草稿（未保存的即时预览语义与主题一致）
+        i18n::set_lang(
+            &self
+                .settings_draft
+                .as_ref()
+                .map(|d| d.ui.language.clone())
+                .unwrap_or_else(|| self.language.clone()),
+        );
 
         self.sidebar(ui);
 

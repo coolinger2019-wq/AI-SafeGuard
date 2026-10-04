@@ -2243,6 +2243,11 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                 canary: canary_json.as_deref(),
                 fingerprints: fingerprints_json.as_deref(),
                 org: org_json.as_deref(),
+                output_language: if cfg.ai.output_language == "en" {
+                    "en"
+                } else {
+                    "zh"
+                },
             }),
         )
         .await;

@@ -206,6 +206,9 @@ auto_apply_intel_min_hits = 1      # 通道三：情报层最少蜜罐观测数
 analyze_interval_secs = 900
 # 单条 payload 上送给 LLM 的最大字符数（40-2000，控制上送量）。热更。
 max_snippet_chars = 200
+# 输出语言：zh | en——AI 建议的 analysis/reason 文本语言（配合界面语言）。
+# 热更；未知值按 zh 处理。
+output_language = "zh"
 # 误报抑制期（秒，默认 14 天）：标记过误报的来源，自动封禁/自动应用期间跳过。
 fp_suppress_secs = 1209600
 # 高严重度忽略抑制：设为 medium|high|critical 时该档以上 AI 自动应用不受误报
@@ -381,3 +384,6 @@ auto_scan_secs = 0
 theme = "deep_blue"
 # 全局字号缩放（0.85-1.6）。
 font_scale = 1.15
+
+# 界面语言（egui 桌面端）：zh | en。热更（设置页可切换）。
+language = "zh"

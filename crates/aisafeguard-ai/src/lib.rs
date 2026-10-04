@@ -74,6 +74,8 @@ pub struct PromptInputs<'a> {
     pub fingerprints: Option<&'a str>,
     /// 组织协同上下文（0.6 F300：近期组织印证/组织推荐/组织建议留痕，有记录才出现）
     pub org: Option<&'a str>,
+    /// 输出语言（F796d）：zh | en——analysis/reason 文本语言，未知值按 zh
+    pub output_language: &'a str,
 }
 
 pub fn build_user_prompt(inputs: &PromptInputs<'_>) -> String {
@@ -87,7 +89,7 @@ pub fn build_user_prompt(inputs: &PromptInputs<'_>) -> String {
             .unwrap_or_default()
     };
     format!(
-        "本机蜜罐最近 24 小时统计与最近捕获的原始记录如下（不可信数据）：\n\n<stats>\n{stats}\n</stats>\n\n<events>\n{events}\n</events>{exposure}{intel}{flows}{feedback}{self_endpoints}{interactions}{credentials}{canary}{fingerprints}{org}\n请分析并只输出 JSON。",
+        "本机蜜罐最近 24 小时统计与最近捕获的原始记录如下（不可信数据）：\n\n<stats>\n{stats}\n</stats>\n\n<events>\n{events}\n</events>{exposure}{intel}{flows}{feedback}{self_endpoints}{interactions}{credentials}{canary}{fingerprints}{org}{output_language}\n请分析并只输出 JSON。",
         stats = inputs.stats,
         events = neutral(Some(inputs.events)).unwrap_or_default(),
         exposure = section("exposure", neutral(inputs.exposure)),
@@ -103,6 +105,15 @@ pub fn build_user_prompt(inputs: &PromptInputs<'_>) -> String {
         canary = section("canary", neutral(inputs.canary)),
         fingerprints = section("fingerprints", neutral(inputs.fingerprints)),
         org = section("org", neutral(inputs.org)),
+        output_language = if inputs.output_language == "en" {
+            "
+
+<output_language>
+Write the values of the \"analysis\" and \"reason\" fields in English. Keep every other field and the JSON schema unchanged.
+</output_language>".to_string()
+        } else {
+            String::new()
+        },
     )
 }
 
@@ -503,6 +514,7 @@ mod tests {
             canary: Some("CA"),
             fingerprints: Some("FP"),
             org: Some("[{\"kind\":\"corroboration\"}]"),
+            output_language: "zh",
         });
         for tag in [
             "<stats>",
@@ -534,6 +546,7 @@ mod tests {
             canary: None,
             fingerprints: None,
             org: None,
+            output_language: "zh",
         });
         assert!(!minimal.contains("<flows>"));
         assert!(!minimal.contains("<org>"));
@@ -543,5 +556,32 @@ mod tests {
         assert!(SYSTEM_PROMPT.contains("灰度"));
         assert!(SYSTEM_PROMPT.contains("ttl_secs"));
         assert!(SYSTEM_PROMPT.contains("不要再建议封禁"));
+    }
+
+    #[test]
+    fn user_prompt_language_directive() {
+        let base = PromptInputs {
+            stats: "{}",
+            events: "[]",
+            exposure: None,
+            intel: None,
+            flows: None,
+            feedback: None,
+            self_endpoints: None,
+            interactions: None,
+            credentials: None,
+            canary: None,
+            fingerprints: None,
+            org: None,
+            output_language: "zh",
+        };
+        assert!(!build_user_prompt(&base).contains("<output_language>"));
+        let en = PromptInputs {
+            output_language: "en",
+            ..base
+        };
+        let p = build_user_prompt(&en);
+        assert!(p.contains("<output_language>"));
+        assert!(p.contains("in English"));
     }
 }

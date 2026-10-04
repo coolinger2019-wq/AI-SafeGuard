@@ -34,6 +34,8 @@ pub struct UiConfig {
     pub theme: String,
     /// 全局字号缩放，0.85–1.6，默认 1.15（正文约 16.7px，舒适档）
     pub font_scale: f32,
+    /// 界面语言（F796c）：zh | en。未知值按 zh 回退。egui 桌面端 UI 文案语言。
+    pub language: String,
 }
 
 impl Default for UiConfig {
@@ -41,6 +43,7 @@ impl Default for UiConfig {
         Self {
             theme: "deep_blue".into(),
             font_scale: 1.15,
+            language: "zh".into(),
         }
     }
 }
@@ -299,6 +302,9 @@ pub struct AiConfig {
     /// 蜜罐命中（payload 非空 = 攻击者真发了数据，如 telnet 登录名塞二进制）
     /// 达到该值即定罪。默认 3；纯端口探测（空载荷）不计入。0 按防呆视为 1。
     pub auto_apply_min_honey_payload: u32,
+    /// AI 输出语言（F796d）：zh | en——建议的 analysis/reason 文本语言，
+    /// 随 UI 语言匹配。热更；未知值按 zh 处理。
+    pub output_language: String,
     /// 灰度执行：AI 建议应用时的默认封禁时长（秒，AI 未给 ttl_secs 时使用）。
     /// AI 判断是概率性的——应用即短 TTL 试运行，到期自动解封，人工确认后转正。
     pub trial_ttl_secs: u64,
@@ -321,6 +327,7 @@ impl Default for AiConfig {
             auto_apply_min_detections: 1,
             auto_apply_intel_min_hits: 1,
             auto_apply_min_honey_payload: 3,
+            output_language: "zh".into(),
             analyze_interval_secs: 900,
             max_snippet_chars: 200,
             trial_ttl_secs: 900,
@@ -1039,6 +1046,7 @@ mod tests {
         assert!(cfg.ai.auto_apply_exempt_ips.is_empty());
         assert_eq!(cfg.ai.auto_apply_max_per_day, 20);
         assert_eq!(cfg.ai.auto_apply_min_honey_payload, 3);
+        assert_eq!(cfg.ai.output_language, "zh");
     }
 
     /// F710 多源模型：新格式解析、旧单源字段拒绝（无兼容层）、源校验。

@@ -72,7 +72,7 @@ impl AisafeApp {
     // ---------- 外观 ----------
 
     fn settings_look_page(&mut self, ui: &mut egui::Ui, draft: &mut AppConfig) {
-        section(ui, "配色方案");
+        section(ui, crate::gui::i18n::t("配色方案", "Color Scheme"));
         ui.label(
             RichText::new("切换即时预览；点底部“保存设置”后持久化。")
                 .size(type_scale::CAPTION)
@@ -131,6 +131,32 @@ impl AisafeApp {
             });
         }
         ui.add_space(space::S);
+        // 界面语言（F796c）：切换即时预览，保存持久化
+        ui.add_space(space::S);
+        section(ui, i18n::t("界面语言", "Language"));
+        ui.add_space(space::XS);
+        ui.horizontal_wrapped(|ui| {
+            for (val, label) in [
+                ("zh", i18n::t("中文（默认）", "中文（默认）")),
+                ("en", "English"),
+            ] {
+                let selected = draft.ui.language == val;
+                let mut text = RichText::new(label).size(type_scale::BODY);
+                text = if selected {
+                    text.color(on_accent()).strong()
+                } else {
+                    text.color(text_color())
+                };
+                let btn = egui::Button::new(text)
+                    .fill(if selected { accent() } else { bg_card() })
+                    .stroke(Stroke::new(1.0, if selected { accent() } else { border() }))
+                    .min_size(egui::vec2(150.0, 30.0));
+                if ui.add(btn).clicked() {
+                    draft.ui.language = val.to_string();
+                }
+            }
+        });
+
         section(ui, "字号缩放");
         ui.horizontal(|ui| {
             let mut scale = theme::normalize_font_scale(draft.ui.font_scale);
