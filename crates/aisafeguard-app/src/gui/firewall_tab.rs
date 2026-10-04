@@ -3,7 +3,11 @@ use aisafeguard_firewall::{BlockSpec, Direction, Protocol};
 
 impl AisafeApp {
     pub(crate) fn firewall_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("防火墙").size(type_scale::TITLE).strong());
+        ui.label(
+            RichText::new(t("防火墙", "Firewall"))
+                .size(type_scale::TITLE)
+                .strong(),
+        );
         ui.add_space(space::M);
 
         let elevated = self
@@ -15,35 +19,41 @@ impl AisafeApp {
         if !elevated {
             warn_banner(
                 ui,
-                "未以管理员身份运行：添加/删除防火墙规则会失败。请关闭后以管理员身份重新启动 AI-SafeGuard。",
+                t(
+                    "未以管理员身份运行：添加/删除防火墙规则会失败。请关闭后以管理员身份重新启动 AI-SafeGuard。",
+                    "Not running elevated: adding/removing firewall rules will fail. Restart AI-SafeGuard as administrator.",
+                ),
             );
         }
 
-        section(ui, "手动封禁");
+        section(ui, t("手动封禁", "Manual Block"));
         egui::Grid::new("fw-form")
             .num_columns(4)
             .spacing([10.0, 8.0])
             .show(ui, |ui| {
-                ui.label("来源 IP");
+                ui.label(t("来源 IP", "Source IP"));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_ip)
                         .desired_width(170.0)
-                        .hint_text("如 203.0.113.7，留空=任意"),
+                        .hint_text(t(
+                            "如 203.0.113.7，留空=任意",
+                            "e.g. 203.0.113.7, empty = any",
+                        )),
                 );
-                ui.label("目标端口");
+                ui.label(t("目标端口", "Target Port"));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_port)
                         .desired_width(90.0)
-                        .hint_text("1-65535，留空=任意"),
+                        .hint_text(t("1-65535，留空=任意", "1-65535, empty = any")),
                 );
                 ui.end_row();
 
-                ui.label("方向");
+                ui.label(t("方向", "Direction"));
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.new_dir_out, false, "入站");
-                    ui.selectable_value(&mut self.new_dir_out, true, "出站");
+                    ui.selectable_value(&mut self.new_dir_out, false, t("入站", "Inbound"));
+                    ui.selectable_value(&mut self.new_dir_out, true, t("出站", "Outbound"));
                 });
-                ui.label("协议");
+                ui.label(t("协议", "Protocol"));
                 egui::ComboBox::from_id_salt("fw-proto")
                     .selected_text(["ANY", "TCP", "UDP"][self.new_proto_idx])
                     .show_ui(ui, |ui| {
@@ -53,28 +63,36 @@ impl AisafeApp {
                     });
                 ui.end_row();
 
-                ui.label("备注");
+                ui.label(t("备注", "Note"));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_note)
                         .desired_width(380.0)
-                        .hint_text("可选，会写进防火墙规则描述"),
+                        .hint_text(t(
+                            "可选，会写进防火墙规则描述",
+                            "optional, stored in the firewall rule description",
+                        )),
                 );
                 ui.end_row();
 
-                ui.label("标签");
+                ui.label(t("标签", "Tag"));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.new_tag)
                         .desired_width(380.0)
-                        .hint_text("可选，来源/用途分组（如「蜜罐」「办公网段」）"),
+                        .hint_text(t(
+                            "可选，来源/用途分组（如「蜜罐」「办公网段」）",
+                            "optional tag, e.g. honeypot / office subnet",
+                        )),
                 );
                 ui.end_row();
             });
         ui.add_space(space::S);
         if ui
             .add(
-                egui::Button::new(RichText::new("添加封禁规则").color(on_accent()))
-                    .fill(accent())
-                    .corner_radius(CornerRadius::same(6)),
+                egui::Button::new(
+                    RichText::new(t("添加封禁规则", "Add Block Rule")).color(on_accent()),
+                )
+                .fill(accent())
+                .corner_radius(CornerRadius::same(6)),
             )
             .clicked()
         {
@@ -82,7 +100,14 @@ impl AisafeApp {
         }
 
         ui.add_space(space::L);
-        section(ui, format!("已管理规则（{}）", self.cache.rules.len()));
+        section(
+            ui,
+            format!(
+                "{} {}",
+                t("已管理规则", "Managed Rules"),
+                self.cache.rules.len()
+            ),
+        );
         let rules = self.cache.rules.clone();
         egui_extras::TableBuilder::new(ui)
             .striped(true)
@@ -97,14 +122,14 @@ impl AisafeApp {
             .column(egui_extras::Column::remainder())
             .header(HEADER_H, |mut header| {
                 for name in [
-                    "规则名",
-                    "方向",
-                    "协议",
-                    "来源 IP",
-                    "端口",
-                    "来源",
-                    "原因",
-                    "TTL / 状态",
+                    t("规则名", "Rule Name"),
+                    t("方向", "Direction"),
+                    t("协议", "Protocol"),
+                    t("来源 IP", "Source IP"),
+                    t("端口", "Port"),
+                    t("来源", "Source"),
+                    t("原因", "Reason"),
+                    t("TTL / 状态", "TTL / State"),
                     "",
                 ] {
                     header.col(|ui| {
@@ -128,7 +153,7 @@ impl AisafeApp {
                         });
                         row.col(|ui| {
                             let ip = if r.remote_ip.is_empty() {
-                                "任意".into()
+                                t("任意", "Any").into()
                             } else {
                                 r.remote_ip.clone()
                             };
@@ -145,7 +170,7 @@ impl AisafeApp {
                             let p = r
                                 .local_port
                                 .map(|p| p.to_string())
-                                .unwrap_or_else(|| "任意".into());
+                                .unwrap_or_else(|| t("任意", "Any").into());
                             ui.label(RichText::new(p).size(type_scale::CAPTION));
                         });
                         row.col(|ui| {
@@ -176,7 +201,7 @@ impl AisafeApp {
                             if !r.remote_ip.is_empty()
                                 && ui
                                     .add(egui::Button::new(
-                                        RichText::new("查看事件")
+                                        RichText::new(t("查看事件", "View Events"))
                                             .size(type_scale::CAPTION)
                                             .color(accent()),
                                     ))
@@ -191,7 +216,7 @@ impl AisafeApp {
                             if !r.remote_ip.is_empty()
                                 && ui
                                     .add(egui::Button::new(
-                                        RichText::new("误报")
+                                        RichText::new(t("误报", "False Positive"))
                                             .size(type_scale::CAPTION)
                                             .color(warn()),
                                     ))
@@ -205,7 +230,7 @@ impl AisafeApp {
                                 && r.enabled
                                 && ui
                                     .add(egui::Button::new(
-                                        RichText::new("转正")
+                                        RichText::new(t("转正", "Promote"))
                                             .size(type_scale::CAPTION)
                                             .color(purple()),
                                     ))
@@ -224,17 +249,28 @@ impl AisafeApp {
                                             })
                                             .unwrap_or_default();
                                         self.set_toast(format!(
-                                            "规则 #{rid} 已转正（封禁至 {until}）"
+                                            "{} {} {}",
+                                            t("规则 #", "Rule #"),
+                                            rid,
+                                            format!(
+                                                "{} {}",
+                                                t("已转正（封禁至 ", "promoted (banned until "),
+                                                until
+                                            )
                                         ));
                                     }
-                                    Err(e) => self.set_toast(format!("转正失败: {e}")),
+                                    Err(e) => self.set_toast(format!(
+                                        "{} {}",
+                                        t("转正失败: ", "Promote failed: "),
+                                        e
+                                    )),
                                 }
                                 self.refresh_cache();
                             }
                             if ui
                                 .add(
                                     egui::Button::new(
-                                        RichText::new("删除")
+                                        RichText::new(t("删除", "Delete"))
                                             .size(type_scale::CAPTION)
                                             .color(danger()),
                                     )
@@ -243,8 +279,14 @@ impl AisafeApp {
                                 .clicked()
                             {
                                 match self.eng.remove_rule(rid) {
-                                    Ok(()) => self.set_toast(format!("规则 #{rid} 已删除")),
-                                    Err(e) => self.set_toast(format!("删除失败: {e}")),
+                                    Ok(()) => {
+                                        self.set_toast(format!("{}{}", t("规则 #", "Rule #"), rid))
+                                    }
+                                    Err(e) => self.set_toast(format!(
+                                        "{} {}",
+                                        t("删除失败: ", "Delete failed: "),
+                                        e
+                                    )),
                                 }
                                 self.refresh_cache();
                             }
@@ -254,7 +296,7 @@ impl AisafeApp {
             });
         ui.add_space(space::XS);
         ui.label(
-            RichText::new("来源说明：手动 = 界面/API 人工添加；检测引擎 / AI / 情报 = 自动封禁（AI 为灰度试封，可转正）。")
+            RichText::new(t("来源说明：手动 = 界面/API 人工添加；检测引擎 / AI / 情报 = 自动封禁（AI 为灰度试封，可转正）。", "Sources: manual = added via UI/API; Engine / AI / Intel = automatic (AI is a trial ban, promotable)."))
                 .size(type_scale::MICRO)
                 .color(text_dim()),
         );
@@ -266,7 +308,7 @@ impl AisafeApp {
             s => match s.parse::<std::net::IpAddr>() {
                 Ok(ip) => Some(ip),
                 Err(_) => {
-                    self.set_toast("来源 IP 格式不合法");
+                    self.set_toast(t("来源 IP 格式不合法", "Invalid source IP format"));
                     return;
                 }
             },
@@ -276,7 +318,7 @@ impl AisafeApp {
             s => match s.parse::<u16>() {
                 Ok(p) if p > 0 => Some(p),
                 _ => {
-                    self.set_toast("端口必须是 1-65535");
+                    self.set_toast(t("端口必须是 1-65535", "Port must be 1-65535"));
                     return;
                 }
             },
@@ -296,7 +338,7 @@ impl AisafeApp {
             remote_ip,
             local_port,
             note: if self.new_note.trim().is_empty() {
-                "界面手动添加".into()
+                t("界面手动添加", "Added manually via UI").into()
             } else {
                 self.new_note.trim().to_string()
             },
@@ -304,13 +346,13 @@ impl AisafeApp {
         };
         match self.eng.add_block(&spec, "manual") {
             Ok(_) => {
-                self.set_toast(format!("已添加: {}", spec.describe()));
+                self.set_toast(format!("{} {}", t("已添加: ", "Added: "), spec.describe()));
                 self.new_ip.clear();
                 self.new_port.clear();
                 self.new_note.clear();
                 self.new_tag.clear();
             }
-            Err(e) => self.set_toast(format!("添加失败: {e}")),
+            Err(e) => self.set_toast(format!("{} {}", t("添加失败: ", "Add failed: "), e)),
         }
         self.refresh_cache();
     }
