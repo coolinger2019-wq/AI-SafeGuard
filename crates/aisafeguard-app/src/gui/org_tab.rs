@@ -16,7 +16,7 @@ impl AisafeApp {
         };
 
         if !panel.enabled || panel.role == "off" {
-            section(ui, "加入组织（向导）");
+            section(ui, t("加入组织（向导）", "Join Organization (Wizard)"));
             ui.label(body_text(
                 "三步入伙：①生成本机入伙申请 → ②把申请文件交给组织管理员批准 → ③导入批准包，自动入伙。\n\
                  私钥全程留在本机，任何文件都不含秘密。也可走命令行/手动配置（docs/FEDERATION.md）。",
@@ -29,28 +29,41 @@ impl AisafeApp {
                     ui.label("本机节点名");
                     ui.add(
                         egui::TextEdit::singleline(&mut self.org_node_name)
-                            .hint_text("如 office-pc（字母数字_-）")
+                            .hint_text(t(
+                                "如 office-pc（字母数字_-）",
+                                "e.g. office-pc (alphanumeric/_-)",
+                            ))
                             .desired_width(240.0),
                     );
                     ui.end_row();
-                    ui.label("协调者地址");
+                    ui.label(t("协调者地址", "Coordinator Address"));
                     ui.add(
                         egui::TextEdit::singleline(&mut self.org_coord_addr)
-                            .hint_text("如 https://192.168.1.10:7421")
+                            .hint_text(t(
+                                "如 https://192.168.1.10:7421",
+                                "e.g. https://192.168.1.10:7421",
+                            ))
                             .desired_width(240.0),
                     );
                     ui.end_row();
                 });
             ui.horizontal(|ui| {
-                if ui.button("① 生成入伙申请").clicked() {
+                if ui
+                    .button(t("① 生成入伙申请", "1. Generate Join Request"))
+                    .clicked()
+                {
                     let node = self.org_node_name.trim().to_string();
                     if node.is_empty() {
-                        self.set_toast("先填本机节点名");
+                        self.set_toast(t("先填本机节点名", "Fill in the local node name first"));
                     } else {
                         match self.eng.join_request_create(&node) {
                             Ok((request_json, fp)) => {
                                 let path = rfd::FileDialog::new()
-                                    .set_file_name(format!("入伙申请-{node}.json"))
+                                    .set_file_name(format!(
+                                        "{}-{}.json",
+                                        t("入伙申请", "Join Request"),
+                                        node
+                                    ))
                                     .save_file();
                                 match path {
                                     Some(p) => {
@@ -60,17 +73,22 @@ impl AisafeApp {
                                             fp.get(0..16).unwrap_or(&fp)
                                         ));
                                     }
-                                    None => self.set_toast("已取消保存"),
+                                    None => self.set_toast(t("已取消保存", "Save cancelled")),
                                 }
                             }
                             Err(e) => self.set_toast(format!("生成申请失败：{e}")),
                         }
                     }
                 }
-                ui.label(caption("① 的文件交给管理员，拿回「批准包」后："));
+                ui.label(caption(t(
+                    "① 的文件交给管理员，拿回「批准包」后：",
+                    "1. Send the file to the admin; after receiving the 'approval pack':",
+                )));
             });
             ui.horizontal(|ui| {
-                if ui.button("③ 导入批准包").clicked()
+                if ui
+                    .button(t("③ 导入批准包", "3. Import Approval Pack"))
+                    .clicked()
                     && let Some(p) = rfd::FileDialog::new().pick_file()
                 {
                     match std::fs::read_to_string(&p) {
@@ -81,21 +99,28 @@ impl AisafeApp {
                                     self.set_toast(msg);
                                     self.refresh_cache();
                                 }
-                                Err(e) => self.set_toast(format!("导入失败：{e}")),
+                                Err(e) => self.set_toast(format!(
+                                    "{}{}",
+                                    t("导入失败：", "Import failed: "),
+                                    e
+                                )),
                             }
                         }
                         Err(e) => self.set_toast(format!("读取批准包失败：{e}")),
                     }
                 }
-                ui.label(caption("导入后本机自动连接协调者（无需重启）"));
+                ui.label(caption(t(
+                    "导入后本机自动连接协调者（无需重启）",
+                    "Auto-connects to coordinator after import (no restart)",
+                )));
             });
             return;
         }
 
         // 角色头
         let role_text = match panel.role.as_str() {
-            "coordinator" => "协调者",
-            "agent" => "成员（agent）",
+            "coordinator" => t("协调者", "Coordinator"),
+            "agent" => t("成员（agent）", "Member (agent)"),
             _ => &panel.role,
         };
         ui.horizontal(|ui| {
@@ -111,11 +136,16 @@ impl AisafeApp {
 
         // 成员表（仅协调者有数据）
         if panel.role == "coordinator" {
-            section(ui, "成员");
+            section(ui, t("成员", "Member"));
             let stats = &panel.stats;
             ui.horizontal_wrapped(|ui| {
                 let cnt = |k: &str| stats[k].as_u64().unwrap_or(0);
-                card(ui, "成员数", &panel.members.len().to_string(), accent());
+                card(
+                    ui,
+                    t("成员数", "Members"),
+                    &panel.members.len().to_string(),
+                    accent(),
+                );
                 ui.add_space(space::M);
                 card(
                     ui,
@@ -131,7 +161,12 @@ impl AisafeApp {
                 ui.add_space(space::M);
                 card(ui, "消息被篡改", &cnt("sig_fail").to_string(), danger());
                 ui.add_space(space::M);
-                card(ui, "序列号回退", &cnt("seq_reject").to_string(), danger());
+                card(
+                    ui,
+                    t("序列号回退", "Sequence Rollback"),
+                    &cnt("seq_reject").to_string(),
+                    danger(),
+                );
                 ui.add_space(space::M);
                 card(ui, "限频拦截", &cnt("rate_limited").to_string(), warn());
                 ui.add_space(space::M);
@@ -146,15 +181,15 @@ impl AisafeApp {
                 .show(ui, |ui| {
                     ui.strong("节点");
                     ui.strong("状态");
-                    ui.strong("最后在线");
+                    ui.strong(t("最后在线", "Last Seen"));
                     ui.strong("证书指纹");
-                    ui.strong("操作");
+                    ui.strong(t("操作", "Actions"));
                     ui.end_row();
 
                     for m in &panel.members {
                         ui.label(mono_text(&m.node));
                         let (status_text, color) = if m.revoked {
-                            ("已吊销", danger())
+                            (t("已吊销", "Revoked"), danger())
                         } else if m.status == "quarantined" {
                             ("隔离中", warn())
                         } else {
@@ -166,7 +201,7 @@ impl AisafeApp {
                         let online = ago < 120;
                         ui.label(
                             RichText::new(if online {
-                                "在线".to_string()
+                                t("在线", "Online").to_string()
                             } else {
                                 format!("离线 · 数据截至 {} 前", crate::explain::humanize_secs(ago))
                             })
@@ -182,7 +217,7 @@ impl AisafeApp {
                             ui.horizontal(|ui| {
                                 ui.add(
                                     egui::TextEdit::singleline(&mut self.org_lift_fp)
-                                        .hint_text("指纹前缀 ≥16 位")
+                                        .hint_text(t("指纹前缀 ≥16 位", "Fingerprint prefix ≥16 chars"))
                                         .desired_width(180.0),
                                 );
                                 if ui.button("解除隔离").clicked() {
@@ -206,7 +241,7 @@ impl AisafeApp {
                                 // 隔离中的成员可吊销（确认失陷后的处决动作）
                                 if ui
                                     .add(
-                                        egui::Button::new(RichText::new("吊销驱离").color(danger())),
+                                        egui::Button::new(RichText::new(t("吊销驱离", "Revoke")).color(danger())),
                                     )
                                     .clicked()
                                 {
@@ -236,9 +271,9 @@ impl AisafeApp {
                                 // 先冷冻观察、确认失陷再处决
                                 let resp = ui.add_enabled(
                                     false,
-                                    egui::Button::new("吊销驱离"),
+                                    egui::Button::new(t("吊销驱离", "Revoke")),
                                 );
-                                resp.on_hover_text("先「软隔离」观察，确认后再吊销驱离");
+                                resp.on_hover_text(t("先「软隔离」观察，确认后再吊销驱离", "Quarantine first, then revoke after confirmation"));
                             });
                         }
                         ui.end_row();
@@ -249,7 +284,7 @@ impl AisafeApp {
 
         // F740 协调者：处理成员入伙申请（仅协调者角色显示）
         if panel.role == "coordinator" {
-            section(ui, "处理入伙申请");
+            section(ui, t("处理入伙申请", "Process Join Request"));
             ui.horizontal(|ui| {
                 if ui.button("选择成员的申请文件…").clicked()
                     && let Some(p) = rfd::FileDialog::new().pick_file()
@@ -260,29 +295,49 @@ impl AisafeApp {
                             match self.eng.join_approval_process(&request_json, &addr) {
                                 Ok((approval_json, node)) => {
                                     let path = rfd::FileDialog::new()
-                                        .set_file_name(format!("批准包-{node}.json"))
+                                        .set_file_name(format!(
+                                            "{}-{}.json",
+                                            t("批准包", "Approval Pack"),
+                                            node
+                                        ))
                                         .save_file();
                                     match path {
                                         Some(sp) => {
                                             let _ = std::fs::write(&sp, approval_json);
                                             self.set_toast(format!(
-                                                "已批准 {node}：批准包已保存，回传给成员导入"
+                                                "{} {}{}",
+                                                t("已批准", "Approved"),
+                                                node,
+                                                t(
+                                                    "：批准包已保存，回传给成员导入",
+                                                    ": approval pack saved, send back to the member"
+                                                )
                                             ));
                                             self.refresh_cache();
                                         }
-                                        None => self.set_toast("已取消保存"),
+                                        None => self.set_toast(t("已取消保存", "Save cancelled")),
                                     }
                                 }
-                                Err(e) => self.set_toast(format!("批准失败：{e}")),
+                                Err(e) => self.set_toast(format!(
+                                    "{}{}",
+                                    t("批准失败：", "Approve failed: "),
+                                    e
+                                )),
                             }
                         }
                         Err(e) => self.set_toast(format!("读取申请文件失败：{e}")),
                     }
                 }
-                ui.label(caption("成员连接本机用地址（填局域网可达地址）："));
+                ui.label(caption(t(
+                    "成员连接本机用地址（填局域网可达地址）：",
+                    "Address members use to reach this node (LAN-reachable):",
+                )));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.org_coord_addr)
-                        .hint_text("如 https://192.168.1.10:7421")
+                        .hint_text(t(
+                            "如 https://192.168.1.10:7421",
+                            "e.g. https://192.168.1.10:7421",
+                        ))
                         .desired_width(240.0),
                 );
             });
@@ -296,23 +351,23 @@ impl AisafeApp {
         ));
         ui.add_space(space::S);
         if panel.org_events.is_empty() {
-            ui.label(body_text("暂无组织事件"));
+            ui.label(body_text(t("暂无组织事件", "No org events yet")));
         } else {
             egui::Grid::new("fed-org-events")
                 .num_columns(4)
                 .spacing([16.0, 4.0])
                 .show(ui, |ui| {
-                    ui.strong("时间");
+                    ui.strong(t("时间", "Time"));
                     ui.strong("类型");
-                    ui.strong("对象");
+                    ui.strong(t("对象", "Target"));
                     ui.strong("详情");
                     ui.end_row();
                     for e in panel.org_events.iter().take(30) {
                         let ago = panel.data_as_of.saturating_sub(e.ts);
-                        ui.label(caption(crate::explain::humanize_secs(ago) + "前"));
+                        ui.label(caption(crate::explain::humanize_secs(ago) + t("前", "ago")));
                         let (kind_text, color) = match e.kind.as_str() {
-                            "corroboration" => ("印证", accent()),
-                            "suggestion" => ("建议", purple()),
+                            "corroboration" => (t("印证", "Corroboration"), accent()),
+                            "suggestion" => (t("建议", "Proposal"), purple()),
                             "fp-flag" => ("误报提示", warn()),
                             "quorum" => ("组织推荐", purple()),
                             "quarantine" => ("隔离", danger()),
@@ -322,16 +377,24 @@ impl AisafeApp {
                         ui.label(mono_text(if e.key.is_empty() { "—" } else { &e.key }));
                         ui.label(caption(match e.kind.as_str() {
                             "corroboration" => format!(
-                                "{} 节点 · 复验{}",
+                                "{} {} · {}{}",
                                 e.nodes_count,
+                                t("节点", "nodes"),
+                                t("复验", "recheck"),
                                 if e.detail == "hit" {
-                                    "命中"
+                                    format!(" {}", t("命中", "Hit"))
                                 } else {
-                                    "未命中"
+                                    format!(" {}", "miss")
                                 }
                             ),
-                            "fp-flag" => format!("{} 节点标记误报", e.nodes_count),
-                            "quorum" => format!("{} 节点采纳", e.nodes_count),
+                            "fp-flag" => format!(
+                                "{} {}",
+                                e.nodes_count,
+                                t("节点标记误报", "nodes flagged FP")
+                            ),
+                            "quorum" => {
+                                format!("{} {}", e.nodes_count, t("节点采纳", "nodes adopted"))
+                            }
                             _ => e.detail.clone(),
                         }));
                         ui.end_row();
@@ -363,16 +426,16 @@ impl AisafeApp {
                 ));
                 ui.add_space(space::S);
                 ui.horizontal(|ui| {
-                    ui.label("原因");
+                    ui.label(t("原因", "Reason"));
                     ui.add(
                         egui::TextEdit::singleline(&mut self.org_reason)
-                            .hint_text("吊销原因（建议填写）")
+                            .hint_text(t("吊销原因（建议填写）", "Revocation reason (recommended)"))
                             .desired_width(260.0),
                     );
                 });
                 ui.add_space(space::S);
                 ui.horizontal(|ui| {
-                    if ui.button("取消").clicked() {
+                    if ui.button(t("取消", "Cancel")).clicked() {
                         cancelled = true;
                     }
                     if ui
@@ -395,7 +458,9 @@ impl AisafeApp {
                         self.set_toast(msg);
                         self.refresh_cache();
                     }
-                    Err(e) => self.set_toast(format!("吊销失败：{e}")),
+                    Err(e) => {
+                        self.set_toast(format!("{}{}", t("吊销失败：", "Revoke failed: "), e))
+                    }
                 }
             }
         }
