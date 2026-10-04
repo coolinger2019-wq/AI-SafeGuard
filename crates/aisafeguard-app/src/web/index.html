@@ -112,6 +112,7 @@
     <input id="tk" type="password" placeholder="Bearer token" autofocus>
     <button class="act" id="tk-go" style="width:100%">连接</button>
     <p id="tk-err" class="hint" style="color:var(--danger);margin-top:8px"></p>
+    <div id="pref-login" style="display:flex;gap:6px;justify-content:center;margin-top:8px"></div>
   </div>
 </div>
 
@@ -121,6 +122,7 @@
     <span class="ver" id="ver"></span>
     <span class="spacer"></span>
     <span class="hint" id="conn"><span class="dot ok"></span></span>
+    <span id="pref-app" style="display:flex;gap:4px"></span>
     <button class="act ghost" id="logout">退出</button>
   </header>
   <nav>
@@ -151,31 +153,31 @@
         </div>
       </section>
       <section>
-        <h2>Top 来源（24h）<span class="hint" style="font-weight:400;font-size:12px">　点「详情」查归属（第三方 ip-api.com，仅查询攻击者 IP）</span></h2>
+        <h2><span data-i18n="top.title">Top 来源（24h）</span><span class="hint" style="font-weight:400;font-size:12px">　点「详情」查归属（第三方 ip-api.com，仅查询攻击者 IP）</span></h2>
         <table class="toplist" id="topips"></table>
       </section>
     </div>
 
     <div id="tab-fw" hidden>
       <p class="hint" style="margin-bottom:8px">
-        防火墙当前生效的封禁规则（含 AI 灰度/自动封禁/手动/组织来源），每 3 秒自动刷新。
-        <label style="margin-left:16px"><input type="checkbox" id="fw-pause"> 暂停刷新</label>
+        <span data-i18n="fw.hint">防火墙当前生效的封禁规则（含 AI 灰度/自动封禁/手动/组织来源），每 3 秒自动刷新。</span>
+        <label style="margin-left:16px"><input type="checkbox" id="fw-pause"> <span data-i18n="暂停刷新">暂停刷新</span></label>
       </p>
       <table id="fw"></table>
     </div>
 
     <div id="tab-events" hidden>
       <p class="hint" style="margin-bottom:8px">
-        每 3 秒自动刷新，点击行展开载荷。
+        <span data-i18n="ev.hint">每 3 秒自动刷新，点击行展开载荷。</span>
         <select id="ev-kind" style="margin-left:16px"><option value="">全部类型</option></select>
-        <label style="margin-left:16px"><input type="checkbox" id="ev-pause"> 暂停刷新</label>
+        <label style="margin-left:16px"><input type="checkbox" id="ev-pause"> <span data-i18n="暂停刷新">暂停刷新</span></label>
       </p>
       <table id="ev"></table>
     </div>
 
     <div id="tab-prop" hidden>
       <div class="card" id="pol-card" style="margin-bottom:10px">
-        <div class="k">AI 自动处置策略 —— 三条定罪通道满足任一才自动灰度封禁（到期自动解封）：
+        <div class="k" data-i18n="pol.intro">AI 自动处置策略 —— 三条定罪通道满足任一才自动灰度封禁（到期自动解封）：
         ① 快路径已定罪（24h 内 detection 达「定罪阈值」）② 带载荷蜜罐命中（真发过数据，纯端口探测不算）达「载荷阈值」
         ③ 情报库命中且被观测达「情报观测」次数。三通道全不满足 = 单信号，留人工。保存即热更。</div>
         <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-top:10px">
@@ -207,7 +209,7 @@
         <div id="pol-msg"></div>
       </div>
       <p class="hint" style="margin-bottom:8px">
-        AI 慢路径产出：证据 → 建议 → 人工确认。应用 = 按灰度 TTL 封禁（到期自动解封）。
+        <span data-i18n="prop.hint">AI 慢路径产出：证据 → 建议 → 人工确认。应用 = 按灰度 TTL 封禁（到期自动解封）。</span>
         <select id="prop-status" style="margin-left:16px">
           <option value="">全部状态</option>
           <option value="pending">待处理</option>
@@ -230,8 +232,8 @@
       <textarea id="cfg" spellcheck="false"></textarea>
       <div id="cfg-msg"></div>
       <p class="hint" style="margin-top:8px">
-        编辑的是节点上的 config.toml 原文；保存时服务端先校验解析，非法不落盘。
-        标注「热更」的项保存即生效；其余项会明确列出、需重启服务。
+        <span data-i18n="cfg.hint">编辑的是节点上的 config.toml 原文；保存时服务端先校验解析，非法不落盘。
+        标注「热更」的项保存即生效；其余项会明确列出、需重启服务。</span>
       </p>
     </div>
   </main>
@@ -239,7 +241,135 @@
 
 <script>
 'use strict';
+/* ---------- F796 i18n + 时区（中文为源语言，en 字典缺失回退中文） ---------- */
 const TK_KEY = 'asg_web_token';
+let LANG = localStorage.getItem('asg_lang') || ((navigator.language || '').toLowerCase().startsWith('zh') ? 'zh' : 'en');
+let TZ = localStorage.getItem('asg_tz') || 'local';
+const TZ_LIST = [['local', 'Browser/System'], ['UTC', 'UTC'], ['Asia/Shanghai', 'UTC+8 Shanghai'], ['Asia/Tokyo', 'UTC+9 Tokyo'], ['Asia/Singapore', 'UTC+8 Singapore'], ['Asia/Dubai', 'UTC+4 Dubai'], ['Europe/London', 'UTC+0 London'], ['Europe/Berlin', 'UTC+1 Berlin'], ['Europe/Moscow', 'UTC+3 Moscow'], ['America/New_York', 'UTC-5 New York'], ['America/Chicago', 'UTC-6 Chicago'], ['America/Los_Angeles', 'UTC-8 Los Angeles'], ['Australia/Sydney', 'UTC+11 Sydney']];
+const EN = {
+  'AI-SafeGuard 控制台': 'AI-SafeGuard Console',
+  '输入节点 API token（/var/lib/aisafeguard/api-token）': 'Enter node API token (/var/lib/aisafeguard/api-token)',
+  '连接': 'Connect', '退出': 'Logout',
+  '仪表盘': 'Dashboard', '事件': 'Events', '建议': 'Proposals', '防火墙': 'Firewall', '配置': 'Config',
+  '引擎状态': 'Engine Status', '蜜罐监听': 'Honeypot Listeners', '快捷操作': 'Quick Actions',
+  'Top 来源（24h）': 'Top Sources (24h)',
+  '　点「详情」查归属（第三方 ip-api.com，仅查询攻击者 IP）': ' Click "Detail" for geo lookup (third-party ip-api.com, attacker IPs only)',
+  '防火墙当前生效的封禁规则（含 AI 灰度/自动封禁/手动/组织来源），每 3 秒自动刷新。': 'Active firewall block rules (AI trial / auto / manual / org origins), auto-refresh every 3s.',
+  '暂停刷新': 'Pause refresh',
+  '每 3 秒自动刷新，点击行展开载荷。': 'Auto-refresh every 3s. Click a row to expand payload.',
+  '全部类型': 'All types',
+  '自动应用': 'Auto apply', '最低严重度': 'Min severity',
+  '日限额': 'Daily cap', ' 条/24h': ' /24h',
+  '0=不限；攻击强度高（扫描洪水期）调高，平日 10-20': '0=unlimited; raise during attack floods, 10-20 normally',
+  '定罪阈值': 'Conviction threshold', ' 检测/24h': ' detections/24h',
+  '通道① 快路径 detection 达 N 次': 'Channel 1: fast-path detections reach N',
+  '载荷阈值': 'Payload threshold', ' 次/24h': ' /24h',
+  '通道② 带载荷蜜罐命中（真发过数据）达 N 次；纯端口探测不算': 'Channel 2: payload-bearing honeypot hits (real data sent) reach N; bare port probes excluded',
+  '情报观测': 'Intel observations',
+  '情报命中层要求的最少蜜罐观测': 'Min honeypot observations for the intel layer',
+  '豁免清单': 'Exempt list',
+  '运营/管理出口 IP，逗号分隔': 'operator/admin egress IPs, comma-separated',
+  '永不自动应用': 'never auto-applied',
+  '保存策略': 'Save Policy',
+  '全部状态': 'All statuses', '待处理': 'Pending', '已应用': 'Applied', '已驳回': 'Dismissed',
+  '保存': 'Save', '放弃并重新加载': 'Discard & Reload', '重启服务': 'Restart Service',
+  '24h 命中': 'Hits 24h', '24h 攻击者': 'Attackers 24h', '事件总数': 'Total Events', '独立来源': 'Unique Sources',
+  '待处理建议': 'Pending Proposals', '生效规则': 'Active Rules',
+  '运行时长': 'Uptime', '防火墙后端': 'Firewall Backend', '检测快路径': 'Detect Fast Path',
+  '（未提权）': ' (not elevated)', '开': 'On', '关': 'Off', '开 ≥': 'On ≥', '关（人工确认）': 'Off (manual confirm)',
+  'AI 慢路径': 'AI Slow Path', 'XDP 快速层': 'XDP Fast Layer', 'AI 自动应用': 'AI Auto Apply',
+  '监听': 'Listener', '端口': 'Port', '交互': 'Interaction', '状态': 'Status', '操作': 'Actions',
+  '低交互': 'Low-int', '运行中': 'Running', '未运行': 'Not Running', '未启用': 'Disabled', '空闲': 'Idle', '分析中…': 'Analyzing…',
+  'AI 立即分析': 'Analyze Now', '情报立即刷新': 'Refresh Intel Now', '暴露面立即扫描': 'Scan Exposure Now',
+  '执行中…': 'Working…', '分析已开始（结果见事件与建议页）': 'Analysis started (see Events & Proposals)',
+  '情报刷新已开始，结果见事件流': 'Intel refresh started, see event stream',
+  '扫描完成：': 'Scan done: ', ' 个对外监听端点（详情见 GUI/接口）': ' exposed endpoints (see GUI/API)',
+  '失败：': 'Failed: ',
+  '#': '#', '来源 IP': 'Source IP', '命中': 'Hits', '归属': 'Geo',
+  '时间': 'Time', '来源': 'Source', '摘要': 'Summary',
+  '目标': 'Target', '方向/协议': 'Dir/Proto', 'TTL': 'TTL', '原因': 'Reason',
+  '严重度': 'Severity', '动作': 'Action', '理由': 'Reason',
+  '暂无事件': 'No events yet', '暂无数据': 'No data yet', '当前无封禁规则': 'No active block rules',
+  '无监听': 'No listeners', '暂无建议': 'No proposals yet',
+  '详情': 'Detail', '停止': 'Stop', '启动': 'Start',
+  '已封禁·': 'Banned·', '无期限': 'no expiry', '即将到期': 'expiring', '剩': '', '分': 'm',
+  '检测引擎': 'Engine', 'AI灰度': 'AI trial', '情报': 'Intel', '人工': 'Manual', '组织': 'Org',
+  '应用': 'Apply', '确认封禁': 'Confirm Ban', '驳回': 'Dismiss',
+  '应用建议 #': 'Apply proposal #', '：按灰度 TTL 封禁目标 IP，到期自动解封。确认？': ': grey-TTL ban on target IP, auto-unban at expiry. Confirm?',
+  '应用（灰度封禁生效）': 'applied (grey ban active)',
+  '建议 #': 'Proposal #', '已': ' ', '操作失败：': 'Action failed: ',
+  '（无详情）': '(no detail)', '分钟': ' min',
+  '查询中…（第三方 ip-api.com）': 'Looking up… (ip-api.com)', '查询中…（第三方 ipwho.is）': 'Looking up… (ipwho.is)',
+  '查询失败': 'Lookup failed', '查询失败：': 'Lookup failed: ', '（可稍后再点一次）': ' (retry later)',
+  '未知': 'Unknown', 'ISP 未知': 'ISP unknown',
+  '放弃未保存的修改？': 'Discard unsaved changes?',
+  '重启节点上的 aisafeguard 服务？重启期间防护中断数秒，确定继续？': 'Restart the aisafeguard service on the node? Protection is interrupted for seconds. Continue?',
+  '重启已触发，等待服务恢复（约 5-10 秒）…': 'Restart triggered, waiting for service (5-10s)…',
+  '重启失败：': 'Restart failed: ', '有未保存修改': 'Unsaved changes',
+  '加载失败：HTTP ': 'Load failed: HTTP ', '保存被拒绝（未落盘）：': 'Save rejected (not stored): ',
+  '已保存。以下项需重启服务生效：': 'Saved. These need a service restart: ',
+  '已保存并写回节点 config.toml，改动全部热更生效。': 'Saved to node config.toml, all changes hot-reloaded.',
+  '保存失败：': 'Save failed: ',
+  '日限额须为 ≥0 的整数（0 = 不限）': 'Daily cap must be an integer ≥0 (0 = unlimited)',
+  '证据阈值须为 ≥1 的整数（0 会被防呆视为 1）': 'Evidence thresholds must be integers ≥1 (0 is clamped to 1)',
+  '豁免清单含可疑条目（须为 IP）：': 'Suspicious entry in exempt list (must be IP): ',
+  '读取当前配置失败：HTTP ': 'Failed to read current config: HTTP ',
+  '策略已保存并热更生效（自动应用': 'Policy saved & hot-reloaded (auto-apply ',
+  '，严重度 ≥': ', severity ≥', '，日限额 ': ', daily cap ',
+  '，定罪阈值 ': ', thresholds: ', ' 检测 / ': ' det / ', ' 带载荷命中 / 情报观测 ': ' payload / intel obs ',
+  ' 次，豁免 ': ', exempted ',
+  'token 无效': 'invalid token', '连接失败：': 'Connection failed: ',
+  '天 ': 'd ', '时 ': 'h ', '分': 'm',
+  '（热生效）': ' (hot)',
+  '已停止 ': 'Stopped ', '已启动 ': 'Started ',
+  '镜像': 'mirrored', '灰度时长: ': 'Trial TTL: ',
+  'pol.intro': 'AI auto-handling policy — grey-scale auto-ban (auto-unban at expiry) requires ANY conviction channel: 1) fast-path convictions (24h detections reach the "conviction threshold"); 2) payload-bearing honeypot hits (real data sent; bare port probes excluded) reach the "payload threshold"; 3) intel-listed and observed reach "intel observations". None met = single signal, manual review. Save = hot reload.',
+  'fw.hint': 'Active firewall block rules (AI trial / auto / manual / org origins), auto-refresh every 3s.',
+  'ev.hint': 'Auto-refresh every 3s. Click a row to expand payload.',
+  'prop.hint': 'AI slow path: evidence → proposal → human confirm. Apply = grey TTL ban (auto-unban at expiry).',
+  'cfg.hint': 'Edits the raw config.toml on the node; server validates before saving, invalid is rejected. Items marked hot-reload take effect on save; others need a service restart.',
+  'top.title': 'Top Sources (24h)',
+};
+function t(s) { return LANG === 'en' ? (EN[s] ?? s) : s; }
+function fmtTs(ts) {
+  const d = new Date(ts * 1000);
+  const locale = LANG === 'en' ? 'en-GB' : 'zh-CN';
+  try {
+    return d.toLocaleString(locale, { hour12: false, timeZone: TZ === 'local' ? undefined : TZ });
+  } catch (_) {
+    return d.toLocaleString(locale, { hour12: false });
+  }
+}
+// 静态文案翻译：叶子节点文本精确匹配 EN 字典；data-i18n 指定键（混合容器用）
+function applyI18n() {
+  document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n); });
+  if (LANG !== 'en') return;
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  const hits = [];
+  while (walker.nextNode()) {
+    const n = walker.currentNode;
+    if (!n.nodeValue.trim()) continue;
+    const parent = n.parentElement;
+    if (!parent || parent.children.length === 0) {
+      const key = n.nodeValue.trim();
+      if (EN[key] !== undefined) hits.push([n, key]);
+    }
+  }
+  for (const [n, key] of hits) n.nodeValue = n.nodeValue.replace(key, EN[key]);
+}
+// 语言/时区选择器：注入到容器，变更即存 localStorage 并整页重载（保证静态+动态全部生效）
+function buildPrefSelectors(container) {
+  const lang = document.createElement('select');
+  lang.innerHTML = '<option value="zh">中文</option><option value="en">English</option>';
+  lang.value = LANG;
+  const tz = document.createElement('select');
+  tz.innerHTML = TZ_LIST.map(([v, l]) =>
+    '<option value="' + v + '">' + (v === 'local' ? (LANG === 'en' ? 'Browser/System' : '浏览器/系统') : l) + '</option>').join('');
+  tz.value = TZ;
+  lang.onchange = () => { localStorage.setItem('asg_lang', lang.value); location.reload(); };
+  tz.onchange = () => { localStorage.setItem('asg_tz', tz.value); location.reload(); };
+  container.append(lang, tz);
+}
 const $ = (id) => document.getElementById(id);
 let token = localStorage.getItem(TK_KEY) || '';
 let evTimer = null, dashTimer = null, propTimer = null, fwTimer = null, cfgDirty = false;
@@ -254,10 +384,9 @@ function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g,
     (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
-function fmtTs(ts) { return new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false }); }
 function fmtUptime(s) {
   const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
-  return (d ? d + '天 ' : '') + h + '时 ' + m + '分';
+  return (d ? d + t('天 ') : '') + h + t('时 ') + m + t('分');
 }
 
 async function api(path, opt = {}) {
@@ -302,10 +431,10 @@ try { geoCache = JSON.parse(localStorage.getItem('asg_geo') || '{}'); } catch (_
 let geoFailUntil = 0;
 function geoText(ip) {
   const g = geoCache[ip];
-  if (!g) return '查询中…（第三方 ip-api.com）';
-  if (g.error) return '查询失败：' + g.error + '（可稍后再点一次）';
-  return '🌍 ' + (g.country || '未知') + (g.city ? ' · ' + g.city : '') +
-    '　' + (g.isp || 'ISP 未知') + (g.asn ? '（AS' + g.asn + '）' : '');
+  if (!g) return t('查询中…（第三方 ip-api.com）');
+  if (g.error) return t('查询失败：') + g.error + t('（可稍后再点一次）');
+  return '🌍 ' + (g.country || t('未知')) + (g.city ? ' · ' + g.city : '') +
+    '　' + (g.isp || t('ISP 未知')) + (g.asn ? '（AS' + g.asn + '）' : '');
 }
 async function geoLookup(ip) {
   const c = geoCache[ip];
@@ -335,13 +464,13 @@ function fillGeo(ip) {
   const pay = document.querySelector('tr[data-geopay="' + CSS.escape(ip) + '"] pre');
   if (!pay) return;
   if (geoCache[ip]) { pay.textContent = geoText(ip); return; }
-  pay.textContent = '查询中…（第三方 ipwho.is）';
+  pay.textContent = t('查询中…（第三方 ipwho.is）');
   geoLookup(ip).then(() => {
     const p = document.querySelector('tr[data-geopay="' + CSS.escape(ip) + '"] pre');
     if (p) p.textContent = geoText(ip);
   }).catch((err) => {
     const p = document.querySelector('tr[data-geopay="' + CSS.escape(ip) + '"] pre');
-    if (p) p.textContent = '查询失败：' + err.message;
+    if (p) p.textContent = t('查询失败：') + err.message;
   });
 }
 
@@ -370,7 +499,7 @@ $('tk-go').onclick = async () => {
     localStorage.setItem(TK_KEY, token);
     enterApp();
   } catch (e) {
-    $('tk-err').textContent = '连接失败：' + e.message;
+    $('tk-err').textContent = t('连接失败：') + e.message;
   }
 };
 $('tk').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('tk-go').click(); });
@@ -397,10 +526,10 @@ const ORIGIN_SHORT = { engine: '检测引擎', ai: 'AI灰度', intel: '情报', 
 function blockBadge(ip) {
   const r = blockInfo.get(ip);
   if (!r) return '';
-  const label = ORIGIN_SHORT[r.origin] || r.source || r.origin;
+  const label = t(ORIGIN_SHORT[r.origin] || r.source || r.origin);
   const left = r.expires_ts ? Math.round((r.expires_ts - Date.now() / 1000) / 60) : null;
-  const when = left == null ? '无期限' : left > 0 ? '剩' + left + '分' : '即将到期';
-  return ' <span class="badge ok" title="' + esc(r.ttl_text || '') + '">已封禁·' + esc(label) + ' ' + when + '</span>';
+  const when = left == null ? t('无期限') : left > 0 ? t('剩') + left + t('分') : t('即将到期');
+  return ' <span class="badge ok" title="' + esc(r.ttl_text || '') + '">' + t('已封禁·') + esc(label) + ' ' + when + '</span>';
 }
 function statCard(k, v) { return '<div class="card"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>'; }
 
@@ -423,44 +552,44 @@ async function refreshDash() {
 
   $('ver').textContent = 'v' + st.version;
   $('stats').innerHTML =
-    statCard('24h 命中', st.hits_24h) +
-    statCard('24h 攻击者', st.attackers_24h) +
-    statCard('事件总数', stats.total) +
-    statCard('独立来源', stats.unique_ips) +
-    statCard('待处理建议', st.pending_proposals) +
-    statCard('生效规则', st.rule_count);
+    statCard(t('24h 命中'), st.hits_24h) +
+    statCard(t('24h 攻击者'), st.attackers_24h) +
+    statCard(t('事件总数'), stats.total) +
+    statCard(t('独立来源'), stats.unique_ips) +
+    statCard(t('待处理建议'), st.pending_proposals) +
+    statCard(t('生效规则'), st.rule_count);
 
   const ai = st.ai;
   const eng = [
-    ['运行时长', fmtUptime(st.uptime_secs)],
-    ['防火墙后端', esc(st.backend) + (st.elevated ? '' : '（未提权）')],
-    ['检测快路径', st.detect_enabled ? '<span class="badge ok">开</span>' : '<span class="badge warn">关</span>'],
-    ['XDP 快速层', st.xdp.active
-      ? '<span class="badge ok">开</span> <span class="mono hint">' + esc(st.xdp.iface) + ' · 镜像 ' + st.xdp.mirrored + '</span>'
-      : '<span class="badge warn">未启用</span>'],
-    ['AI 慢路径', ai.enabled
+    [t('运行时长'), fmtUptime(st.uptime_secs)],
+    [t('防火墙后端'), esc(st.backend) + (st.elevated ? '' : t('（未提权）'))],
+    [t('检测快路径'), st.detect_enabled ? '<span class="badge ok">' + t('开') + '</span>' : '<span class="badge warn">' + t('关') + '</span>'],
+    [t('XDP 快速层'), st.xdp.active
+      ? '<span class="badge ok">' + t('开') + '</span> <span class="mono hint">' + esc(st.xdp.iface) + ' · ' + t('镜像') + ' ' + st.xdp.mirrored + '</span>'
+      : '<span class="badge warn">' + t('未启用') + '</span>'],
+    [t('AI 慢路径'), ai.enabled
       ? '<span class="badge acc">' + esc(ai.model) + '</span> ' +
-        (ai.running ? '<span class="badge warn">分析中…</span>' : '<span class="badge ok">空闲</span>')
-      : '<span class="badge warn">关</span>'],
-    ['AI 自动应用', ai.enabled && ai.auto_apply
-      ? '<span class="badge warn">开 ≥' + esc(ai.auto_apply_min_severity) + '</span>'
-      : '<span class="badge ok">关（人工确认）</span>'],
+        (ai.running ? '<span class="badge warn">' + t('分析中…') + '</span>' : '<span class="badge ok">' + t('空闲') + '</span>')
+      : '<span class="badge warn">' + t('关') + '</span>'],
+    [t('AI 自动应用'), ai.enabled && ai.auto_apply
+      ? '<span class="badge warn">' + t('开 ≥') + esc(ai.auto_apply_min_severity) + '</span>'
+      : '<span class="badge ok">' + t('关（人工确认）') + '</span>'],
   ];
   $('engine').innerHTML = eng.map(([k, v]) =>
     '<div class="card"><div class="k">' + k + '</div><div class="v" style="font-size:15.5px">' + v + '</div></div>').join('');
 
   const rows = st.listeners.map((l) => {
     const act = l.running
-      ? '<button class="act ghost" style="padding:2px 10px;font-size:11.5px" data-ls="stop" data-name="' + esc(l.name) + '">停止</button>'
-      : '<button class="act" style="padding:2px 10px;font-size:11.5px" data-ls="start" data-name="' + esc(l.name) + '">启动</button>';
+      ? '<button class="act ghost" style="padding:2px 10px;font-size:11.5px" data-ls="stop" data-name="' + esc(l.name) + '">' + t('停止') + '</button>'
+      : '<button class="act" style="padding:2px 10px;font-size:11.5px" data-ls="start" data-name="' + esc(l.name) + '">' + t('启动') + '</button>';
     return '<tr><td class="mono">' + esc(l.name) + '</td><td class="mono">' + l.port + '</td><td>' +
-      esc(l.kind) + '</td><td>' + esc(l.mode || '低交互') + '</td><td>' +
-      (l.running ? '<span class="badge ok">运行中</span>' : '<span class="badge err">未运行</span>') +
+      esc(l.kind) + '</td><td>' + esc(l.mode || t('低交互')) + '</td><td>' +
+      (l.running ? '<span class="badge ok">' + t('运行中') + '</span>' : '<span class="badge err">' + t('未运行') + '</span>') +
       '</td><td>' + act + '</td></tr>';
   }).join('');
   setHtml('listeners', $('listeners'),
-    '<tr><th>监听</th><th>端口</th><th>类型</th><th>交互</th><th>状态</th><th>操作</th></tr>' +
-    (rows || '<tr><td colspan="6" class="hint">无监听</td></tr>'));
+    '<tr><th>' + t('监听') + '</th><th>' + t('端口') + '</th><th>' + t('类型') + '</th><th>' + t('交互') + '</th><th>' + t('状态') + '</th><th>' + t('操作') + '</th></tr>' +
+    (rows || '<tr><td colspan="6" class="hint">' + t('无监听') + '</td></tr>'));
 
   const top = (stats.top_ips || []).slice(0, 8).map((t, i) => {
     const open = expandedGeo.has(t.ip);
@@ -470,8 +599,8 @@ async function refreshDash() {
       '<tr class="payload" data-geopay="' + esc(t.ip) + '"' + (open ? '' : ' hidden') + '><td colspan="4"><pre></pre></td></tr>';
   }).join('');
   setHtml('topips', $('topips'),
-    '<tr><th>#</th><th>来源 IP</th><th>命中</th><th>归属</th></tr>' +
-    (top || '<tr><td colspan="4" class="hint">暂无数据</td></tr>'));
+    '<tr><th>#</th><th>' + t('来源 IP') + '</th><th>' + t('命中') + '</th><th>' + t('归属') + '</th></tr>' +
+    (top || '<tr><td colspan="4" class="hint">' + t('暂无数据') + '</td></tr>'));
   expandedGeo.forEach(fillGeo);
 }
 
@@ -482,9 +611,9 @@ $('listeners').addEventListener('click', async (e) => {
   btn.disabled = true;
   try {
     await api('/api/honeypot/listeners/' + encodeURIComponent(name) + '/' + act, { method: 'POST' });
-    toast((act === 'stop' ? '已停止 ' : '已启动 ') + name + '（热生效）');
+    toast((act === 'stop' ? t('已停止 ') : t('已启动 ')) + name + t('（热生效）'));
     refreshDash();
-  } catch (err) { btn.disabled = false; toast('操作失败：' + err.message); }
+  } catch (err) { btn.disabled = false; toast(t('操作失败：') + err.message); }
 });
 
 $('topips').addEventListener('click', (e) => {
@@ -503,19 +632,19 @@ document.querySelectorAll('button[data-op]').forEach((b) => {
   b.onclick = async () => {
     const op = b.dataset.op;
     b.disabled = true;
-    $('op-msg').textContent = '执行中…';
+    $('op-msg').textContent = t('执行中…');
     try {
       if (op === 'ai') {
         const r = await api('/api/ai/analyze', { method: 'POST' });
-        $('op-msg').textContent = (r && r.message) || '分析已开始（结果见事件与建议页）';
+        $('op-msg').textContent = (r && r.message) || t('分析已开始（结果见事件与建议页）');
       } else if (op === 'intel') {
         await api('/api/intel/refresh', { method: 'POST' });
-        $('op-msg').textContent = '情报刷新已开始，结果见事件流';
+        $('op-msg').textContent = t('情报刷新已开始，结果见事件流');
       } else if (op === 'expo') {
         const r = await api('/api/exposure/scan', { method: 'POST' });
-        $('op-msg').textContent = '扫描完成：' + (r.entries ? r.entries.length : 0) + ' 个对外监听端点（详情见 GUI/接口）';
+        $('op-msg').textContent = t('扫描完成：') + (r.entries ? r.entries.length : 0) + t(' 个对外监听端点（详情见 GUI/接口）');
       }
-    } catch (e2) { $('op-msg').textContent = '失败：' + e2.message; }
+    } catch (e2) { $('op-msg').textContent = t('失败：') + e2.message; }
     b.disabled = false;
   };
 });
@@ -554,8 +683,8 @@ async function refreshEvents() {
       ? main + '<tr class="payload" data-for="' + e.id + '"' + (open ? '' : ' hidden') + '><td colspan="4"><pre>' + esc(pay) + '</pre></td></tr>'
       : main;
   }).join('');
-  setHtml('ev', $('ev'), '<tr><th>时间</th><th>类型</th><th>来源</th><th>摘要</th></tr>' +
-    (body || '<tr><td colspan="4" class="hint">暂无事件</td></tr>'));
+  setHtml('ev', $('ev'), '<tr><th>' + t('时间') + '</th><th>' + t('类型') + '</th><th>' + t('来源') + '</th><th>' + t('摘要') + '</th></tr>' +
+    (body || '<tr><td colspan="4" class="hint">' + t('暂无事件') + '</td></tr>'));
 }
 $('ev-kind').addEventListener('change', refreshEvents);
 $('ev').addEventListener('click', (e) => {
@@ -570,9 +699,9 @@ $('ev').addEventListener('click', (e) => {
 
 /* ---------- 建议 ---------- */
 function propBadge(st) {
-  return st === 'pending' ? '<span class="badge warn">待处理</span>'
-       : st === 'applied'  ? '<span class="badge ok">已应用</span>'
-       : '<span class="badge err">已驳回</span>';
+  return st === 'pending' ? '<span class="badge warn">' + t('待处理') + '</span>'
+       : st === 'applied'  ? '<span class="badge ok">' + t('已应用') + '</span>'
+       : '<span class="badge err">' + t('已驳回') + '</span>';
 }
 async function refreshProp() {
   if ($('prop-pause').checked || $('tab-prop').hidden) return;
@@ -588,8 +717,8 @@ async function refreshProp() {
               : p.severity === 'medium' ? 'warn' : 'acc';
     const acts = p.status === 'pending'
       ? '<button class="act" style="padding:2px 10px;font-size:11.5px" data-apply="' + p.id + '">' +
-        (p.action === 'credential_spray' ? '确认封禁' : '应用') + '</button> ' +
-        '<button class="act ghost" style="padding:2px 10px;font-size:11.5px" data-dismiss="' + p.id + '">驳回</button>'
+        (p.action === 'credential_spray' ? t('确认封禁') : t('应用')) + '</button> ' +
+        '<button class="act ghost" style="padding:2px 10px;font-size:11.5px" data-dismiss="' + p.id + '">' + t('驳回') + '</button>'
       : '';
     const main = '<tr data-pid="' + p.id + '">' +
       '<td class="mono hint">' + fmtTs(p.created_ts) + '</td>' +
@@ -600,13 +729,13 @@ async function refreshProp() {
       '<td>' + propBadge(p.status) +
       (p.status === 'pending' ? blockBadge(p.remote_ip) : '') + '</td>' +
       '<td>' + acts + '</td></tr>';
-    const detail = (p.analysis || p.reason || '（无详情）') +
-      (p.ttl_secs ? '\n灰度时长: ' + Math.round(p.ttl_secs / 60) + ' 分钟' : '');
+    const detail = (p.analysis || p.reason || t('（无详情）')) +
+      (p.ttl_secs ? '\n' + t('灰度时长: ') + Math.round(p.ttl_secs / 60) + t('分钟') : '');
     const open = expandedProp.has(p.id);
     return main + '<tr class="payload" data-for-p="' + p.id + '"' + (open ? '' : ' hidden') + '><td colspan="7"><pre>' + esc(detail) + '</pre></td></tr>';
   }).join('');
-  setHtml('prop', $('prop'), '<tr><th>时间</th><th>严重度</th><th>动作</th><th>目标</th><th>理由</th><th>状态</th><th>操作</th></tr>' +
-    (body || '<tr><td colspan="7" class="hint">暂无建议</td></tr>'));
+  setHtml('prop', $('prop'), '<tr><th>' + t('时间') + '</th><th>' + t('严重度') + '</th><th>' + t('动作') + '</th><th>' + t('目标') + '</th><th>' + t('理由') + '</th><th>' + t('状态') + '</th><th>' + t('操作') + '</th></tr>' +
+    (body || '<tr><td colspan="7" class="hint">' + t('暂无建议') + '</td></tr>'));
 }
 function showPropMsg(text) { $('prop-msg').textContent = text; }
 $('prop-status').addEventListener('change', refreshProp);
@@ -615,12 +744,12 @@ $('prop').addEventListener('click', async (e) => {
   const dismiss = e.target.closest('button[data-dismiss]');
   if (apply || dismiss) {
     const id = apply ? apply.dataset.apply : dismiss.dataset.dismiss;
-    if (apply && !confirm('应用建议 #' + id + '：按灰度 TTL 封禁目标 IP，到期自动解封。确认？')) return;
+    if (apply && !confirm(t('应用建议 #') + id + t('：按灰度 TTL 封禁目标 IP，到期自动解封。确认？'))) return;
     try {
       await api('/api/proposals/' + id + (apply ? '/apply' : '/dismiss'), { method: 'POST' });
-      showPropMsg('建议 #' + id + ' 已' + (apply ? '应用（灰度封禁生效）' : '驳回') + '。');
+      showPropMsg(t('建议 #') + id + ' ' + (apply ? t('应用（灰度封禁生效）') : t('已驳回')) + '.');
       refreshProp();
-    } catch (err) { showPropMsg('操作失败：' + err.message); }
+    } catch (err) { showPropMsg(t('操作失败：') + err.message); }
     return;
   }
   const tr = e.target.closest('tr[data-pid]');
@@ -646,15 +775,15 @@ async function refreshFw() {
     '<td>' + esc(r.source || '') + (r.tag ? ' <span class="badge acc">' + esc(r.tag) + '</span>' : '') + '</td>' +
     '<td><span class="badge ' + (badgeOf[r.ttl_state] || 'acc') + '">' + esc(r.ttl_state) + '</span> <span class="hint">' + esc(r.ttl_text) + '</span></td>' +
     '<td>' + esc(r.reason_summary) + '</td></tr>').join('');
-  setHtml('fw', $('fw'), '<tr><th>目标</th><th>方向/协议</th><th>来源</th><th>TTL</th><th>原因</th></tr>' +
-    (body || '<tr><td colspan="5" class="hint">当前无封禁规则</td></tr>'));
+  setHtml('fw', $('fw'), '<tr><th>' + t('目标') + '</th><th>' + t('方向/协议') + '</th><th>' + t('来源') + '</th><th>TTL</th><th>' + t('原因') + '</th></tr>' +
+    (body || '<tr><td colspan="5" class="hint">' + t('当前无封禁规则') + '</td></tr>'));
 }
 
 /* ---------- 配置 ---------- */
 async function loadCfg() {
   const r = await fetch('/api/config/raw', { headers: { 'Authorization': 'Bearer ' + token } });
   if (r.status === 401) return logout();
-  if (!r.ok) { showCfgMsg('err', '加载失败：HTTP ' + r.status); return; }
+  if (!r.ok) { showCfgMsg('err', t('加载失败：HTTP ') + r.status); return; }
   $('cfg').value = await r.text();
   cfgDirty = false;
   $('cfg').dataset.loaded = '1';
@@ -664,27 +793,27 @@ function showCfgMsg(cls, text) {
   const m = $('cfg-msg');
   m.className = cls; m.textContent = text;
 }
-$('cfg-reload').onclick = () => { if (!cfgDirty || confirm('放弃未保存的修改？')) loadCfg(); };
+$('cfg-reload').onclick = () => { if (!cfgDirty || confirm(t('放弃未保存的修改？'))) loadCfg(); };
 $('cfg-restart').onclick = async () => {
-  if (!confirm('重启节点上的 aisafeguard 服务？重启期间防护中断数秒，确定继续？')) return;
+  if (!confirm(t('重启节点上的 aisafeguard 服务？重启期间防护中断数秒，确定继续？'))) return;
   try {
     await api('/api/service/restart', { method: 'POST' });
-    showCfgMsg('warn', '重启已触发，等待服务恢复（约 5-10 秒）…');
+    showCfgMsg('warn', t('重启已触发，等待服务恢复（约 5-10 秒）…'));
     const iv = setInterval(async () => {
       try { await api('/api/status'); clearInterval(iv); location.reload(); } catch (_) {}
     }, 2500);
-  } catch (e) { showCfgMsg('err', '重启失败：' + e.message); }
+  } catch (e) { showCfgMsg('err', t('重启失败：') + e.message); }
 };
 $('cfg').addEventListener('input', () => {
   cfgDirty = true;
-  $('cfg-dirty').textContent = '有未保存修改';
+  $('cfg-dirty').textContent = t('有未保存修改');
 });
 $('cfg').addEventListener('keydown', (e) => {
   if (e.key === 'Tab') { // 编辑器里允许 Tab 缩进
     e.preventDefault();
     const s = $('cfg').selectionStart;
     $('cfg').setRangeText('    ', s, $('cfg').selectionEnd, 'end');
-    cfgDirty = true; $('cfg-dirty').textContent = '有未保存修改';
+    cfgDirty = true; $('cfg-dirty').textContent = t('有未保存修改');
   }
 });
 $('cfg-save').onclick = async () => {
@@ -697,15 +826,15 @@ $('cfg-save').onclick = async () => {
     });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) {
-      showCfgMsg('err', '保存被拒绝（未落盘）：' + (j.error || r.status));
+      showCfgMsg('err', t('保存被拒绝（未落盘）：') + (j.error || r.status));
       return;
     }
     const req = j.restart_required || [];
     cfgDirty = false;
     $('cfg-dirty').textContent = '';
     showCfgMsg(req.length ? 'warn' : 'ok',
-      req.length ? '已保存。以下项需重启服务生效：' + req.join('、')
-                 : '已保存并写回节点 config.toml，改动全部热更生效。');
+      req.length ? t('已保存。以下项需重启服务生效：') + req.join('、')
+                 : t('已保存并写回节点 config.toml，改动全部热更生效。'));
   } finally {
     $('cfg-save').disabled = false;
   }
@@ -755,20 +884,20 @@ async function loadPolicy() {
 }
 $('pol-save').onclick = async () => {
   const cap = parseInt($('pol-cap').value, 10);
-  if (!(cap >= 0)) return showPolMsg('err', '日限额须为 ≥0 的整数（0 = 不限）');
+  if (!(cap >= 0)) return showPolMsg('err', t('日限额须为 ≥0 的整数（0 = 不限）'));
   const detMin = parseInt($('pol-det').value, 10);
   const honeyMin = parseInt($('pol-honey').value, 10);
   const intelMin = parseInt($('pol-intel').value, 10);
-  if (!(detMin >= 1) || !(honeyMin >= 1) || !(intelMin >= 1)) return showPolMsg('err', '证据阈值须为 ≥1 的整数（0 会被防呆视为 1）');
+  if (!(detMin >= 1) || !(honeyMin >= 1) || !(intelMin >= 1)) return showPolMsg('err', t('证据阈值须为 ≥1 的整数（0 会被防呆视为 1）'));
   const exempt = $('pol-exempt').value.split(/[,\uFF0C\n]+/).map((s) => s.trim()).filter(Boolean);
   const bad = exempt.find((s) => !/^[0-9a-fA-F.:]+$/.test(s));
-  if (bad) return showPolMsg('err', '豁免清单含可疑条目（须为 IP）：' + bad);
+  if (bad) return showPolMsg('err', t('豁免清单含可疑条目（须为 IP）：') + bad);
   $('pol-save').disabled = true;
   try {
     // 每次保存都重新读服务端原文再改：避免覆盖其他入口（配置页/CLI）刚写入的内容
     const r0 = await fetch('/api/config/raw', { headers: { 'Authorization': 'Bearer ' + token } });
     if (r0.status === 401) return logout();
-    if (!r0.ok) return showPolMsg('err', '读取当前配置失败：HTTP ' + r0.status);
+    if (!r0.ok) return showPolMsg('err', t('读取当前配置失败：HTTP ') + r0.status);
     let raw = await r0.text();
     raw = upsertAiField(raw, 'auto_apply', String($('pol-auto').checked));
     raw = upsertAiField(raw, 'auto_apply_min_severity', '"' + $('pol-sev').value + '"');
@@ -786,21 +915,24 @@ $('pol-save').onclick = async () => {
     if (!r.ok) return showPolMsg('err', '保存被拒绝（未落盘）：' + (j.error || r.status));
     const req = j.restart_required || [];
     showPolMsg(req.length ? 'warn' : 'ok', req.length
-      ? '已保存。以下项需重启服务生效：' + req.join('、')
-      : '策略已保存并热更生效（自动应用' + ($('pol-auto').checked ? '开' : '关')
-        + '，严重度 ≥' + $('pol-sev').value + '，日限额 ' + cap
-        + '，定罪阈值 ' + detMin + ' 检测 / ' + honeyMin + ' 带载荷命中 / 情报观测 '
-        + intelMin + ' 次，豁免 ' + exempt.length + ' 条）');
+      ? t('已保存。以下项需重启服务生效：') + req.join('、')
+      : t('策略已保存并热更生效（自动应用') + ($('pol-auto').checked ? t('开') : t('关'))
+        + t('，严重度 ≥') + $('pol-sev').value + t('，日限额 ') + cap
+        + t('，定罪阈值 ') + detMin + t(' 检测 / ') + honeyMin + t(' 带载荷命中 / 情报观测 ')
+        + intelMin + t(' 次，豁免 ') + exempt.length + t(' 条）'));
     if ($('cfg').dataset.loaded && !cfgDirty) loadCfg(); // 配置编辑器已加载则重载，防旧文本回写
   } catch (e) { showPolMsg('err', '保存失败：' + e.message); }
   finally { $('pol-save').disabled = false; }
 };
 
 /* ---------- 启动 ---------- */
+applyI18n();
+buildPrefSelectors($('pref-app'));
 if (token) {
   api('/api/status').then(enterApp).catch(() => {});
 } else {
   showLogin();
+  buildPrefSelectors($('pref-login'));
 }
 </script>
 </body>
