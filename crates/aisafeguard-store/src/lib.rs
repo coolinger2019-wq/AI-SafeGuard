@@ -1097,6 +1097,23 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// 该目标是否已有生效中的封禁规则（F795 去重补全，2026-10-10 数据分析驱动：
+    /// 同一攻击者每轮被 AI 重复提名 → 重复应用 churn，实测单 IP 被应用 38 次）。
+    /// 覆盖语义：规则为任意端口（覆盖建议的任何端口粒度）；规则为具体端口时
+    /// 需与建议端口一致（全端口建议不被端口级规则覆盖——升级到更大范围仍放行）。
+    pub fn active_rule_exists(&self, remote_ip: &str, local_port: Option<u16>) -> Result<bool> {
+        let n: i64 = self
+            .lock()?
+            .query_row(
+                "SELECT COUNT(*) FROM rules
+                 WHERE enabled = 1 AND remote_ip = ?1 AND (local_port IS NULL OR local_port IS ?2)",
+                params![remote_ip, local_port],
+                |r| r.get(0),
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(n > 0)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn insert_proposal(
         &self,
@@ -1846,6 +1863,69 @@ mod tests {
             report.broken_at
         );
         assert_eq!(report.rows, 2);
+    }
+
+    /// F795 去重：active_rule_exists 的端口粒度语义——
+    /// 全端口规则覆盖一切建议；端口级规则只覆盖同端口建议。
+    #[test]
+    fn active_rule_exists_scope_semantics() {
+        let store = tmp_store("active-rule-scope");
+        // 全端口规则（local_port = NULL）
+        store
+            .insert_rule(
+                "blk-all",
+                "in",
+                "any",
+                "203.0.113.7",
+                None,
+                "manual",
+                "",
+                "",
+                None,
+            )
+            .unwrap();
+        assert!(store.active_rule_exists("203.0.113.7", None).unwrap());
+        assert!(
+            store.active_rule_exists("203.0.113.7", Some(8081)).unwrap(),
+            "全端口覆盖端口级建议"
+        );
+        assert!(
+            !store.active_rule_exists("203.0.113.8", None).unwrap(),
+            "其他 IP 不受影响"
+        );
+        // 端口级规则
+        store
+            .insert_rule(
+                "blk-p8081",
+                "in",
+                "tcp",
+                "203.0.113.9",
+                Some(8081),
+                "ai",
+                "",
+                "",
+                None,
+            )
+            .unwrap();
+        assert!(store.active_rule_exists("203.0.113.9", Some(8081)).unwrap());
+        assert!(
+            !store.active_rule_exists("203.0.113.9", Some(9999)).unwrap(),
+            "不同端口不覆盖"
+        );
+        assert!(
+            !store.active_rule_exists("203.0.113.9", None).unwrap(),
+            "端口级规则不覆盖全端口建议（升级到更大范围应放行）"
+        );
+        // 禁用规则不计入
+        {
+            let conn = store.lock().unwrap();
+            conn.execute("UPDATE rules SET enabled = 0 WHERE name = 'blk-all'", [])
+                .unwrap();
+        }
+        assert!(
+            !store.active_rule_exists("203.0.113.7", None).unwrap(),
+            "禁用规则不算生效"
+        );
     }
 
     /// F795 方案 B：prune 归档——被删行整行 JSONL 追加到归档文件，

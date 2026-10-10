@@ -2266,13 +2266,21 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                 // 失败记账（F795 C9）：入库/应用失败不再静默消失
                 let mut dropped = 0i64;
                 let mut apply_failed = 0i64;
+                // 去重跳过计数（F795 数据分析驱动）：同一攻击者已有 pending 建议或
+                // 已生效封禁时不再重复建档——实测单 IP 曾被重复应用 38 次
+                let mut dedup_skipped = 0i64;
                 let mut first_error: Option<String> = None;
                 for p in proposals {
                     if eng
                         .store
                         .pending_proposal_exists(&p.remote_ip, p.local_port)
                         .unwrap_or(true)
+                        || eng
+                            .store
+                            .active_rule_exists(&p.remote_ip, p.local_port)
+                            .unwrap_or(true)
                     {
+                        dedup_skipped += 1;
                         continue;
                     }
                     let Ok(pid) = eng.store.insert_proposal(
@@ -2350,6 +2358,9 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                 if rescan_applied > 0 {
                     summary.push_str(&format!("，回扫补应用 {rescan_applied} 条"));
                 }
+                if dedup_skipped > 0 {
+                    summary.push_str(&format!("，去重跳过 {dedup_skipped} 条"));
+                }
                 if dropped + apply_failed > 0 {
                     summary.push_str(&format!(
                         "，失败 {failed} 条（{detail}）",
@@ -2382,7 +2393,7 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
 
 /// auto_apply 全套政策判定（新鲜建议与存量回扫共用，F793 补全）：只作用于
 /// block 类（观察类 credential_spray 走人工「确认封禁」或「确认战役」，永不
-/// 自动应用）+ 总开关 + 严重度门槛 + quorum + 误报抑制 + 证据门控。
+/// 自动应用）+ 总开关 + 严重度门槛 + quorum + 误报抑制 + 证据门控 + 已生效去重。
 fn auto_apply_policy_ok(
     eng: &EngineHandle,
     cfg: &AppConfig,
@@ -2393,6 +2404,15 @@ fn auto_apply_policy_ok(
 ) -> bool {
     // AI 不自动处置红线：观察类建议只等人确认，自动应用只作用于 block
     if action != "block" || !cfg.ai.auto_apply {
+        return false;
+    }
+    // 已生效去重（F795 数据驱动）：同目标已有封禁规则时无需重复应用——
+    // 覆盖回扫路径（存量 pending 在目标已被封后不再重复建规则）
+    if eng
+        .store
+        .active_rule_exists(remote_ip, local_port)
+        .unwrap_or(true)
+    {
         return false;
     }
     if aisafeguard_ai::severity_rank(severity)
