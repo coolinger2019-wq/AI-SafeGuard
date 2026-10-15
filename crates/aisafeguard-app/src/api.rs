@@ -74,6 +74,7 @@ pub async fn serve(engine: Arc<EngineHandle>) {
         )
         .route("/api/ai/runs", get(ai_runs))
         .route("/api/ai/analyze", post(ai_analyze))
+        .route("/api/ai/test", post(ai_test))
         .layer(middleware::from_fn_with_state(state.clone(), auth));
     let app = Router::new()
         .route("/", get(web_console))
@@ -467,6 +468,82 @@ async fn ai_analyze(State(s): State<AppState>) -> Response {
             Json(json!({ "error": "已有分析在运行" })),
         )
             .into_response()
+    }
+}
+
+/// AI 连接探针（F797）：独立轻量请求（不发真实分析、不计入 ai_runs 账本、
+/// 与定时分析并发安全），覆盖「改完协议/端点/模型立刻验证」的闭环。
+/// 30s 硬超时——90s 客户端超时对 UI 按钮太长。回复非空即视为连通
+/// （校验模型是否照提示回 OK 是模型服从性，不是连通性）。
+async fn ai_test(State(s): State<AppState>) -> Response {
+    let cfg = s.engine.config();
+    let key = cfg.ai.effective_key();
+    if cfg.ai.base_url.is_empty() || cfg.ai.model.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "端点或模型为空：先在 AI 设置里填好" })),
+        )
+            .into_response();
+    }
+    if key.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "未配置 API Key（环境变量 AISAFEGUARD_AI_KEY 或凭据管理器）" })),
+        )
+            .into_response();
+    }
+    let client = aisafeguard_ai::AiClient::with_protocol(
+        &cfg.ai.api_protocol,
+        &cfg.ai.base_url,
+        &cfg.ai.model,
+        &key,
+    );
+    let started = std::time::Instant::now();
+    let probe = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        client.chat("你是连线测试探针。收到任何消息都只回复两个字母：OK", "ping"),
+    )
+    .await;
+    let latency_ms = started.elapsed().as_millis() as u64;
+    let base = |ok: bool| {
+        json!({
+            "ok": ok,
+            "latency_ms": latency_ms,
+            "model": cfg.ai.model,
+            "protocol": cfg.ai.api_protocol,
+        })
+    };
+    match probe {
+        Err(_) => Json({
+            let mut v = base(false);
+            v["error"] = "测试超时（30s）——服务未响应：检查地址/端口/网络".into();
+            v
+        })
+        .into_response(),
+        Ok(Err(e)) => Json({
+            let mut v = base(false);
+            v["error"] = e.to_string().into();
+            v
+        })
+        .into_response(),
+        Ok(Ok(reply)) => {
+            if reply.trim().is_empty() {
+                Json({
+                    let mut v = base(false);
+                    v["error"] = "服务返回了空回复".into();
+                    v
+                })
+                .into_response()
+            } else {
+                let snippet: String = reply.chars().take(40).collect();
+                Json({
+                    let mut v = base(true);
+                    v["reply"] = snippet.into();
+                    v
+                })
+                .into_response()
+            }
+        }
     }
 }
 

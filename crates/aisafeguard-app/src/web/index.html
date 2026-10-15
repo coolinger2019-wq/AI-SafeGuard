@@ -219,6 +219,7 @@
             <input type="text" id="pol-url" placeholder="https://open.bigmodel.cn/api/paas/v4" style="width:270px"></label>
           <label style="display:flex;align-items:center;gap:6px"><span data-i18n="模型">模型</span>
             <input type="text" id="pol-model" placeholder="glm-4.7" style="width:150px"></label>
+          <button class="act" id="pol-test"><span data-i18n="测试连接">测试连接</span></button>
         </div>
         <div id="pol-msg"></div>
       </div>
@@ -349,6 +350,10 @@ const EN = {
   '端点与模型不能为空': 'API URL and model must not be empty',
   '值含非法字符（引号/反斜杠/换行）：': 'Value contains illegal chars (quote/backslash/newline): ',
   '，协议 ': ', protocol ', '，模型 ': ', model ',
+  '测试连接': 'Test connection',
+  '测试连接中（最长 30 秒）……': 'Testing connection (up to 30 s)...',
+  'AI 连接正常 — ': 'AI connection OK — ',
+  'AI 连接失败：': 'AI connection failed: ',
   'fw.hint': 'Active firewall block rules (AI trial / auto / manual / org origins), auto-refresh every 3s.',
   'ev.hint': 'Auto-refresh every 3s. Click a row to expand payload.',
   'prop.hint': 'AI slow path: evidence → proposal → human confirm. Apply = grey TTL ban (auto-unban at expiry).',
@@ -917,6 +922,21 @@ function parseExempt(v) {
   return [...inner[1].matchAll(/"([^"]*)"/g)].map((m) => m[1]);
 }
 function showPolMsg(cls, text) { const m = $('pol-msg'); m.className = cls; m.textContent = text; }
+// AI 连接探针：不发真实分析（不入 ai_runs 账本），服务端 30s 内返回连通状态
+$('pol-test').onclick = async () => {
+  const b = $('pol-test');
+  b.disabled = true;
+  showPolMsg('hint', t('测试连接中（最长 30 秒）……'));
+  try {
+    const r = await fetch('/api/ai/test', { method: 'POST', headers: { Authorization: 'Bearer ' + token } });
+    if (r.status === 401) return logout();
+    const j = await r.json();
+    if (j.ok) showPolMsg('ok', t('AI 连接正常 — ') + j.model + ' / ' + j.protocol + ' / ' + j.latency_ms + 'ms'
+      + (j.reply ? t('，回复 ') + j.reply : ''));
+    else showPolMsg('err', t('AI 连接失败：') + (j.error || 'HTTP ' + r.status));
+  } catch (e) { showPolMsg('err', t('连接失败：') + e.message); }
+  finally { b.disabled = false; }
+};
 async function loadPolicy() {
   try {
     const r = await fetch('/api/config/raw', { headers: { 'Authorization': 'Bearer ' + token } });
