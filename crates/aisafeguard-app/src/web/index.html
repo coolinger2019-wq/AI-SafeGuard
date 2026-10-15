@@ -954,10 +954,12 @@ async function loadPolicy() {
     const intelMin = parseInt(aiRawField(raw, 'auto_apply_intel_min_hits'), 10);
     $('pol-intel').value = intelMin >= 1 ? intelMin : 1;
     $('pol-exempt').value = parseExempt(aiRawField(raw, 'auto_apply_exempt_ips')).join(', ');
+    // 值内误吞的行内注释剥离（「v1  # 注释」整串进引号是历史踩坑，剥掉避免回写放大）
+    const stripInQuoteComment = (v) => v.replace(/\s+#[^\n]*$/, '').trim();
     $('pol-proto').value = ['responses', 'anthropic'].includes((aiRawField(raw, 'api_protocol') || '"chat"').replace(/"/g, ''))
       ? (aiRawField(raw, 'api_protocol') || '"chat"').replace(/"/g, '') : 'chat';
-    $('pol-url').value = (aiRawField(raw, 'base_url') || '').replace(/"/g, '');
-    $('pol-model').value = (aiRawField(raw, 'model') || '').replace(/"/g, '');
+    $('pol-url').value = stripInQuoteComment((aiRawField(raw, 'base_url') || '').replace(/"/g, ''));
+    $('pol-model').value = stripInQuoteComment((aiRawField(raw, 'model') || '').replace(/"/g, ''));
   } catch (_) { /* 策略卡加载失败不打断主流程，保存时服务端仍会校验 */ }
 }
 $('pol-save').onclick = async () => {

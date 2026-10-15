@@ -261,6 +261,9 @@ enabled = false
 # 客户端自动附带独立 User-Agent（aisafeguard/版本）与单会话
 # x-opencode-session id——opencode Go 一类网关的准入要求自动满足，无需手动配置。
 base_url = "https://open.bigmodel.cn/api/paas/v4"
+# NOTE: inline comments must stay OUTSIDE the quotes — `"url  # comment"` turns
+# the comment into the value (classic 404 foot-gun).
+# 注意：行内注释必须写在引号外——写在引号里注释值会整体被吞，表现为端点 404。
 # API protocol template: "chat" = OpenAI Chat Completions (/chat/completions,
 # default) | "responses" = OpenAI Responses (/responses) | "anthropic" =
 # Anthropic Messages (/v1/messages, needs anthropic-version header).
