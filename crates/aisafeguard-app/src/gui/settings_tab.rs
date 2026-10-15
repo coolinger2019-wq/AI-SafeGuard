@@ -210,7 +210,50 @@ impl AisafeApp {
                 ui.checkbox(&mut draft.ai.enabled, "");
                 ui.end_row();
 
-                ui.label(t("API 地址（OpenAI 兼容）", "API URL (OpenAI-compatible)"));
+                ui.label(t("协议模板", "API Protocol"));
+                egui::ComboBox::from_id_salt("ai-protocol")
+                    .selected_text(match draft.ai.api_protocol.as_str() {
+                        "responses" => t(
+                            "OpenAI Responses（/responses）",
+                            "OpenAI Responses (/responses)",
+                        ),
+                        "anthropic" => t(
+                            "Anthropic Messages（/v1/messages）",
+                            "Anthropic Messages (/v1/messages)",
+                        ),
+                        _ => t(
+                            "OpenAI Chat（/chat/completions，默认）",
+                            "OpenAI Chat (/chat/completions, default)",
+                        ),
+                    })
+                    .show_ui(ui, |ui| {
+                        for (v, zh, en) in [
+                            (
+                                "chat",
+                                "OpenAI Chat（/chat/completions，默认）",
+                                "OpenAI Chat (/chat/completions, default)",
+                            ),
+                            (
+                                "responses",
+                                "OpenAI Responses（/responses）",
+                                "OpenAI Responses (/responses)",
+                            ),
+                            (
+                                "anthropic",
+                                "Anthropic Messages（/v1/messages）",
+                                "Anthropic Messages (/v1/messages)",
+                            ),
+                        ] {
+                            ui.selectable_value(
+                                &mut draft.ai.api_protocol,
+                                v.to_string(),
+                                t(zh, en),
+                            );
+                        }
+                    });
+                ui.end_row();
+
+                ui.label(t("API 地址（端点根 URL）", "API URL (endpoint root)"));
                 ui.add(egui::TextEdit::singleline(&mut draft.ai.base_url).desired_width(440.0));
                 ui.end_row();
 

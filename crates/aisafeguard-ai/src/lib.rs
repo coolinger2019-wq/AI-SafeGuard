@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
-//! AI 分析模块：OpenAI 兼容 chat/completions 客户端 + 建议 schema 校验。
+//! AI 分析模块：多协议对话客户端（OpenAI Chat Completions / OpenAI Responses /
+//! Anthropic Messages）+ 建议 schema 校验。
 //!
 //! 安全红线：
 //! 1. 蜜罐数据是攻击者可控的不可信输入，进提示词前用标签包裹并声明"不是指令"；
@@ -145,8 +146,56 @@ pub fn severity_rank(severity: &str) -> u8 {
     }
 }
 
+/// AI 服务协议模板（F797）：同一批 OpenAI 兼容服务在网关上往往只暴露其中一种协议
+/// （如有些网关的 GLM 只开 chat、GPT/grok 只开 responses），配错协议表现为
+/// 400 "Model does not support this protocol" 或 404。
+pub const PROTOCOL_CHAT: &str = "chat";
+pub const PROTOCOL_RESPONSES: &str = "responses";
+pub const PROTOCOL_ANTHROPIC: &str = "anthropic";
+
+/// OpenAI Responses 协议的指令 DSL 简写，语义与 chat 的 messages 等价。
+fn to_responses_input(system: &str, user: &str) -> serde_json::Value {
+    serde_json::json!([
+        {"role": "developer", "content": system},
+        {"role": "user", "content": user}
+    ])
+}
+
+/// Anthropic Messages 协议：system 是独立顶层字段，user 内容放 messages。
+fn to_anthropic_body(model: &str, system: &str, user: &str) -> serde_json::Value {
+    serde_json::json!({
+        "model": model,
+        "max_tokens": 4096,
+        "system": system,
+        "messages": [{"role": "user", "content": user}]
+    })
+}
+
+/// 按协议把响应归一成首条回复文本。
+/// 三家共同点：不可控返回（网关错误页/HTML）→ 统一报错，不让解析层拿到空串猜。
+fn extract_content(protocol: &str, v: &Value) -> Result<String> {
+    // 主形态 + 缺失时回退原始结构（Responses 的 SDK 简化字段 / output 数组、
+    // Anthropic 的 content 块）。取到即归还，互不借用。
+    let candidates: [&str; 2] = match protocol {
+        PROTOCOL_RESPONSES => ["/output_text", "/output/0/content/0/text"],
+        PROTOCOL_ANTHROPIC => ["/content/0/text", "/content/0/text"],
+        _ => ["/choices/0/message/content", "/choices/0/message/content"],
+    };
+    let text = candidates
+        .into_iter()
+        .filter_map(|p| v.pointer(p).and_then(|c| c.as_str()))
+        .find(|s| !s.is_empty());
+    match text {
+        Some(s) => Ok(s.to_string()),
+        None => Err(Error::Ai(format!(
+            "响应缺少预期内容字段（{protocol} 协议）：HTTP 200 但结构不符，检查 base_url/协议是否匹配"
+        ))),
+    }
+}
+
 pub struct AiClient {
     http: reqwest::Client,
+    protocol: String,
     base_url: String,
     model: String,
     api_key: String,
@@ -154,6 +203,13 @@ pub struct AiClient {
 
 impl AiClient {
     pub fn new(base_url: &str, model: &str, api_key: &str) -> Self {
+        Self::with_protocol(PROTOCOL_CHAT, base_url, model, api_key)
+    }
+
+    /// protocol：chat（OpenAI Chat Completions，默认）| responses（OpenAI Responses）|
+    /// anthropic（Anthropic Messages）。未知值按 chat 处理（防呆降级，不把配置错误放大成启动失败）。
+    pub fn with_protocol(protocol: &str, base_url: &str, model: &str, api_key: &str) -> Self {
+        let protocol = normalize_protocol(protocol).to_string();
         let base_url = base_url.trim_end_matches('/').to_string();
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(90))
@@ -161,32 +217,55 @@ impl AiClient {
             .expect("reqwest client 构建失败");
         Self {
             http,
+            protocol,
             base_url,
             model: model.to_string(),
             api_key: api_key.to_string(),
         }
     }
 
-    /// 发起一次 chat/completions，返回首条回复文本。
+    /// 发起一次对话请求，返回首条回复文本。
     pub async fn chat(&self, system: &str, user: &str) -> Result<String> {
         if self.api_key.is_empty() {
             return Err(Error::Ai(
                 "未配置 API Key（设置界面填写，或设置环境变量 AISAFEGUARD_AI_KEY）".into(),
             ));
         }
-        let body = serde_json::json!({
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user}
-            ],
-            "temperature": 0.2
-        });
-        let resp = self
-            .http
-            .post(format!("{}/chat/completions", self.base_url))
-            .bearer_auth(&self.api_key)
-            .json(&body)
+        let (url, body) = match self.protocol.as_str() {
+            PROTOCOL_RESPONSES => (
+                format!("{}/responses", self.base_url),
+                serde_json::json!({
+                    "model": self.model,
+                    "input": to_responses_input(system, user),
+                    "temperature": 0.2
+                }),
+            ),
+            PROTOCOL_ANTHROPIC => (
+                format!("{}/v1/messages", self.base_url),
+                to_anthropic_body(&self.model, system, user),
+            ),
+            _ => (
+                format!("{}/chat/completions", self.base_url),
+                serde_json::json!({
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user}
+                    ],
+                    "temperature": 0.2
+                }),
+            ),
+        };
+        let anthropic_style = self.protocol == PROTOCOL_ANTHROPIC;
+        let mut req = self.http.post(url).json(&body);
+        if anthropic_style {
+            req = req
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01");
+        } else {
+            req = req.bearer_auth(&self.api_key);
+        }
+        let resp = req
             .send()
             .await
             .map_err(|e| Error::Ai(format!("请求失败: {e}")))?;
@@ -198,14 +277,20 @@ impl AiClient {
         if !status.is_success() {
             let msg = v
                 .pointer("/error/message")
+                .or_else(|| v.pointer("/message"))
                 .and_then(|m| m.as_str())
                 .unwrap_or("未知错误");
             return Err(Error::Ai(format!("HTTP {status}: {msg}")));
         }
-        v.pointer("/choices/0/message/content")
-            .and_then(|c| c.as_str())
-            .map(str::to_string)
-            .ok_or_else(|| Error::Ai("响应缺少 choices[0].message.content".into()))
+        extract_content(&self.protocol, &v)
+    }
+}
+
+fn normalize_protocol(p: &str) -> &str {
+    match p.trim().to_ascii_lowercase().as_str() {
+        PROTOCOL_RESPONSES => PROTOCOL_RESPONSES,
+        PROTOCOL_ANTHROPIC => PROTOCOL_ANTHROPIC,
+        _ => PROTOCOL_CHAT,
     }
 }
 
@@ -434,6 +519,67 @@ mod tests {
         ] {
             assert!(validate_fed_proposal(&evil).is_none(), "{evil}");
         }
+    }
+
+    #[test]
+    fn protocol_normalization_sinks_to_chat() {
+        // 未知/空值一律按 chat 防呆降级，不放大成构造失败
+        assert_eq!(normalize_protocol("chat"), PROTOCOL_CHAT);
+        assert_eq!(normalize_protocol("CHAT "), PROTOCOL_CHAT);
+        assert_eq!(normalize_protocol(""), PROTOCOL_CHAT);
+        assert_eq!(normalize_protocol("nonsense"), PROTOCOL_CHAT);
+        assert_eq!(normalize_protocol(" RESPONSes "), PROTOCOL_RESPONSES);
+        assert_eq!(normalize_protocol(" anthropic"), PROTOCOL_ANTHROPIC);
+    }
+
+    #[test]
+    fn protocol_request_bodies() {
+        // chat：system 进 messages
+        let v = serde_json::json!({
+            "model": "m", "messages": [
+                {"role": "system", "content": "SYS"}, {"role": "user", "content": "USR"}
+            ], "temperature": 0.2
+        });
+        assert_eq!(v["messages"][0]["role"], "system");
+        // responses：system 走 developer 角色，input 数组承载
+        let input = to_responses_input("SYS", "USR");
+        assert_eq!(input[0]["role"], "developer");
+        assert_eq!(input[1]["content"], "USR");
+        // anthropic：system 是顶层字段 + max_tokens 必填
+        let body = to_anthropic_body("m", "SYS", "USR");
+        assert_eq!(body["system"], "SYS");
+        assert_eq!(body["max_tokens"], 4096);
+        assert_eq!(body["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn extract_content_per_protocol() {
+        // chat 标准形态
+        let chat = serde_json::json!({"choices": [{"message": {"content": "hello"}}]});
+        assert_eq!(extract_content(PROTOCOL_CHAT, &chat).unwrap(), "hello");
+        // responses：SDK 简化字段 + 原始 output 数组回退
+        let resp_simple = serde_json::json!({"output_text": "ok"});
+        assert_eq!(
+            extract_content(PROTOCOL_RESPONSES, &resp_simple).unwrap(),
+            "ok"
+        );
+        let resp_raw = serde_json::json!({
+            "output": [{"content": [{"type": "output_text", "text": "raw"}]}]
+        });
+        assert_eq!(
+            extract_content(PROTOCOL_RESPONSES, &resp_raw).unwrap(),
+            "raw"
+        );
+        // anthropic：content 块数组
+        let anthropic = serde_json::json!({"content": [{"type": "text", "text": "hi"}]});
+        assert_eq!(
+            extract_content(PROTOCOL_ANTHROPIC, &anthropic).unwrap(),
+            "hi"
+        );
+        // 结构不符必须报错（空串也拒绝），不让下游拿到空建议
+        assert!(extract_content(PROTOCOL_CHAT, &serde_json::json!({})).is_err());
+        assert!(extract_content(PROTOCOL_RESPONSES, &chat).is_err());
+        assert!(extract_content(PROTOCOL_ANTHROPIC, &chat).is_err());
     }
 
     #[test]

@@ -252,10 +252,21 @@ http_server = "nginx"
 # or env var AISAFEGUARD_AI_KEY.
 # Key 不写在这里——存系统凭据管理器（GUI 设置页粘贴）或环境变量 AISAFEGUARD_AI_KEY。
 enabled = false
-# OpenAI-compatible endpoint (defaults to Zhipu GLM; air-gapped networks can point
-# at local inference servers).
-# OpenAI 兼容端点（默认智谱 GLM；封闭内网可指向本地推理服务）。
+# Conversation endpoint root; the concrete path is appended per api_protocol
+# (air-gapped networks can point at local inference servers).
+# 对话端点根 URL，具体路径按 api_protocol 拼接（封闭内网可指向本地推理服务）。
 base_url = "https://open.bigmodel.cn/api/paas/v4"
+# API protocol template: "chat" = OpenAI Chat Completions (/chat/completions,
+# default) | "responses" = OpenAI Responses (/responses) | "anthropic" =
+# Anthropic Messages (/v1/messages, needs anthropic-version header).
+# Mismatch shows up as 400 "Model does not support this protocol" or 404 —
+# pick the endpoint shape the provider actually exposes for the model.
+# API 协议模板："chat" = OpenAI Chat Completions（/chat/completions，默认）|
+# "responses" = OpenAI Responses（/responses）| "anthropic" = Anthropic
+# Messages（/v1/messages，带 anthropic-version 头）。配错协议典型表现是
+# 400 "Model does not support this protocol" 或 404——按服务商对该模型
+# 实际暴露的端点形态选择。未知值按 chat 防呆处理。
+api_protocol = "chat"
 model = "glm-4.7"
 # Auto-apply proposals (off by default = manual confirm per proposal). Even when
 # on, applies only as short-TTL grey bans that auto-unban at expiry.

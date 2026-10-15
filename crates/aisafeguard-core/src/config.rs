@@ -281,8 +281,13 @@ fn default_true() -> bool {
 #[serde(default, deny_unknown_fields)]
 pub struct AiConfig {
     pub enabled: bool,
-    /// OpenAI 兼容端点，默认智谱 GLM；封闭内网可指向本地推理（Ollama/vLLM）。
+    /// 对话端点根 URL；客户端按 api_protocol 拼具体路径。封闭内网可指向本地推理
+    /// （Ollama/vLLM 的 OpenAI 兼容入口）。
     pub base_url: String,
+    /// 协议模板（F797）：chat = OpenAI Chat Completions（/chat/completions）|
+    /// responses = OpenAI Responses（/responses）| anthropic = Anthropic Messages
+    /// （/v1/messages）。默认 chat。未知值按 chat 处理。
+    pub api_protocol: String,
     pub model: String,
     pub auto_apply: bool,
     /// auto_apply 生效的最低严重度：low | medium | high | critical
@@ -330,6 +335,7 @@ impl Default for AiConfig {
         Self {
             enabled: false,
             base_url: "https://open.bigmodel.cn/api/paas/v4".into(),
+            api_protocol: "chat".into(),
             model: "glm-4.7".into(),
             fp_suppress_secs: 1_209_600,
             fp_ignore_min_severity: String::new(),
