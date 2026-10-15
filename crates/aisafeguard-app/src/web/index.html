@@ -206,6 +206,20 @@
             <span class="hint" data-i18n="永不自动应用">永不自动应用</span></label>
           <button class="act" id="pol-save">保存策略</button>
         </div>
+        <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
+          <span class="hint" data-i18n="AI 连接">AI 连接</span>
+          <label style="display:flex;align-items:center;gap:6px"><span data-i18n="协议模板">协议模板</span>
+            <select id="pol-proto">
+              <option value="chat">chat（/chat/completions）</option>
+              <option value="responses">responses（/responses）</option>
+              <option value="anthropic">anthropic（/v1/messages）</option>
+            </select>
+            <span class="hint" data-i18n="按模型实际暴露的协议选；错配 = 400 &quot;Model does not support this protocol&quot;">按模型实际暴露的协议选；错配 = 400 "Model does not support this protocol"</span></label>
+          <label style="display:flex;align-items:center;gap:6px"><span data-i18n="API 地址">API 地址</span>
+            <input type="text" id="pol-url" placeholder="https://open.bigmodel.cn/api/paas/v4" style="width:270px"></label>
+          <label style="display:flex;align-items:center;gap:6px"><span data-i18n="模型">模型</span>
+            <input type="text" id="pol-model" placeholder="glm-4.7" style="width:150px"></label>
+        </div>
         <div id="pol-msg"></div>
       </div>
       <p class="hint" style="margin-bottom:8px">
@@ -327,6 +341,14 @@ const EN = {
   '已停止 ': 'Stopped ', '已启动 ': 'Started ',
   '镜像': 'mirrored', '灰度时长: ': 'Trial TTL: ',
   'pol.intro': 'AI auto-handling policy — grey-scale auto-ban (auto-unban at expiry) requires ANY conviction channel: 1) fast-path convictions (24h detections reach the "conviction threshold"); 2) payload-bearing honeypot hits (real data sent; bare port probes excluded) reach the "payload threshold"; 3) intel-listed and observed reach "intel observations". None met = single signal, manual review. Save = hot reload.',
+  'AI 连接': 'AI Connection',
+  '协议模板': 'API Protocol',
+  'API 地址': 'API URL',
+  '模型': 'Model',
+  '按模型实际暴露的协议选；错配 = 400 "Model does not support this protocol"': 'Pick the protocol the model actually exposes; mismatch = 400 "Model does not support this protocol"',
+  '端点与模型不能为空': 'API URL and model must not be empty',
+  '值含非法字符（引号/反斜杠/换行）：': 'Value contains illegal chars (quote/backslash/newline): ',
+  '，协议 ': ', protocol ', '，模型 ': ', model ',
   'fw.hint': 'Active firewall block rules (AI trial / auto / manual / org origins), auto-refresh every 3s.',
   'ev.hint': 'Auto-refresh every 3s. Click a row to expand payload.',
   'prop.hint': 'AI slow path: evidence → proposal → human confirm. Apply = grey TTL ban (auto-unban at expiry).',
@@ -335,6 +357,7 @@ const EN = {
 };
 const ZH = {
   'pol.intro': 'AI 自动处置策略 —— 三条定罪通道满足任一才自动灰度封禁（到期自动解封）：\n        ① 快路径已定罪（24h 内 detection 达「定罪阈值」）② 带载荷蜜罐命中（真发过数据，纯端口探测不算）达「载荷阈值」\n        ③ 情报库命中且被观测达「情报观测」次数。三通道全不满足 = 单信号，留人工。保存即热更。',
+  'AI 连接': 'AI 连接',
   'fw.hint': '防火墙当前生效的封禁规则（含 AI 灰度/自动封禁/手动/组织来源），每 3 秒自动刷新。',
   'ev.hint': '每 3 秒自动刷新，点击行展开载荷。',
   'prop.hint': 'AI 慢路径产出：证据 → 建议 → 人工确认。应用 = 按灰度 TTL 封禁（到期自动解封）。',
@@ -911,6 +934,10 @@ async function loadPolicy() {
     const intelMin = parseInt(aiRawField(raw, 'auto_apply_intel_min_hits'), 10);
     $('pol-intel').value = intelMin >= 1 ? intelMin : 1;
     $('pol-exempt').value = parseExempt(aiRawField(raw, 'auto_apply_exempt_ips')).join(', ');
+    $('pol-proto').value = ['responses', 'anthropic'].includes((aiRawField(raw, 'api_protocol') || '"chat"').replace(/"/g, ''))
+      ? (aiRawField(raw, 'api_protocol') || '"chat"').replace(/"/g, '') : 'chat';
+    $('pol-url').value = (aiRawField(raw, 'base_url') || '').replace(/"/g, '');
+    $('pol-model').value = (aiRawField(raw, 'model') || '').replace(/"/g, '');
   } catch (_) { /* 策略卡加载失败不打断主流程，保存时服务端仍会校验 */ }
 }
 $('pol-save').onclick = async () => {
@@ -923,6 +950,11 @@ $('pol-save').onclick = async () => {
   const exempt = $('pol-exempt').value.split(/[,\uFF0C\n]+/).map((s) => s.trim()).filter(Boolean);
   const bad = exempt.find((s) => !/^[0-9a-fA-F.:]+$/.test(s));
   if (bad) return showPolMsg('err', t('豁免清单含可疑条目（须为 IP）：') + bad);
+  const url = $('pol-url').value.trim();
+  const model = $('pol-model').value.trim();
+  if (!url || !model) return showPolMsg('err', t('端点与模型不能为空'));
+  const badVal = [url, model].find((s) => /["\\\r\n]/.test(s));
+  if (badVal) return showPolMsg('err', t('值含非法字符（引号/反斜杠/换行）：') + badVal);
   $('pol-save').disabled = true;
   try {
     // 每次保存都重新读服务端原文再改：避免覆盖其他入口（配置页/CLI）刚写入的内容
@@ -937,6 +969,9 @@ $('pol-save').onclick = async () => {
     raw = upsertAiField(raw, 'auto_apply_min_honey_payload', String(honeyMin));
     raw = upsertAiField(raw, 'auto_apply_intel_min_hits', String(intelMin));
     raw = upsertAiField(raw, 'auto_apply_exempt_ips', '[' + exempt.map((s) => '"' + s + '"').join(', ') + ']');
+    raw = upsertAiField(raw, 'api_protocol', '"' + $('pol-proto').value + '"');
+    raw = upsertAiField(raw, 'base_url', '"' + url + '"');
+    raw = upsertAiField(raw, 'model', '"' + model + '"');
     const r = await fetch('/api/config/raw', {
       method: 'PUT',
       headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'text/plain; charset=utf-8' },
@@ -950,7 +985,8 @@ $('pol-save').onclick = async () => {
       : t('策略已保存并热更生效（自动应用') + ($('pol-auto').checked ? t('开') : t('关'))
         + t('，严重度 ≥') + $('pol-sev').value + t('，日限额 ') + cap
         + t('，定罪阈值 ') + detMin + t(' 检测 / ') + honeyMin + t(' 带载荷命中 / 情报观测 ')
-        + intelMin + t(' 次，豁免 ') + exempt.length + t(' 条）'));
+        + intelMin + t(' 次，豁免 ') + exempt.length + t(' 条，协议 ') + $('pol-proto').value
+        + t('，模型 ') + model + t('）'));
     if ($('cfg').dataset.loaded && !cfgDirty) loadCfg(); // 配置编辑器已加载则重载，防旧文本回写
   } catch (e) { showPolMsg('err', '保存失败：' + e.message); }
   finally { $('pol-save').disabled = false; }
