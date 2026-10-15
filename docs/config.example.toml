@@ -253,8 +253,13 @@ http_server = "nginx"
 # Key 不写在这里——存系统凭据管理器（GUI 设置页粘贴）或环境变量 AISAFEGUARD_AI_KEY。
 enabled = false
 # Conversation endpoint root; the concrete path is appended per api_protocol
-# (air-gapped networks can point at local inference servers).
+# (air-gapped networks can point at local inference servers). The client always
+# sends its own User-Agent (aisafeguard/version) plus a per-session
+# x-opencode-session id — this satisfies gateway admission requirements like
+# opencode Go without extra configuration.
 # 对话端点根 URL，具体路径按 api_protocol 拼接（封闭内网可指向本地推理服务）。
+# 客户端自动附带独立 User-Agent（aisafeguard/版本）与单会话
+# x-opencode-session id——opencode Go 一类网关的准入要求自动满足，无需手动配置。
 base_url = "https://open.bigmodel.cn/api/paas/v4"
 # API protocol template: "chat" = OpenAI Chat Completions (/chat/completions,
 # default) | "responses" = OpenAI Responses (/responses) | "anthropic" =

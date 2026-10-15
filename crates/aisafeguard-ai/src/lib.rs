@@ -13,6 +13,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use aisafeguard_core::error::{Error, Result};
+use reqwest::header as http;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -265,6 +266,15 @@ impl AiClient {
         } else {
             req = req.bearer_auth(&self.api_key);
         }
+        // 独立 User-Agent + 单次会话 id（opencode Go 网关的客户端准入要求：明确
+        // 自报身份、每会话带稳定 session id 供路由/提示缓存优化；对其他服务商
+        // 是无害的普通头，零配置统一带上）
+        req = req
+            .header(
+                http::USER_AGENT,
+                concat!("aisafeguard/", env!("CARGO_PKG_VERSION")),
+            )
+            .header("x-opencode-session", new_session_id());
         let resp = req
             .send()
             .await
@@ -292,6 +302,19 @@ fn normalize_protocol(p: &str) -> &str {
         PROTOCOL_ANTHROPIC => PROTOCOL_ANTHROPIC,
         _ => PROTOCOL_CHAT,
     }
+}
+
+/// 单次会话 id：一次 chat() 即一次独立会话（单轮问答）。「稳定」的粒度是
+/// 会话内——同一会话只有一个请求，天然一致；跨会话不要求复用。纳秒 +
+/// 原子序号拼接，无新依赖。
+fn new_session_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    format!("{:016x}{:08x}", nanos, SEQ.fetch_add(1, Ordering::Relaxed))
 }
 
 /// 从 LLM 回复中提取 JSON 并按 allowlist 校验出有效建议。
@@ -519,6 +542,15 @@ mod tests {
         ] {
             assert!(validate_fed_proposal(&evil).is_none(), "{evil}");
         }
+    }
+
+    #[test]
+    fn session_ids_are_unique_per_call() {
+        let a = new_session_id();
+        let b = new_session_id();
+        assert_ne!(a, b);
+        assert_eq!(a.len(), 24); // 16 + 8 hex
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
