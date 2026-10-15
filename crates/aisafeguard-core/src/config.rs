@@ -288,6 +288,11 @@ pub struct AiConfig {
     /// responses = OpenAI Responses（/responses）| anthropic = Anthropic Messages
     /// （/v1/messages）。默认 chat。未知值按 chat 处理。
     pub api_protocol: String,
+    /// 网关特异请求头（F797）：中转服务的准入规则各异（如 opencode Go 的
+    /// 会话/身份要求）——自动 UA/会话头之外的留一个通用出口，同名覆盖自动值。
+    /// TOML 写法：base_url 行内表 extra_headers = { "X-Foo" = "bar" } 或
+    /// [ai.extra_headers] 独立小节。默认空。
+    pub extra_headers: std::collections::BTreeMap<String, String>,
     pub model: String,
     pub auto_apply: bool,
     /// auto_apply 生效的最低严重度：low | medium | high | critical
@@ -336,6 +341,7 @@ impl Default for AiConfig {
             enabled: false,
             base_url: "https://open.bigmodel.cn/api/paas/v4".into(),
             api_protocol: "chat".into(),
+            extra_headers: Default::default(),
             model: "glm-4.7".into(),
             fp_suppress_secs: 1_209_600,
             fp_ignore_min_severity: String::new(),

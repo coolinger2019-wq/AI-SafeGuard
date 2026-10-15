@@ -10,6 +10,7 @@
 //! 4. 拒绝封禁回环/内网/链路本地地址，防止 AI 建议把用户自己的网络锁死。
 
 use std::net::IpAddr;
+use std::str::FromStr;
 use std::time::Duration;
 
 use aisafeguard_core::error::{Error, Result};
@@ -200,16 +201,26 @@ pub struct AiClient {
     base_url: String,
     model: String,
     api_key: String,
+    /// 网关特异请求头（用户配置）。HeaderMap 用 insert 语义，同名覆盖自动头。
+    extra_headers: std::collections::BTreeMap<String, String>,
 }
 
 impl AiClient {
     pub fn new(base_url: &str, model: &str, api_key: &str) -> Self {
-        Self::with_protocol(PROTOCOL_CHAT, base_url, model, api_key)
+        Self::with_protocol(PROTOCOL_CHAT, base_url, model, api_key, Default::default())
     }
 
     /// protocol：chat（OpenAI Chat Completions，默认）| responses（OpenAI Responses）|
     /// anthropic（Anthropic Messages）。未知值按 chat 处理（防呆降级，不把配置错误放大成启动失败）。
-    pub fn with_protocol(protocol: &str, base_url: &str, model: &str, api_key: &str) -> Self {
+    /// extra_headers：网关特异请求头（中转服务准入规则各异，业界通用出口——
+    /// 同名时覆盖自动 UA/会话头，见 chat() 的构造顺序）。
+    pub fn with_protocol(
+        protocol: &str,
+        base_url: &str,
+        model: &str,
+        api_key: &str,
+        extra_headers: std::collections::BTreeMap<String, String>,
+    ) -> Self {
         let protocol = normalize_protocol(protocol).to_string();
         let base_url = base_url.trim_end_matches('/').to_string();
         let http = reqwest::Client::builder()
@@ -222,6 +233,7 @@ impl AiClient {
             base_url,
             model: model.to_string(),
             api_key: api_key.to_string(),
+            extra_headers,
         }
     }
 
@@ -258,7 +270,29 @@ impl AiClient {
             ),
         };
         let anthropic_style = self.protocol == PROTOCOL_ANTHROPIC;
-        let mut req = self.http.post(url).json(&body);
+        // 头部走 HeaderMap + insert（同名覆盖）：自动 UA/会话头打底（opencode Go
+        // 网关的客户端准入要求：自报身份 + 每会话 session id），用户 extra_headers
+        // 覆盖同名自动值——网关特异要求能干净接管
+        let mut hm = http::HeaderMap::new();
+        hm.insert(
+            http::USER_AGENT,
+            http::HeaderValue::from_static(concat!("aisafeguard/", env!("CARGO_PKG_VERSION"))),
+        );
+        if let Ok(id) = http::HeaderValue::from_str(&new_session_id()) {
+            hm.insert(http::HeaderName::from_static("x-opencode-session"), id);
+        }
+        for (k, v) in &self.extra_headers {
+            match (
+                http::HeaderName::from_str(k),
+                http::HeaderValue::from_str(v),
+            ) {
+                (Ok(name), Ok(val)) => {
+                    hm.insert(name, val);
+                }
+                _ => tracing::warn!("extra_headers 条目非法（只允许 ASCII）：{k}"),
+            }
+        }
+        let mut req = self.http.post(url).headers(hm).json(&body);
         if anthropic_style {
             req = req
                 .header("x-api-key", &self.api_key)
@@ -266,15 +300,6 @@ impl AiClient {
         } else {
             req = req.bearer_auth(&self.api_key);
         }
-        // 独立 User-Agent + 单次会话 id（opencode Go 网关的客户端准入要求：明确
-        // 自报身份、每会话带稳定 session id 供路由/提示缓存优化；对其他服务商
-        // 是无害的普通头，零配置统一带上）
-        req = req
-            .header(
-                http::USER_AGENT,
-                concat!("aisafeguard/", env!("CARGO_PKG_VERSION")),
-            )
-            .header("x-opencode-session", new_session_id());
         let resp = req
             .send()
             .await
@@ -542,6 +567,20 @@ mod tests {
         ] {
             assert!(validate_fed_proposal(&evil).is_none(), "{evil}");
         }
+    }
+
+    #[test]
+    fn extra_headers_override_default_headroom() {
+        // extra_headers 直接进 HeaderMap——非法条目录 warn 跳过，合法条目
+        // 同名覆盖自动值（insert 语义）。这里只测「带回 default 的构造」，
+        // 头部 HTTP 层行为由探针真实验证（api/ai/test）。
+        let mut eh = std::collections::BTreeMap::new();
+        eh.insert("X-Dummy".to_string(), "v".to_string());
+        let c = AiClient::with_protocol("chat", "https://x/", "m", "k", eh);
+        assert_eq!(c.extra_headers.len(), 1);
+        // 空表/无字段默认也成立
+        let c2 = AiClient::with_protocol("chat", "https://x/", "m", "k", Default::default());
+        assert!(c2.extra_headers.is_empty());
     }
 
     #[test]

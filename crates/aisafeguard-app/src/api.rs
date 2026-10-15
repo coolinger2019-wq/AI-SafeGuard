@@ -497,6 +497,7 @@ async fn ai_test(State(s): State<AppState>) -> Response {
         &cfg.ai.base_url,
         &cfg.ai.model,
         &key,
+        cfg.ai.extra_headers.clone(),
     );
     let started = std::time::Instant::now();
     let probe = tokio::time::timeout(

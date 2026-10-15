@@ -2232,8 +2232,13 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
         (!arr.is_empty()).then(|| serde_json::to_string(&arr).unwrap_or_default())
     };
 
-    let client =
-        AiClient::with_protocol(&cfg.ai.api_protocol, &cfg.ai.base_url, &cfg.ai.model, &key);
+    let client = AiClient::with_protocol(
+        &cfg.ai.api_protocol,
+        &cfg.ai.base_url,
+        &cfg.ai.model,
+        &key,
+        cfg.ai.extra_headers.clone(),
+    );
     let result = client
         .chat(
             aisafeguard_ai::SYSTEM_PROMPT,

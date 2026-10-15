@@ -272,6 +272,14 @@ base_url = "https://open.bigmodel.cn/api/paas/v4"
 # 400 "Model does not support this protocol" 或 404——按服务商对该模型
 # 实际暴露的端点形态选择。未知值按 chat 防呆处理。
 api_protocol = "chat"
+# Gateway-specific request headers for relay services with admission rules
+# (big-brand APIs never need this). Values override the automatic
+# User-Agent / x-opencode-session headers when keys match. Inline table or a
+# separate [ai.extra_headers] section both work. Examples:
+#   extra_headers = { "X-Custom-Auth" = "token123" }
+# 中转网关的特异请求头（大厂 API 不需要这个）。键与自动 User-Agent /
+# x-opencode-session 同名时覆盖自动值。行内表或 [ai.extra_headers] 独立小节皆可。
+extra_headers = { }
 model = "glm-4.7"
 # Auto-apply proposals (off by default = manual confirm per proposal). Even when
 # on, applies only as short-TTL grey bans that auto-unban at expiry.
