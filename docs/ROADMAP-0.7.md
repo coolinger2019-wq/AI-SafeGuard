@@ -401,3 +401,31 @@ Postgres/MongoDB、SMTP、UDP 反射类（NTP/SSDP）、K8s API、IoT TR-069、I
 | ET 规则误报爆炸 | 默认关 + threshold 限流 + fp 抑制管道已有；子集缩量到 ≤50 条 |
 | AI 调参建议质量差 | 抽样人工评级先行；最坏砍到「周报只读展示」不产建议 |
 | 单人带宽 | 批次独立发版；批次四可整体延后不阻塞 0.7.0/0.7.1 |
+
+## F798 提案（2026-10-17，pwn.ai PwnEscape / CVE-2026-99999 触发）：IP 选项异常检测器
+
+> 起因：PwnEscape（Linux 内核 IPv4 栈延迟元数据缺陷，KVM guest→宿主逃逸，
+> 实验室已实现 host root 助手执行；修复 10-14 合入主线，稳定版回移植/CVE 发布未落地）。
+> 该攻击唯一可观测位置 = 宿主/网关层的出站 IPv4 分片携带 IHL>5（IP 选项区）——
+> 真实互联网里 IP 选项近乎绝迹，信噪比极高。攻击层次对照：蜜罐抓「敲门的人」，
+> 本检测器抓「住楼里撬承重墙的房客」——互补不替代。
+
+**两角色两里程碑：**
+
+| 里程碑 | 角色 | 能力 | 状态 |
+|---|---|---|---|
+| m1 | guest/终端（现状部署即达） | **入站** IP 选项异常 → 检测事件（观察型，不丢包）+ 按源追踪（nft 动态集合） | spike 验证中 |
+| m2 | KVM 宿主机/多租户版（差异化新形态） | VM 出口网卡**出站** IHL>5 → 丢包断泄露通道 + 告警；XDP 直查包头（微秒级） | 立项 |
+
+**实现路径（m1，nftables 原生匹配，零新依赖）：**
+- nft 规则：`ip hdrlength > 5 counter update @ipopt_srcs { ip saddr }`（动态集合按源记录）
+- app 周期轮询集合 → SecurityEvent::Detection（rule_id=ipopts_options，含源与计数）
+- 观察型优先（丢包归 m2）：入站选项对终端几乎不可能合法，但先采数据不破坏任何链路
+- 测试：WSL spike（IP_OPTIONS setsockopt 造 IHL=6 合法包 → nft 计数命中）
+- 兜底：若 `ip hdrlength` 语法在目标内核不可用，降级 raw 位域匹配 `@ih,4,4 > 5`
+
+**参照**：Suricata/Zeek 的 ip_opts 类规则（网关层成熟模式）；我方 XDP 基建复用（0.3.7）。
+
+**已核对**：VPS 为 Cloudnium KVM guest——无 VM 在跑（kvm_intel 0 使用）、无 TUN 用户、
+产品 capture 默认关 → PwnEscape 本身对我方 VPS 无攻击面（2026-10-17 实测）；
+m2 形态面向「跑在宿主机上的部署」，是 0.8 差异化候选，不是当前实验节点的工作。
