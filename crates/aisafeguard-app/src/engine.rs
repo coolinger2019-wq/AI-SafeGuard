@@ -1942,8 +1942,51 @@ pub fn spawn_expiry_janitor(eng: &Arc<EngineHandle>) {
     rt.spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(60));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // F798 m1：入站 IP 选项异常观察（Linux nft 资产；观察型不封禁，损坏不波及防火墙）
+        #[cfg(target_os = "linux")]
+        let mut ipopts = aisafeguard_firewall::ipopts::IpOptsMonitor::new();
+        #[cfg(target_os = "linux")]
+        let mut ipopts_fail_streak: u32 = 0;
         loop {
             ticker.tick().await;
+            #[cfg(target_os = "linux")]
+            {
+                match ipopts.poll() {
+                    Ok(snap) => {
+                        ipopts_fail_streak = 0;
+                        for ip in snap.new_sources.clone() {
+                            eng.bus.publish(SecurityEvent::Detection {
+                                ts: now_ts(),
+                                kind: "ipopts".into(),
+                                src_ip: ip.to_string(),
+                                confidence: "deterministic".into(),
+                                severity: "low".into(),
+                                evidence: format!(
+                                    "入站 IPv4 选项（IHL>5）：{}
+累计 {} 包 / {} 源（观察型，不封禁）",
+                                    ip,
+                                    snap.total_packets,
+                                    snap.sources.len()
+                                ),
+                                rule_id: None,
+                                http_hint: None,
+                                tls_fingerprint: None,
+                                tls_ja4: None,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        ipopts_fail_streak += 1;
+                        // 首次 + 之后每 30 轮提醒一次（无提权环境长驻失败防日志风暴）
+                        if ipopts_fail_streak == 1 || ipopts_fail_streak % 30 == 0 {
+                            tracing::warn!(
+                                "IP 选项观察轮询失败（连续 {} 次）: {e}",
+                                ipopts_fail_streak
+                            );
+                        }
+                    }
+                }
+            }
             let Ok(expired) = eng.store.expired_rules(now_ts()) else {
                 continue;
             };

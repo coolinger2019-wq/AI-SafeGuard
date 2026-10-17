@@ -63,6 +63,7 @@ pub enum SecurityEvent {
     Detection {
         ts: i64,
         /// scan | bruteforce | flood | signature | intel_hit | mcp_ghost（F792a：蜜罐幽灵工具定罪）
+        /// ipopts（F798 m1：入站 IPv4 选项异常观察，nft 后端）
         kind: String,
         src_ip: String,
         confidence: String,

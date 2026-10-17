@@ -142,6 +142,9 @@ pub fn create_backend() -> std::sync::Arc<dyn Firewall> {
 
 /// nftables 命令构造与 Linux 提权检测——纯函数，平台无关，便于单测。
 pub mod nft {
+    // 自包含导入：本模块的纯函数刻意不依赖外部作用域
+    use std::net::IpAddr;
+
     pub const TABLE: &str = "aisafeguard";
     /// CAP_NET_ADMIN 在 CapEff 位图中的位置
     pub const CAP_NET_ADMIN: u64 = 1 << 12;
@@ -319,6 +322,114 @@ pub mod nft {
             TABLE.into(),
             chain.into(),
         ]
+    }
+
+    pub fn list_set(set: &str) -> Vec<String> {
+        vec![
+            "list".into(),
+            "set".into(),
+            "inet".into(),
+            TABLE.into(),
+            set.into(),
+        ]
+    }
+
+    /// ---------- F798 m1：入站 IP 选项异常观察（观察型，不参与封禁） ----------
+
+    /// 集合带元素 1h 超时：伪造源刷集合会自动退场（有界），持续源每小时
+    /// 重新进城 = 天然的再告警节奏。双端 spike 已验证（WSL 内核 6.6 + 节点
+    /// nft 1.0.9），`flags dynamic, timeout` 是并列枚举（漏 timeout 标志会
+    /// 报 "unexpected number"——已踩过的语法坑）。
+    pub const SET_IPOPT: &str = "ipopt_srcs";
+
+    pub fn add_ipopt_set() -> Vec<String> {
+        vec![
+            "add".into(),
+            "set".into(),
+            "inet".into(),
+            TABLE.into(),
+            SET_IPOPT.into(),
+            "{ type ipv4_addr; flags dynamic, timeout; timeout 1h; }".into(),
+        ]
+    }
+
+    /// 观察规则挂在入站链：IHL>5（带 IP 选项）计数 + 按源登记。
+    /// 真实互联网里 IP 选项近乎绝迹——命中即特异信号（pwn.ai PwnEscape 类
+    /// 宿主逃逸攻击的唯一可见特征就在此）。nft 规则无身份去重，重放会加倍
+    /// ——添加方必须先 list 链检查（Monitor 的 ensure 已处理）。
+    pub fn add_ipopt_rule() -> Vec<String> {
+        vec![
+            "add".into(),
+            "rule".into(),
+            "inet".into(),
+            TABLE.into(),
+            CHAIN_IN.into(),
+            "ip".into(),
+            "hdrlength".into(),
+            ">".into(),
+            "5".into(),
+            "counter".into(),
+            "update".into(),
+            format!("@{SET_IPOPT}"),
+            "{ ip saddr }".into(),
+        ]
+    }
+
+    /// `nft list set` 文本 → 元素 IP 列表。带超时的元素形如
+    /// `1.2.3.4 timeout 1h expires 59m...`，取每个逗号分隔 token 的首词。
+    /// 元素多时 nft 可能折行——括号深度扫描拿到完整内区，跨行不丢。
+    pub fn parse_set_ips(listing: &str) -> Vec<IpAddr> {
+        let Some(start) = listing.find("elements = {") else {
+            return Vec::new();
+        };
+        let bytes = listing.as_bytes();
+        let mut depth = 0usize;
+        let mut inner = String::new();
+        for &b in &bytes[start..] {
+            match b {
+                b'{' => {
+                    depth += 1;
+                    if depth == 1 {
+                        continue; // 开花括号本身不进内区
+                    }
+                }
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {
+                    if depth >= 1 {
+                        inner.push(b as char);
+                    }
+                }
+            }
+        }
+        inner
+            .split(',')
+            .filter_map(|tok| tok.split_whitespace().next())
+            .filter_map(|addr| addr.parse::<IpAddr>().ok())
+            .collect()
+    }
+
+    /// `nft list chain` 文本 → hdrlength 观察规则的 counter packets 数。
+    pub fn parse_ipopt_counter(listing: &str) -> Option<u64> {
+        for line in listing.lines() {
+            if !line.contains("hdrlength") {
+                continue;
+            }
+            let mut it = line.split_whitespace();
+            while let Some(t) = it.next() {
+                if t == "counter"
+                    && it.next() == Some("packets")
+                    && let Some(n) = it.next()
+                {
+                    return n.parse().ok();
+                }
+            }
+        }
+        None
     }
 
     /// nft 的"已存在"报错按幂等成功处理
@@ -624,6 +735,93 @@ impl Default for NftablesBackend {
     }
 }
 
+/// F798 m1：入站 IP 选项异常观察器（观察型）。独立于 [`Firewall`] trait——
+/// 不做封禁、Windows 后端无此资产；janitor 每 60s 轮询一次并做源级差分。
+/// 轮询失败只返回 Err（调用方限流记日志），观察资产损坏绝不波及封禁链。
+#[cfg(target_os = "linux")]
+pub mod ipopts {
+    use std::collections::HashSet;
+    use std::net::IpAddr;
+    use std::process::Command;
+    use std::sync::OnceLock;
+
+    use super::nft;
+    use aisafeguard_core::error::{Error, Result};
+
+    /// 一次轮询的结果：规则聚合计数 + 当前在册源 + 本轮新进源。
+    /// `new_sources` 语义 = 与上一轮相比**出现的变化量**：首轮快照全算新进；
+    /// 持续稳定的源不重复告警；元素 1h 超时退场后再次进城的源会再告警。
+    #[derive(Debug, Clone)]
+    pub struct IpOptsSnapshot {
+        pub total_packets: u64,
+        pub sources: Vec<IpAddr>,
+        pub new_sources: Vec<IpAddr>,
+    }
+
+    pub struct IpOptsMonitor {
+        setup: OnceLock<()>,
+        last_sources: HashSet<IpAddr>,
+    }
+
+    impl IpOptsMonitor {
+        pub fn new() -> Self {
+            Self {
+                setup: OnceLock::new(),
+                last_sources: HashSet::new(),
+            }
+        }
+
+        fn run(&self, args: &[String]) -> Result<String> {
+            let out = Command::new("nft")
+                .args(args)
+                .output()
+                .map_err(|e| Error::Firewall(format!("执行 nft 失败（未安装或不在 PATH）: {e}")))?;
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if !out.status.success() && !nft::is_exists_error(&stderr) {
+                return Err(Error::Firewall(format!(
+                    "nft {} 失败: {}",
+                    args.join(" "),
+                    stderr.trim()
+                )));
+            }
+            Ok(String::from_utf8_lossy(&out.stdout).to_string())
+        }
+
+        /// 幂等建集合与规则。规则没有身份去重，重放会加倍——先查链再补。
+        pub fn ensure(&self) -> Result<()> {
+            if self.setup.get().is_some() {
+                return Ok(());
+            }
+            self.run(&nft::add_ipopt_set())?;
+            let chain = self.run(&nft::list_chain(nft::CHAIN_IN))?;
+            if !chain.contains("hdrlength") {
+                self.run(&nft::add_ipopt_rule())?;
+            }
+            let _ = self.setup.set(());
+            Ok(())
+        }
+
+        /// 每轮 60s 调用一次。内部自 ensure（与主防火墙同表，进程启动时主
+        /// 后端已建表；外部删表也能在下轮自愈）。
+        pub fn poll(&mut self) -> Result<IpOptsSnapshot> {
+            self.ensure()?;
+            let set_list = self.run(&nft::list_set(nft::SET_IPOPT))?;
+            let chain = self.run(&nft::list_chain(nft::CHAIN_IN))?;
+            let sources = nft::parse_set_ips(&set_list);
+            let current: HashSet<IpAddr> = sources.iter().copied().collect();
+            let new_sources: Vec<IpAddr> =
+                current.difference(&self.last_sources).copied().collect();
+            self.last_sources = current;
+            let total_packets = nft::parse_ipopt_counter(&chain).unwrap_or(0);
+            Ok(IpOptsSnapshot {
+                total_packets,
+                sources,
+                new_sources,
+            })
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 impl Firewall for NftablesBackend {
     fn backend(&self) -> &'static str {
@@ -712,5 +910,51 @@ impl Firewall for NftablesBackend {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nft;
+
+    #[test]
+    fn ipopt_args_shape() {
+        let s = nft::add_ipopt_set();
+        assert_eq!(s[4], nft::SET_IPOPT);
+        assert!(s[5].contains("flags dynamic, timeout") && s[5].contains("timeout 1h"));
+        let r = nft::add_ipopt_rule();
+        assert_eq!(r[3], nft::TABLE);
+        assert_eq!(r[4], nft::CHAIN_IN);
+        assert!(r.contains(&"hdrlength".to_string()));
+        assert!(r.contains(&"@ipopt_srcs".to_string()));
+        assert!(r.contains(&"{ ip saddr }".to_string()));
+    }
+
+    #[test]
+    fn parse_set_ips_timeout_multi_line() {
+        // 带超时元的典型输出（单行）
+        let one = "\t\ttype ipv4_addr\n\t\tflags dynamic,timeout\n\t\ttimeout 1h\n\t\telements = { 127.0.0.1 timeout 1h expires 59m59s996ms }\n}";
+        assert_eq!(
+            nft::parse_set_ips(one),
+            vec!["127.0.0.1".parse::<std::net::IpAddr>().unwrap()]
+        );
+        // 多元 + 折行（nft 元素多时的新行渲染）
+        let multi = "\t\telements = { 1.1.1.1 timeout 1h,\n\t\t\t2.2.2.2,\n\t\t\t3.3.3.3 timeout 1h expires 10m }\n}";
+        let got = nft::parse_set_ips(multi);
+        assert_eq!(got.len(), 3, "{got:?}");
+        assert!(got.iter().any(|ip| ip.to_string() == "2.2.2.2"));
+        // 无元素/无该字段
+        assert!(nft::parse_set_ips("\tno elements here").is_empty());
+        assert!(nft::parse_set_ips("elements = { }").is_empty());
+    }
+
+    #[test]
+    fn parse_ipopt_counter_variants() {
+        let hit = "\t\tip hdrlength > 5 counter packets 2 bytes 89 update @ipopt_srcs { ip saddr }";
+        assert_eq!(nft::parse_ipopt_counter(hit), Some(2));
+        assert_eq!(nft::parse_ipopt_counter("\t\tip daddr @blk4_in drop"), None);
+        // 折行规则（counter 与 hdrlength 分行）取第一处同行匹配：nft 单行渲染为宜，
+        // 本解析不跨行——与 spike 实测输出一致
+        assert_eq!(nft::parse_ipopt_counter("nothing"), None);
     }
 }
