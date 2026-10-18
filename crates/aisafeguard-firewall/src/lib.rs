@@ -437,6 +437,19 @@ pub mod nft {
         stderr.contains("exists")
     }
 
+    /// 删除操作的目标语义是「元素不在」——nft 报 element does not exist =
+    /// 目标态已达成，按幂等成功处理。该报错只会来自 delete 系命令，对
+    /// add/list 无误判风险。此容错是毒环根治（2026-10-15~18 一条 AI 灰度
+    /// 规则记账行连续 1948 轮重试失败的实证）。
+    pub fn is_missing_error(stderr: &str) -> bool {
+        stderr.contains("element does not exist")
+    }
+
+    /// 统一容错判断：exists（add 幂等）或 missing（delete 幂等）
+    pub fn is_tolerable_error(stderr: &str) -> bool {
+        is_exists_error(stderr) || is_missing_error(stderr)
+    }
+
     /// 解析 /proc/self/status 的 CapEff 行，判断是否持有 CAP_NET_ADMIN
     pub fn cap_eff_grants_net_admin(status_text: &str) -> bool {
         for line in status_text.lines() {
@@ -629,7 +642,7 @@ impl NftablesBackend {
             .output()
             .map_err(|e| Error::Firewall(format!("执行 nft 失败（未安装或不在 PATH）: {e}")))?;
         let stderr = String::from_utf8_lossy(&out.stderr);
-        if !out.status.success() && !nft::is_exists_error(&stderr) {
+        if !out.status.success() && !nft::is_tolerable_error(&stderr) {
             return Err(Error::Firewall(format!(
                 "nft {} 失败: {}",
                 args.join(" "),
@@ -777,7 +790,7 @@ pub mod ipopts {
                 .output()
                 .map_err(|e| Error::Firewall(format!("执行 nft 失败（未安装或不在 PATH）: {e}")))?;
             let stderr = String::from_utf8_lossy(&out.stderr);
-            if !out.status.success() && !nft::is_exists_error(&stderr) {
+            if !out.status.success() && !nft::is_tolerable_error(&stderr) {
                 return Err(Error::Firewall(format!(
                     "nft {} 失败: {}",
                     args.join(" "),
@@ -956,5 +969,21 @@ mod tests {
         // 折行规则（counter 与 hdrlength 分行）取第一处同行匹配：nft 单行渲染为宜，
         // 本解析不跨行——与 spike 实测输出一致
         assert_eq!(nft::parse_ipopt_counter("nothing"), None);
+    }
+
+    #[test]
+    fn missing_element_is_tolerated_for_delete() {
+        // 毒环现场的真实 stderr（2026-10-18 事件库 1948 条的删除失败）
+        let poison = "Error: element does not exist
+delete element inet aisafeguard blk4_in { 1.2.3.4 }
+      ^^^^^^^^^^^^^";
+        assert!(nft::is_missing_error(poison));
+        assert!(nft::is_tolerable_error(poison));
+        assert!(nft::is_tolerable_error(
+            "Error: element already exists in set"
+        ));
+        // 非容错类错误保持报错
+        assert!(!nft::is_tolerable_error("Error: Operation not permitted"));
+        assert!(!nft::is_tolerable_error("Error: No such file or directory"));
     }
 }

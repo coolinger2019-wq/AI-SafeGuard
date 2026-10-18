@@ -1942,6 +1942,10 @@ pub fn spawn_expiry_janitor(eng: &Arc<EngineHandle>) {
     rt.spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(60));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // 连续失败轮次计数：同样的基础设施错误每 60s 一条 error 事件 = 1440 条/天
+        // 刷爆事件页（10-15~10-18 实测 1948 条「element does not exist」毒环）——
+        // 只在首轮与每 10 轮发事件，tracing 始终在
+        let mut expiry_fail_streak: u32 = 0;
         // F798 m1：入站 IP 选项异常观察（Linux nft 资产；观察型不封禁，损坏不波及防火墙）
         #[cfg(target_os = "linux")]
         let mut ipopts = aisafeguard_firewall::ipopts::IpOptsMonitor::new();
@@ -2039,6 +2043,7 @@ pub fn spawn_expiry_janitor(eng: &Arc<EngineHandle>) {
                 // remove 失败的规则变成无账孤儿（无重试、resync 也读不到）
                 match eng.firewall.remove(&name, &spec) {
                     Ok(()) => {
+                        expiry_fail_streak = 0;
                         let _ = eng.store.delete_rule(row.id);
                         eng.bus.publish(SecurityEvent::FirewallRuleRemoved {
                             ts: now_ts(),
@@ -2050,11 +2055,17 @@ pub fn spawn_expiry_janitor(eng: &Arc<EngineHandle>) {
                         ));
                     }
                     Err(e) => {
+                        expiry_fail_streak += 1;
                         tracing::warn!("解封规则 {name} 失败（保留记账下轮重试）: {e}");
-                        eng.bus.publish(SecurityEvent::engine(
-                            "error",
-                            format!("解封规则 {name}（{}）失败，保留记账下轮重试: {e}", row.remote_ip),
-                        ));
+                        if expiry_fail_streak == 1 || expiry_fail_streak % 10 == 0 {
+                            eng.bus.publish(SecurityEvent::engine(
+                                "error",
+                                format!(
+                                    "解封规则 {name}（{}）失败，保留记账下轮重试（连续 {} 轮）: {e}",
+                                    row.remote_ip, expiry_fail_streak
+                                ),
+                            ));
+                        }
                     }
                 }
             }
