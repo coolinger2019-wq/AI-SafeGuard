@@ -7,6 +7,7 @@ mod fed;
 mod fedproto;
 mod forward;
 mod gui;
+mod review;
 #[cfg(windows)]
 mod service;
 mod stix;
@@ -918,6 +919,9 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
 
     // AI 定时分析（0.4.0 A4 接线）：任务自门控 [ai].enabled，interval/enabled 全热更
     engine.spawn_ai_task();
+
+    // F760-B 系统自审：每日一轮把 7 天指标交给 AI 出改进建议（写评审工单，人工决策）
+    engine.spawn_review_task();
 
     // 威胁情报（默认关闭）：任务自门控 [intel].enabled 且每轮重读配置——
     // 无条件 spawn，热开启才能生效（否则「保存即热更」的提示是状态谎言）

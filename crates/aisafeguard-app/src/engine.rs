@@ -1009,6 +1009,29 @@ impl EngineHandle {
         });
     }
 
+    /// F760-B 系统自审：每日把 7 天指标喂给 AI，改进建议写评审工单文件
+    /// （<data_dir>/suggestions/YYYY-MM-DD.md）。人在文件里做 [采纳]/[拒绝] 决策——
+    /// AI 只提名永不执行。随 [ai].enabled 门控，逐轮重读配置；首跑延迟 10 分钟。
+    pub fn spawn_review_task(self: &Arc<Self>) {
+        let eng = Arc::clone(self);
+        let rt = eng.rt.clone();
+        rt.spawn(async move {
+            tokio::time::sleep(Duration::from_secs(600)).await;
+            loop {
+                let cfg = eng.config().ai;
+                if cfg.enabled {
+                    match crate::review::run_review(&eng).await {
+                        Ok(path) => eng.bus.publish(SecurityEvent::engine(
+                            "info",
+                            format!("系统自审完成，评审工单已生成：{}", path.display()),
+                        )),
+                        Err(e) => tracing::info!("系统自审跳过/失败（每日重试）: {e}"),
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(86_400)).await;
+            }
+        });
+    }
     pub fn save_config(&self, new_cfg: AppConfig) -> Result<()> {
         let old = self.config();
         // 热更/重启分界（A4/A5 契约，定义见 AppConfig::restart_required）
