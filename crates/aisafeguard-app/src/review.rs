@@ -212,12 +212,19 @@ fn title_overlap(a: &str, b: &str) -> f64 {
             .collect()
     };
     let (wa, wb) = (words(a), words(b));
-    if wa.is_empty() || wb.is_empty() {
-        return 0.0;
-    }
-    let inter = wa.intersection(&wb).count() as f64;
-    let union = wa.len() as f64 + wb.len() as f64 - inter;
-    inter / union
+    // 字符 bigram：中文无分词，词级切分整句成单 token 全失灵
+    let bigrams = |w: std::collections::HashSet<String>| -> std::collections::HashSet<String> {
+        w.into_iter()
+            .flat_map(|t| {
+                let cs: Vec<char> = t.chars().collect();
+                (0..cs.len().saturating_sub(1)).map(move |i| format!("{}{}", cs[i], cs[i + 1]))
+            })
+            .collect()
+    };
+    let (ba, bb) = (bigrams(wa), bigrams(wb));
+    let inter = ba.intersection(&bb).count() as f64;
+    let union = ba.len() as f64 + bb.len() as f64 - inter;
+    if union == 0.0 { 0.0 } else { inter / union }
 }
 
 /// 评审工单文件路径：<data_dir>/suggestions/YYYY-MM-DD.md（同日重跑覆盖）。
@@ -367,7 +374,7 @@ pub async fn run_review(
         let norm = normalize_title(&sg.title);
         let dup = open.iter().any(|r| {
             r.category == sg.category
-                && (normalize_title(&r.title) == norm || title_overlap(&r.title, &sg.title) > 0.6)
+                && (normalize_title(&r.title) == norm || title_overlap(&r.title, &sg.title) > 0.35)
         });
         if dup {
             continue;
@@ -453,7 +460,7 @@ mod tests {
                 "防火墙规则频繁增删净保留仅条"
             ) < 0.6
         );
-        assert!(title_overlap("高危端口需要确认隔离", "高危端口需要确认隔离") > 0.6);
+        assert!(title_overlap("高危端口需要确认隔离", "高危端口需要确认隔离") > 0.35);
         assert_eq!(normalize_title("积压 358 条！"), normalize_title("积压条"));
         assert_ne!(normalize_title("积压"), normalize_title("防火墙"));
     }
