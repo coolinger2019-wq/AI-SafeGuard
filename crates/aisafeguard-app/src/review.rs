@@ -178,6 +178,24 @@ fn fingerprint(category: &str, title: &str) -> String {
     format!("{:016x}", h.finish())
 }
 
+/// 标题词重叠度（Jaccard）：LLM 每轮措辞会变，指纹哈希对 AI 产出无效——
+/// 同类开放项重叠过半即视为同一主题（实证：第二轮回放 5 条全部重复建行）。
+fn title_overlap(a: &str, b: &str) -> f64 {
+    let words = |t: &str| -> std::collections::HashSet<String> {
+        t.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.chars().count() >= 2)
+            .map(str::to_string)
+            .collect()
+    };
+    let (wa, wb) = (words(a), words(b));
+    if wa.is_empty() || wb.is_empty() {
+        return 0.0;
+    }
+    let inter = wa.intersection(&wb).count() as f64;
+    let union = wa.len() as f64 + wb.len() as f64 - inter;
+    inter / union
+}
+
 /// 评审工单文件路径：<data_dir>/suggestions/YYYY-MM-DD.md（同日重跑覆盖）。
 pub fn review_path(data_dir: &std::path::Path, day: time::Date) -> PathBuf {
     let name = format!(
@@ -262,7 +280,21 @@ pub async fn run_review(
         today.day()
     );
     let mut fresh = 0usize;
+    // 去重：同类开放项标题重叠过半 = 同一主题（AI 措辞漂移不重复建行）
+    let open: Vec<_> = eng
+        .store
+        .list_suggestions(200)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.status == "pending" || r.status == "adopted")
+        .collect();
     for sg in &suggestions {
+        if open
+            .iter()
+            .any(|r| r.category == sg.category && title_overlap(&r.title, &sg.title) > 0.5)
+        {
+            continue;
+        }
         let fp = fingerprint(&sg.category, &sg.title);
         if eng
             .store
