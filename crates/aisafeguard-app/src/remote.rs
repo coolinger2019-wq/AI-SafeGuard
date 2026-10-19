@@ -369,6 +369,27 @@ impl Console for RemoteConsole {
         self.post("/api/ai/analyze").is_ok()
     }
 
+    fn list_suggestions(
+        &self,
+        limit: u32,
+    ) -> anyhow::Result<Vec<aisafeguard_store::SuggestionRow>> {
+        Ok(self
+            .get(&format!("/api/suggestions?limit={limit}"))?
+            .json()?)
+    }
+
+    fn decide_suggestion(&self, id: i64, status: &str, note: &str) -> anyhow::Result<()> {
+        self.post_json(
+            &format!("/api/suggestions/{id}/status"),
+            &serde_json::json!({ "status": status, "note": note }),
+        )?;
+        Ok(())
+    }
+
+    fn trigger_review(&self) -> bool {
+        self.post("/api/review/run").is_ok()
+    }
+
     fn save_config(&self, cfg: AppConfig) -> anyhow::Result<()> {
         self.post_json("/api/config", &cfg)?;
         Ok(())

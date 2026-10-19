@@ -6,6 +6,7 @@ mod help_tab;
 mod honeypot_tab;
 pub(crate) mod i18n;
 mod org_tab;
+mod review_tab;
 mod settings_tab;
 pub(crate) use i18n::t;
 pub(crate) mod theme;
@@ -76,6 +77,7 @@ enum Tab {
     Honeypot,
     Org,
     Ai,
+    Review,
     Settings,
     Help,
 }
@@ -146,9 +148,10 @@ pub struct AisafeApp {
     new_proto_idx: usize,
     new_note: String,
     new_tag: String,
+    // F760-B 评审页
+    review: review_tab::ReviewDraft,
     // 事件过滤
     event_filter: String,
-    // 组织页（F500）：隔离原因 / 解除指纹输入
     org_reason: String,
     org_lift_fp: String,
     org_node_name: String,
@@ -259,6 +262,12 @@ impl AisafeApp {
             new_note: String::new(),
             new_tag: String::new(),
             event_filter: String::new(),
+            review: review_tab::ReviewDraft {
+                rows: Vec::new(),
+                loaded: false,
+                sel: None,
+                note: String::new(),
+            },
             org_reason: String::new(),
             org_lift_fp: String::new(),
             org_node_name: String::new(),
@@ -377,6 +386,7 @@ impl AisafeApp {
                     (Tab::Honeypot, t("◉  蜜罐", "◉  Honeypot")),
                     (Tab::Org, t("⇄  组织", "⇄  Org")),
                     (Tab::Ai, t("✦  AI 助手", "✦  AI")),
+                    (Tab::Review, t("☰  评审", "☰  Review")),
                     (Tab::Settings, t("⚙  设置", "⚙  Settings")),
                     (Tab::Help, t("?  帮助", "?  Help")),
                 ];
@@ -502,6 +512,7 @@ impl eframe::App for AisafeApp {
                         Tab::Honeypot => self.honeypot_ui(ui),
                         Tab::Org => self.org_ui(ui),
                         Tab::Ai => self.ai_ui(ui),
+                        Tab::Review => self.review_ui(ui),
                         Tab::Settings => self.settings_ui(ui),
                         Tab::Help => self.help_ui(ui),
                     });

@@ -2797,6 +2797,24 @@ impl Console for EmbeddedConsole {
         self.0.trigger_analysis()
     }
 
+    fn list_suggestions(
+        &self,
+        limit: u32,
+    ) -> anyhow::Result<Vec<aisafeguard_store::SuggestionRow>> {
+        Ok(self.0.store.list_suggestions(limit)?)
+    }
+
+    fn decide_suggestion(&self, id: i64, status: &str, note: &str) -> anyhow::Result<()> {
+        if !self.0.store.set_suggestion_status(id, status, note)? {
+            anyhow::bail!("状态转换不合法（待决策→采纳/拒绝；已采纳→完成）");
+        }
+        Ok(())
+    }
+
+    fn trigger_review(&self) -> bool {
+        self.0.trigger_review()
+    }
+
     fn save_config(&self, cfg: AppConfig) -> anyhow::Result<()> {
         self.0.save_config(cfg).map_err(anyhow::Error::msg)
     }
