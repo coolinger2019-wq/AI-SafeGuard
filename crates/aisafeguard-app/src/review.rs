@@ -31,17 +31,19 @@ pub const REVIEW_PROMPT: &str = r#"你是 AI-SafeGuard 的系统自审引擎。�
 4) 产品能力层面值得做什么？
 
 只输出一个 JSON 对象，不要 markdown 代码块，不要解释文字：
-{"analysis": "本周期总体评估（≤200字）", "suggestions": [{"category": "tuning|coverage|rules|ops|roadmap", "priority": "P1|P2|P3", "title": "≤40字", "evidence": "数据证据（引用具体数字，≤150字）", "action": "建议的具体动作（≤150字）"}]}
+{"analysis": "本周期总体评估（≤200字）", "suggestions": [{"key": "更新已跟踪主题=其key；全新主题=new", "category": "tuning|coverage|rules|ops|roadmap", "priority": "P1|P2|P3", "title": "≤40字", "evidence": "数据证据（引用具体数字，≤150字）", "action": "建议的具体动作（≤150字）"}]}
 
 - category: tuning=参数调优 coverage=覆盖盲区 rules=检测规则 ops=运维风险 roadmap=产品改进
 - priority: P1=正在造成漏报/误报/风险 P2=数据支持值得做 P3=探索性
 - 最多 5 条，宁缺毋滥；没有值得提的就给空数组
-- <open_suggestions> 段是已在跟踪的未决建议：除非有实质新证据要升级它们，否则不要重复提出相同主题
+- <open_suggestions> 段是已在跟踪的未决建议（每行带 key）：要更新某条就返回它的 key 并改写内容；不要为已跟踪主题另提新条目；全新主题用 key="new"
 "#;
 
 /// 一条改进建议（校验后形态）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Suggestion {
+    /// 更新引用：Some(hex8)=升级该开放项；None=全新主题
+    pub key: Option<String>,
     pub category: String,
     pub priority: String,
     pub title: String,
@@ -59,6 +61,18 @@ pub fn validate_suggestion(v: &Value) -> Option<Suggestion> {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
     };
+    let key = match obj.get("key").and_then(|k| k.as_str()) {
+        Some(k) if !k.trim().is_empty() && k.trim() != "new" => {
+            let k = k.trim().to_string();
+            // 只接受 8 位 hex——长度外的引用视为无效（回退新建通道）
+            if k.len() == 8 && k.chars().all(|c| c.is_ascii_hexdigit()) {
+                Some(k)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
     let category = get("category")?;
     let priority = get("priority")?;
     let title = get("title")?;
@@ -75,6 +89,7 @@ pub fn validate_suggestion(v: &Value) -> Option<Suggestion> {
         return None;
     }
     Some(Suggestion {
+        key,
         category,
         priority,
         title,
@@ -277,7 +292,13 @@ pub async fn run_review(
     } else {
         let mut sec = String::from("\n<open_suggestions>\n");
         for r in &open_rows {
-            sec.push_str(&format!("{} | {} | {}\n", r.category, r.priority, r.title));
+            sec.push_str(&format!(
+                "key={} | {} | {} | {}",
+                &r.fingerprint[..8],
+                r.category,
+                r.priority,
+                r.title
+            ));
         }
         sec.push_str("</open_suggestions>\n这些主题已在跟踪中，不要重复提出相同主题；若认为某条未决建议需修正方向/优先级，提出覆盖它的建议并在 title 前加「升级：」。");
         sec
@@ -321,8 +342,28 @@ pub async fn run_review(
         .into_iter()
         .filter(|r| r.status == "pending" || r.status == "adopted")
         .collect();
+    let mut upgraded = 0usize;
     for sg in &suggestions {
-        // 代码兜底只拦归一化精确相同/极高重叠（主防线是喂回清单）
+        // key 引用优先：AI 回带了开放项的 key = 升级（更新内容，不动人类决策区）
+        if let Some(k) = &sg.key
+            && let Some(row) = open.iter().find(|r| r.fingerprint.starts_with(k.as_str()))
+        {
+            if eng
+                .store
+                .update_suggestion_content(
+                    row.id,
+                    &sg.priority,
+                    &sg.evidence,
+                    &sg.action,
+                    &cfg.ai.model,
+                )
+                .map_err(|e| Error::Ai(format!("建议升级失败: {e}")))?
+            {
+                upgraded += 1;
+            }
+            continue;
+        }
+        // 代码兜底只拦归一化精确相同/极高重叠
         let norm = normalize_title(&sg.title);
         let dup = open.iter().any(|r| {
             r.category == sg.category
@@ -349,6 +390,7 @@ pub async fn run_review(
             fresh += 1;
         }
     }
+    let _ = upgraded;
     let path = review_path(&cfg.data_dir(), today);
     let md = render_review(&cfg.ai.model, since_days, &analysis, &suggestions);
     std::fs::write(&path, md).map_err(|e| Error::Ai(format!("写评审工单失败: {e}")))?;
@@ -418,6 +460,7 @@ mod tests {
     #[test]
     fn renders_human_ticket() {
         let sg = Suggestion {
+            key: None,
             category: "coverage".into(),
             priority: "P1".into(),
             title: "t".into(),

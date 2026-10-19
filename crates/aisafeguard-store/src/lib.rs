@@ -181,6 +181,8 @@ pub struct SuggestionRow {
     pub status: String,
     pub note: String,
     pub decided_ts: Option<i64>,
+    /// 主题指纹（category+title 哈希）——升级引用与去重锚
+    pub fingerprint: String,
 }
 /// F300 组织事件账本行（org_events）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1313,7 +1315,9 @@ impl Store {
     pub fn list_suggestions(&self, limit: u32) -> Result<Vec<SuggestionRow>> {
         let conn = self.lock()?;
         let mut stmt = conn
-            .prepare("SELECT id, created_ts, day, category, priority, title, evidence, action, model, status, note, decided_ts FROM suggestions ORDER BY id DESC LIMIT ?1")
+            .prepare(
+                "SELECT id, created_ts, day, category, priority, title, evidence, action, model, status, note, decided_ts, fingerprint FROM suggestions ORDER BY id DESC LIMIT ?1",
+            )
             .map_err(|e| Error::Store(e.to_string()))?;
         let rows = stmt
             .query_map(params![limit], |r| {
@@ -1330,6 +1334,7 @@ impl Store {
                     status: r.get(9)?,
                     note: r.get(10)?,
                     decided_ts: r.get(11)?,
+                    fingerprint: r.get(12)?,
                 })
             })
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -1356,6 +1361,25 @@ impl Store {
         let n = self
             .lock()?
             .execute(&sql, params![status, note, aisafeguard_core::now_ts(), id])
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(n == 1)
+    }
+    /// AI 升级已有未决建议（key 引用命中）：只更新内容字段与模型署名，
+    /// status/note（人类决策区）不动——升级不是决策。
+    pub fn update_suggestion_content(
+        &self,
+        id: i64,
+        priority: &str,
+        evidence: &str,
+        action: &str,
+        model: &str,
+    ) -> Result<bool> {
+        let n = self
+            .lock()?
+            .execute(
+                "UPDATE suggestions SET priority = ?1, evidence = ?2, action = ?3, model = ?4 WHERE id = ?5 AND status IN ('pending','adopted')",
+                params![priority, evidence, action, model, id],
+            )
             .map_err(|e| Error::Store(e.to_string()))?;
         Ok(n == 1)
     }
