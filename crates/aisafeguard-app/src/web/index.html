@@ -241,6 +241,18 @@
     </div>
 
     <div id="tab-review" hidden>
+<div id="sgm-modal" hidden style="position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:50;display:flex;align-items:center;justify-content:center">
+  <div style="background:#161d27;border:1px solid #2a3442;border-radius:10px;padding:16px 20px;width:min(680px,92vw);max-height:86vh;overflow:auto">
+    <div class="k" id="sgm-title" style="margin-bottom:6px"></div>
+    <div class="hint" id="sgm-meta" style="margin-bottom:10px"></div>
+    <label style="display:block;margin:6px 0"><span class="hint">标题</span><input id="sgm-t" style="width:100%"></label>
+    <label style="display:block;margin:6px 0"><span class="hint">优先级</span>
+      <select id="sgm-pr"><option>P1</option><option>P2</option><option>P3</option></select></label>
+    <label style="display:block;margin:6px 0"><span class="hint">证据</span><textarea id="sgm-ev" rows="3" style="width:100%"></textarea></label>
+    <label style="display:block;margin:6px 0"><span class="hint">建议动作</span><textarea id="sgm-act" rows="3" style="width:100%"></textarea></label>
+    <div style="margin-top:10px"><button class="act" id="sgm-save">💾 保存修正</button> <button class="act" id="sgm-close">关闭</button></div>
+  </div>
+</div>
       <p class="hint" style="margin-bottom:8px"><span data-i18n="sg.hint">系统每日自审产生的改进建议——在这里做采纳/拒绝决策，进度全程留痕。md 快照在节点 data/suggestions/。</span>
         <button class="act" id="sg-run" style="margin-left:12px"><span data-i18n="立即自审">立即自审</span></button></p>
       <table id="sg"></table>
@@ -942,7 +954,7 @@ function parseExempt(v) {
   if (!inner) return [];
   return [...inner[1].matchAll(/"([^"]*)"/g)].map((m) => m[1]);
 }
-/* ---------- F760-B 评审页（展开编辑模式：人工修正后决策，修正版即记录） ---------- */
+/* ---------- F760-B 评审页（弹窗编辑：展开=只读详情+决策；修正走弹窗，编辑永不因重渲染丢失） ---------- */
 let sgCache = [];
 const expandedSg = new Set();
 async function loadSuggestions() {
@@ -952,19 +964,13 @@ async function loadSuggestions() {
   renderSg();
 }
 function sgDetail(x) {
-  const editable = x.status === 'pending' || x.status === 'adopted';
-  const f = (label, id, val, tag) => `<label style="display:block;margin:4px 0"><span class="hint">${label}</span><${tag} id="${id}" ${tag === 'textarea' ? 'rows="2" style="width:95%"' : 'style="width:95%"'} ${editable ? '' : 'disabled'}>${esc(val)}</${tag}></label>`;
-  const pr = (v) => ['P1','P2','P3'].map((p) => `<option ${p === v ? 'selected' : ''}>${p}</option>`).join('');
-  const note = `<label style="display:block;margin:4px 0"><span class="hint">${t('决策备注（去向/理由/完成记录）')}</span><input id="sg-note-${x.id}" style="width:95%" placeholder="${t('采纳填去向；拒绝填理由')}" value="${esc(x.note)}"></label>`;
-  const btn = (act, label, cls) => `<button class="act ${cls || ''}" data-act="${act}" data-id="${x.id}">${label}</button>`;
+  const f = (label, val) => '<div style="margin:3px 0"><span class="hint">' + label + '</span>' + esc(val || '—') + '</div>';
+  const note = `<label style="display:block;margin:6px 0"><span class="hint">${t('决策备注（去向/理由/完成记录）')}</span><input id="sg-note-${x.id}" style="width:95%" placeholder="${t('采纳填去向；拒绝填理由')}" value="${esc(x.note)}"></label>`;
+  const btn = (act, label) => ` <button class="act" data-act="${act}" data-id="${x.id}">${label}</button>`;
   let ops = '';
-  if (x.status === 'pending') ops = btn('adopted', t('✓ 采纳')) + ' ' + btn('rejected', t('✕ 拒绝'));
-  else if (x.status === 'adopted') ops = btn('completed', t('✔ 完成'));
-  return '<td colspan="7">' + f(t('标题'), `sg-title-${x.id}`, x.title, 'input')
-    + f(t('优先级'), `sg-pr-${x.id}`, pr(x.priority), 'select')
-    + f(t('证据'), `sg-ev-${x.id}`, x.evidence, 'textarea')
-    + f(t('建议动作'), `sg-act-${x.id}`, x.action, 'textarea')
-    + note + '<div style="margin:6px 0">' + btn('edit', t('💾 保存修正')) + ' ' + ops + '</div></td>';
+  if (x.status === 'pending') ops = btn('edit', t('✎ 修正')) + btn('adopted', t('✓ 采纳')) + btn('rejected', t('✕ 拒绝'));
+  else if (x.status === 'adopted') ops = btn('edit', t('✎ 修正')) + btn('completed', t('✔ 完成'));
+  return '<td colspan="7">' + f(t('标题'), x.title) + f(t('证据'), x.evidence) + f(t('建议动作'), x.action) + note + '<div style="margin:6px 0">' + ops + '</div></td>';
 }
 function renderSg() {
   const stMap = { pending: ['待决策', 'badge warn'], adopted: ['已采纳', 'badge ok'], rejected: ['已拒绝', 'badge'], completed: ['已完成', 'badge ok'] };
@@ -979,35 +985,18 @@ function renderSg() {
 }
 $('sg').addEventListener('click', (e) => {
   const btn = e.target.closest('button[data-act]');
-  if (btn) { decideSg(Number(btn.dataset.id), btn.dataset.act); return; }
+  if (btn) { sgAct(Number(btn.dataset.id), btn.dataset.act); return; }
   const tr = e.target.closest('tr[data-id]');
   if (!tr) return;
   const id = Number(tr.dataset.id);
   expandedSg.has(id) ? expandedSg.delete(id) : expandedSg.add(id);
   renderSg();
 });
-async function decideSg(id, act) {
-  const v = (sfx) => { const el = document.getElementById(`sg-${sfx}-${id}`); return el ? el.value : undefined; };
+async function sgAct(id, act) {
+  if (act === 'edit') return openSgModal(id);
   const noteEl = document.getElementById(`sg-note-${id}`);
-  const body = { status: act, note: noteEl ? noteEl.value : '', title: v('title'), priority: v('pr'), evidence: v('ev'), action: v('act') };
+  const note = noteEl ? noteEl.value : '';
   const r = await fetch(`/api/suggestions/${id}/status`, {
-    method: 'POST',
-    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (r.status === 401) return logout();
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) return alert(j.error || 'HTTP ' + r.status);
-  loadSuggestions();
-};
-document.querySelector('#sg').addEventListener('click', async (e) => {
-  const b = e.target.closest('button[data-act]');
-  if (!b) return;
-  const act = b.dataset.act;
-  const ask = act === 'rejected' ? t('拒绝理由：') : act === 'adopted' ? t('采纳去向（ROADMAP/改配置/立即处理）：') : t('完成记录：');
-  const note = prompt(ask);
-  if (note === null) return;
-  const r = await fetch(`/api/suggestions/${b.dataset.id}/status`, {
     method: 'POST',
     headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
     body: JSON.stringify({ status: act, note }),
@@ -1016,7 +1005,35 @@ document.querySelector('#sg').addEventListener('click', async (e) => {
   const j = await r.json().catch(() => ({}));
   if (!r.ok) return alert(j.error || 'HTTP ' + r.status);
   loadSuggestions();
-});
+}
+function openSgModal(id) {
+  const x = sgCache.find((r) => r.id === id);
+  if (!x) return;
+  const editable = x.status === 'pending' || x.status === 'adopted';
+  $('sgm-title').textContent = x.title;
+  $('sgm-meta').textContent = `${x.category} · ${x.priority} · ${x.day} · ${x.model}`;
+  $('sgm-t').value = x.title; $('sgm-pr').value = x.priority;
+  $('sgm-ev').value = x.evidence; $('sgm-act').value = x.action;
+  ['sgm-t','sgm-pr','sgm-ev','sgm-act'].forEach((k) => (document.getElementById(k).disabled = !editable));
+  $('sgm-save').disabled = !editable;
+  $('sgm-save').dataset.id = id;
+  $('sgm-modal').hidden = false;
+}
+$('sgm-close').onclick = () => { $('sgm-modal').hidden = true; };
+$('sgm-save').onclick = async () => {
+  const id = $('sgm-save').dataset.id;
+  const body = { title: $('sgm-t').value, priority: $('sgm-pr').value, evidence: $('sgm-ev').value, action: $('sgm-act').value };
+  const r = await fetch(`/api/suggestions/${id}/edit`, {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (r.status === 401) return logout();
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) return alert(j.error || 'HTTP ' + r.status);
+  $('sgm-modal').hidden = true;
+  loadSuggestions();
+};
 $('sg-run').onclick = async () => {
   const r = await fetch('/api/review/run', { method: 'POST', headers: { 'Authorization': 'Bearer ' + token } });
   if (r.status === 401) return logout();
