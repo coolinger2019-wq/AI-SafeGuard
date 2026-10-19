@@ -379,6 +379,7 @@ const EN = {
   '💾 保存修正': '💾 Save amendment',
   '暂无自审建议——AI 每日生成一轮，或点「立即自审」': 'No suggestions yet — daily, or run now',
   '✓ 采纳': '✓ Adopt', '✕ 拒绝': '✕ Reject', '✔ 完成': '✔ Complete',
+  '改配置': 'config change', '需改码': 'needs code', '人工操作': 'manual ops',
   '评审': 'Review',
   '立即自审': 'Run review now',
   '待决策': 'pending', '已采纳': 'adopted', '已拒绝': 'rejected', '已完成': 'completed',
@@ -977,7 +978,9 @@ function renderSg() {
   const body = sgCache.map((x) => {
     const [st, cls] = stMap[x.status] || [x.status, ''];
     const open = expandedSg.has(x.id);
-    const main = `<tr data-id="${x.id}" style="cursor:pointer"><td>${x.day}</td><td>${x.category}</td><td>${x.priority}</td><td>${esc(x.title)}</td><td><span class="${cls}">${t(st)}</span></td><td>${esc(x.note)}</td><td class="hint">${open ? '▲' : '▼'}</td></tr>`;
+    const pathBadge = { config: 'badge ok', code: 'badge warn', ops: 'badge' }[x.impl_path] || 'badge';
+    const pathLabel = { config: '改配置', code: '需改码', ops: '人工操作' }[x.impl_path] || x.impl_path;
+    const main = `<tr data-id="${x.id}" style="cursor:pointer"><td>${x.day}</td><td>${x.category}</td><td>${x.priority}</td><td>${esc(x.title)}</td><td><span class="${cls}">${t(st)}</span> <span class="${pathBadge}">${t(pathLabel)}</span></td><td>${esc(x.note)}</td><td class="hint">${open ? '▲' : '▼'}</td></tr>`;
     const detail = open ? `<tr class="payload" data-for="${x.id}">${sgDetail(x)}</tr>` : '';
     return main + detail;
   }).join('');

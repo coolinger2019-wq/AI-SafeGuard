@@ -178,6 +178,8 @@ pub struct SuggestionRow {
     pub action: String,
     pub model: String,
     /// pending | adopted | rejected | completed
+    /// 处置路径：config=改配置 code=需改码 ops=人工操作
+    pub impl_path: String,
     pub status: String,
     pub note: String,
     pub decided_ts: Option<i64>,
@@ -451,6 +453,7 @@ impl Store {
             "ALTER TABLE proposals ADD COLUMN action TEXT NOT NULL DEFAULT 'block'",
             "ALTER TABLE fed_members ADD COLUMN max_seq INTEGER NOT NULL DEFAULT -1",
             "ALTER TABLE fed_members ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+            "ALTER TABLE suggestions ADD COLUMN impl_path TEXT NOT NULL DEFAULT 'code'",
         ] {
             let _ = conn.execute(sql, []); // 列已存在时报错，忽略
         }
@@ -1301,12 +1304,13 @@ impl Store {
         evidence: &str,
         action: &str,
         model: &str,
+        impl_path: &str,
     ) -> Result<bool> {
         let n = self
             .lock()?
             .execute(
-                "INSERT OR IGNORE INTO suggestions(created_ts, day, fingerprint, category, priority, title, evidence, action, model) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![aisafeguard_core::now_ts(), day, fingerprint, category, priority, title, evidence, action, model],
+                "INSERT OR IGNORE INTO suggestions(created_ts, day, fingerprint, category, priority, title, evidence, action, model) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![aisafeguard_core::now_ts(), day, fingerprint, category, priority, title, evidence, action, model, impl_path],
             )
             .map_err(|e| Error::Store(e.to_string()))?;
         Ok(n == 1)
@@ -1316,7 +1320,7 @@ impl Store {
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, created_ts, day, category, priority, title, evidence, action, model, status, note, decided_ts, fingerprint FROM suggestions ORDER BY id DESC LIMIT ?1",
+                "SELECT id, created_ts, day, category, priority, title, evidence, action, model, status, impl_path, note, decided_ts, fingerprint FROM suggestions ORDER BY id DESC LIMIT ?1",
             )
             .map_err(|e| Error::Store(e.to_string()))?;
         let rows = stmt
@@ -1332,9 +1336,10 @@ impl Store {
                     action: r.get(7)?,
                     model: r.get(8)?,
                     status: r.get(9)?,
-                    note: r.get(10)?,
-                    decided_ts: r.get(11)?,
-                    fingerprint: r.get(12)?,
+                    impl_path: r.get(10)?,
+                    note: r.get(11)?,
+                    decided_ts: r.get(12)?,
+                    fingerprint: r.get(13)?,
                 })
             })
             .map_err(|e| Error::Store(e.to_string()))?;

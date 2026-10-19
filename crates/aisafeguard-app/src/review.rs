@@ -31,9 +31,10 @@ pub const REVIEW_PROMPT: &str = r#"你是 AI-SafeGuard 的系统自审引擎。�
 4) 产品能力层面值得做什么？
 
 只输出一个 JSON 对象，不要 markdown 代码块，不要解释文字：
-{"analysis": "本周期总体评估（≤200字）", "suggestions": [{"key": "更新已跟踪主题=其key；全新主题=new", "category": "tuning|coverage|rules|ops|roadmap", "priority": "P1|P2|P3", "title": "≤40字", "evidence": "数据证据（引用具体数字，≤150字）", "action": "建议的具体动作（≤150字）"}]}
+{"analysis": "本周期总体评估（≤200字）", "suggestions": [{"key": "更新已跟踪主题=其key；全新主题=new", "impl_path": "config|code|ops", "config_keys": ["impl_path=config 时必填：精确配置键（对照 config_reference，如 ai.auto_apply_max_per_day）"], "category": "tuning|coverage|rules|ops|roadmap", "priority": "P1|P2|P3", "title": "≤40字", "evidence": "数据证据（引用具体数字，≤150字）", "action": "建议的具体动作（≤150字）"}]}
 
 - category: tuning=参数调优 coverage=覆盖盲区 rules=检测规则 ops=运维风险 roadmap=产品改进
+- impl_path 判定：改 config_reference 里列出的键就能实现 → config（必须列 config_keys）；要改程序重新发版 → code；要程序外的人工操作（防火墙/云厂商/隔离确认）→ ops
 - priority: P1=正在造成漏报/误报/风险 P2=数据支持值得做 P3=探索性
 - 最多 5 条，宁缺毋滥；没有值得提的就给空数组
 - <open_suggestions> 段是已在跟踪的未决建议（每行带 key）：要更新某条就返回它的 key 并改写内容；不要为已跟踪主题另提新条目；全新主题用 key="new"
@@ -44,6 +45,10 @@ pub const REVIEW_PROMPT: &str = r#"你是 AI-SafeGuard 的系统自审引擎。�
 pub struct Suggestion {
     /// 更新引用：Some(hex8)=升级该开放项；None=全新主题
     pub key: Option<String>,
+    /// 处置路径：config=只改配置（须列 config_keys）| code=要改码进 ROADMAP | ops=人工操作
+    pub impl_path: String,
+    /// config 路径时的精确配置键（已在运行态 schema 校验）
+    pub config_keys: Vec<String>,
     pub category: String,
     pub priority: String,
     pub title: String,
@@ -53,7 +58,10 @@ pub struct Suggestion {
 
 /// allowlist 校验：白名单外 category/priority、超长字段、缺字段 → 整条作废
 ///（宁可漏一条，不可放脏数据进工单——与 proposal 校验同一纪律）。
-pub fn validate_suggestion(v: &Value) -> Option<Suggestion> {
+pub fn validate_suggestion(
+    v: &Value,
+    valid_paths: &std::collections::HashSet<String>,
+) -> Option<Suggestion> {
     let obj = v.as_object()?;
     let get = |k: &str| -> Option<String> {
         obj.get(k)?
@@ -73,6 +81,26 @@ pub fn validate_suggestion(v: &Value) -> Option<Suggestion> {
         }
         _ => None,
     };
+    let mut impl_path = match get("impl_path") {
+        Some(p) if ["config", "code", "ops"].contains(&p.as_str()) => p,
+        _ => "code".to_string(), // 未标注 = 保守按需改码
+    };
+    let config_keys: Vec<String> = v["config_keys"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(|x| x.trim().to_string()))
+                .filter(|x| !x.is_empty())
+                .take(5)
+                .collect()
+        })
+        .unwrap_or_default();
+    // config 路径必须列键且键必须真实存在于运行态配置 schema——编不出来降级为 code
+    if impl_path == "config"
+        && (config_keys.is_empty() || config_keys.iter().any(|k| !valid_paths.contains(k)))
+    {
+        impl_path = "code".to_string();
+    }
     let category = get("category")?;
     let priority = get("priority")?;
     let title = get("title")?;
@@ -90,6 +118,8 @@ pub fn validate_suggestion(v: &Value) -> Option<Suggestion> {
     }
     Some(Suggestion {
         key,
+        impl_path,
+        config_keys,
         category,
         priority,
         title,
@@ -100,7 +130,10 @@ pub fn validate_suggestion(v: &Value) -> Option<Suggestion> {
 
 /// 从 LLM 回复提取 JSON 并校验出有效建议（与 aisafeguard_ai::parse_proposals
 /// 同一提取纪律：截首尾大括号、allowlist 逐字段、多余丢弃）。
-pub fn parse_suggestions(content: &str) -> Result<(String, Vec<Suggestion>)> {
+pub fn parse_suggestions(
+    content: &str,
+    valid_paths: &std::collections::HashSet<String>,
+) -> Result<(String, Vec<Suggestion>)> {
     let Some(start) = content.find('{') else {
         return Err(Error::Ai("回复中未找到 JSON".into()));
     };
@@ -113,12 +146,78 @@ pub fn parse_suggestions(content: &str) -> Result<(String, Vec<Suggestion>)> {
     let mut out = Vec::new();
     if let Some(items) = v["suggestions"].as_array() {
         for item in items.iter().take(MAX_SUGGESTIONS) {
-            if let Some(sg) = validate_suggestion(item) {
+            if let Some(sg) = validate_suggestion(item, valid_paths) {
                 out.push(sg);
             }
         }
     }
     Ok((analysis, out))
+}
+
+/// 配置引用表：从运行态配置序列化自动走查（零漂移），路径集供 impl_path=config
+/// 校验；热更/需重启标注镜像 restart_required 的知识（段级）。
+fn config_reference(
+    cfg: &aisafeguard_core::config::AppConfig,
+) -> (String, std::collections::HashSet<String>) {
+    fn needs_restart(path: &str) -> bool {
+        let hot_sections = ["honeypot.", "api.", "xdp.", "store."];
+        hot_sections.iter().any(|p| path.starts_with(p))
+            || path.starts_with("detect.capture.")
+            || path.starts_with("fed.enabled")
+            || path.starts_with("fed.role")
+            || path.starts_with("fed.node")
+            || path.starts_with("fed.listen_addr")
+            || path.starts_with("fed.ca_path")
+    }
+    fn walk(
+        prefix: &str,
+        v: &toml::Value,
+        depth: usize,
+        text: &mut String,
+        paths: &mut std::collections::HashSet<String>,
+    ) {
+        match v {
+            toml::Value::Table(t) => {
+                if depth == 0 {
+                    // 顶层段名
+                    for (sec, sub) in t {
+                        walk(sec, sub, depth + 1, text, paths);
+                    }
+                    return;
+                }
+                for (k, sub) in t {
+                    let path = format!("{prefix}.{k}");
+                    match sub {
+                        toml::Value::Table(_) if depth < 3 => {
+                            walk(&path, sub, depth + 1, text, paths);
+                        }
+                        other => {
+                            paths.insert(path.clone());
+                            let tag = if needs_restart(&path) {
+                                "需重启"
+                            } else {
+                                "热更"
+                            };
+                            text.push_str(&format!(
+                                "{path} = {other} [{tag}]
+"
+                            ));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut text = String::from(
+        "[config_reference] 可改的运行配置（改这些=运行策略决策；未列出的改动=要改代码）
+",
+    );
+    let mut paths = std::collections::HashSet::new();
+    if let Ok(v) = toml::Value::try_from(cfg) {
+        walk("", &v, 0, &mut text, &mut paths);
+    }
+    (text, paths)
 }
 
 /// 7 天运行指标摘要（纯计数与配置事实——无攻击者可控文本，注入面为零）。
@@ -261,9 +360,21 @@ pub fn render_review(
         return out;
     }
     for sg in suggestions {
+        let path_label = match sg.impl_path.as_str() {
+            "config" => {
+                let keys = if sg.config_keys.is_empty() {
+                    "—".to_string()
+                } else {
+                    sg.config_keys.join(", ")
+                };
+                format!("改配置（{keys}）")
+            }
+            "ops" => "人工操作".to_string(),
+            _ => "需改码（进 ROADMAP）".to_string(),
+        };
         out.push_str(&format!(
-            "## {} · {} · [待决策]\n- {} \n- 证据：{}\n- 建议动作：{}\n\n",
-            sg.category, sg.priority, sg.title, sg.evidence, sg.action
+            "## {} · {} · [待决策]\n- {} \n- 处置路径：{}\n- 证据：{}\n- 建议动作：{}\n\n",
+            sg.category, sg.priority, sg.title, path_label, sg.evidence, sg.action
         ));
     }
     out
@@ -311,6 +422,7 @@ pub async fn run_review(
         sec
     };
 
+    let (config_ref, valid_paths) = config_reference(&cfg);
     let client = aisafeguard_ai::AiClient::with_protocol(
         &cfg.ai.api_protocol,
         &cfg.ai.base_url,
@@ -322,14 +434,11 @@ pub async fn run_review(
         .chat(
             REVIEW_PROMPT,
             &format!(
-                "<metrics>
-{digest}
-</metrics>{open_section}
-请分析并只输出 JSON。"
+                "<metrics>\n{digest}\n{config_ref}</metrics>{open_section}\n请分析并只输出 JSON。"
             ),
         )
         .await?;
-    let (analysis, suggestions) = parse_suggestions(&content)?;
+    let (analysis, suggestions) = parse_suggestions(&content, &valid_paths)?;
 
     let dir = cfg.data_dir().join("suggestions");
     std::fs::create_dir_all(&dir).map_err(|e| Error::Ai(format!("建目录失败: {e}")))?;
@@ -391,6 +500,7 @@ pub async fn run_review(
                 &sg.evidence,
                 &sg.action,
                 &cfg.ai.model,
+                &sg.impl_path,
             )
             .map_err(|e| Error::Ai(format!("建议入库失败: {e}")))?
         {
@@ -411,11 +521,44 @@ mod tests {
 
     #[test]
     fn validates_by_allowlist() {
+        let paths: std::collections::HashSet<String> = [
+            "ai.auto_apply_max_per_day",
+            "ai.auto_apply_min_severity",
+            "detect.scan_distinct_ports",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
         let good = json!({
             "category": "coverage", "priority": "P1", "title": "docker 蜜罐端口不通",
             "evidence": "监听器 enabled 但窗口内 0 命中", "action": "核对放行清单"
         });
-        assert!(validate_suggestion(&good).is_some());
+        assert!(validate_suggestion(&good, &paths).is_some());
+        // impl_path=config 必须列真实存在的键——缺失/编造降级为 code
+        let cfg_ok = json!({
+            "category": "tuning", "priority": "P1", "title": "t",
+            "action": "a", "impl_path": "config", "config_keys": ["ai.auto_apply_max_per_day"]
+        });
+        assert_eq!(
+            validate_suggestion(&cfg_ok, &paths).unwrap().impl_path,
+            "config"
+        );
+        let cfg_bad = json!({
+            "category": "tuning", "priority": "P1", "title": "t",
+            "action": "a", "impl_path": "config", "config_keys": ["不存在的键"]
+        });
+        assert_eq!(
+            validate_suggestion(&cfg_bad, &paths).unwrap().impl_path,
+            "code"
+        );
+        let cfg_none = json!({
+            "category": "tuning", "priority": "P1", "title": "t",
+            "action": "a", "impl_path": "config"
+        });
+        assert_eq!(
+            validate_suggestion(&cfg_none, &paths).unwrap().impl_path,
+            "code"
+        );
         // 白名单外 category/priority → 整条作废
         for bad in [
             json!({"category":"misc","priority":"P1","title":"t","action":"a"}),
@@ -423,14 +566,17 @@ mod tests {
             json!({"priority":"P1","title":"t","action":"a"}),
             json!({"category":"tuning","priority":"P1"}),
         ] {
-            assert!(validate_suggestion(&bad).is_none(), "{bad}");
+            assert!(validate_suggestion(&bad, &paths).is_none(), "{bad}");
         }
         // 超长 title 拒绝
         let long_title = "长".repeat(61);
         assert!(
-            validate_suggestion(&json!({
-                "category":"tuning","priority":"P2","title":long_title,"action":"a"
-            }))
+            validate_suggestion(
+                &json!({
+                    "category":"tuning","priority":"P2","title":long_title,"action":"a"
+                }),
+                &paths
+            )
             .is_none()
         );
     }
@@ -443,11 +589,11 @@ mod tests {
             {"category":"garbage","priority":"P1","title":"脏数据"},
             {"category":"ops","priority":"P1","title":"c","action":"z"}
         ]}"#;
-        let (analysis, sgs) = parse_suggestions(content).unwrap();
+        let (analysis, sgs) = parse_suggestions(content, &Default::default()).unwrap();
         assert_eq!(analysis, "总体平稳");
         assert_eq!(sgs.len(), 3, "脏条目丢弃");
         assert_eq!(sgs[0].category, "tuning");
-        assert!(parse_suggestions("没有 JSON").is_err());
+        assert!(parse_suggestions("没有 JSON", &Default::default()).is_err());
     }
 
     #[test]
@@ -468,6 +614,8 @@ mod tests {
     fn renders_human_ticket() {
         let sg = Suggestion {
             key: None,
+            impl_path: "code".into(),
+            config_keys: Vec::new(),
             category: "coverage".into(),
             priority: "P1".into(),
             title: "t".into(),

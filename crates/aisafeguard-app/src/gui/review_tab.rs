@@ -69,9 +69,14 @@ impl AisafeApp {
         if let Some(row) = &sel_row {
             ui.group(|ui| {
                 ui.label(RichText::new(&row.title).size(type_scale::BODY).strong());
+                let path_label = match row.impl_path.as_str() {
+                    "config" => t("改配置", "config change"),
+                    "ops" => t("人工操作", "manual ops"),
+                    _ => t("需改码（进 ROADMAP）", "needs code (ROADMAP)"),
+                };
                 ui.label(caption(&format!(
-                    "{} · {} · {}",
-                    row.category, row.priority, row.day
+                    "{} · {} · {} · {}",
+                    row.category, row.priority, row.day, path_label
                 )));
                 // 可编辑详情：评审者修正提案本体（如把累进阶梯改成自己的口径），
                 // 修正版才是采纳/拒绝的记录；fingerprint 不动（去重锚保持原主题）
