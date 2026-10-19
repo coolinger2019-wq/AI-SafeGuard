@@ -402,6 +402,16 @@ Postgres/MongoDB、SMTP、UDP 反射类（NTP/SSDP）、K8s API、IoT TR-069、I
 | AI 调参建议质量差 | 抽样人工评级先行；最坏砍到「周报只读展示」不产建议 |
 | 单人带宽 | 批次独立发版；批次四可整体延后不阻塞 0.7.0/0.7.1 |
 
+## F750 状态注记（2026-10-18，管线与终选交付）
+
+- `scripts/et-select.py`（初筛管线：语法白名单镜像 v1 + $*_SERVERS/端口变量归一 + reference/fast_pattern 纯元数据剥离）+ `crates/aisafeguard-rules/examples/et_replay.rs`（回放校准器：整包修复循环 + 每 sid 命中/源样本 + 吞吐基准）。
+- 终选 **49 条**（入站纯文本；出站 59 与入站二进制 48 记录淘汰理由）——回放 26882 事件 **0 命中 = 0 误报**，保险单保留。
+- 数字、清单与 SHA-256 留痕：`docs/F750-ET-SUBSET.md`；**ET 规则文本不进 git**（再分发许可不确定性），月度刷新 = 重跑管线。
+- 对照结论：demo.rules 同库 6/16 命中——自写规则对本产品暴露面命中率高于 ET 子集（按实际 TTP 定制之利），demo 继续主用、ET 子集默认关。
+- 部署：`[detect.rules].path` 指向管线生成文件即可启用（默认关）；节点未启用。
+
+---
+
 ## F798 提案（2026-10-17，pwn.ai PwnEscape / CVE-2026-99999 触发）：IP 选项异常检测器
 
 > 起因：PwnEscape（Linux 内核 IPv4 栈延迟元数据缺陷，KVM guest→宿主逃逸，
