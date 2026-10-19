@@ -81,6 +81,10 @@ pub fn parse_rule(line: &str) -> Result<Rule> {
     // 修饰符目标：最近一条 content 的下标；content 后可连续跟修饰符，
     // 一旦出现其他关键字即置 None——修饰符脱离 content 立即报错。
     let mut cur_content: Option<usize> = None;
+    // F780 粘性缓冲区：buffer 关键字设置；对其后所有 content/pcre 生效（直至
+    // 下一个 buffer 关键字）；同时也回溯修饰紧邻的前一条 content（修饰符形态
+    // content:"X"; http_uri; 两种写法等价支持）
+    let mut cur_buf = crate::ir::ContentBuf::Raw;
 
     for opt in split_options(opts_raw)?.into_iter() {
         let (kw, val) = match opt.split_once(':') {
@@ -160,6 +164,7 @@ pub fn parse_rule(line: &str) -> Result<Rule> {
                     depth: None,
                     distance: None,
                     within: None,
+                    buf: cur_buf,
                 });
                 cur_content = Some(contents.len() - 1);
             }
@@ -179,9 +184,24 @@ pub fn parse_rule(line: &str) -> Result<Rule> {
             "within" => {
                 contents[cur_content.expect("上方已检查")].within = Some(parse_u32(val, "within")?)
             }
+            kw if crate::ir::buffer_for_kw(kw).is_some() => {
+                // F780：修饰符形态回溯紧邻 content（未指定时）；粘性对后续生效
+                let b = crate::ir::buffer_for_kw(kw).expect("已判");
+                if let Some(i) = cur_content
+                    && contents[i].buf == crate::ir::ContentBuf::Raw
+                {
+                    contents[i].buf = b;
+                }
+                cur_buf = b;
+            }
             "pcre" => {
                 let body = unquote(val, "pcre").unwrap_or(val);
-                pcre.push(parse_pcre(body)?);
+                let mut pm = parse_pcre(body)?;
+                // 粘性只在 pcre 自身未带缓冲区标志时生效（/U 等自带优先）
+                if pm.buf == crate::ir::ContentBuf::Raw {
+                    pm.buf = cur_buf;
+                }
+                pcre.push(pm);
             }
             "threshold" => threshold = Some(parse_threshold(val)?),
             other => {
@@ -364,11 +384,25 @@ fn parse_pcre(body: &str) -> Result<crate::ir::PcreMatch> {
     let (pattern, flags) = (&rest[..close], &rest[close + 1..]);
     let mut case_insensitive = false;
     let mut relative = false;
+    let mut buf = crate::ir::ContentBuf::Raw;
     for f in flags.chars() {
         match f {
             'i' => case_insensitive = true,
             'R' => relative = true,
-            other => return err(format!("不支持的 pcre 标志 `{other}`（子集仅 i / R）")),
+            // F780 v2：pcre 缓冲区快捷标志（Suricata 语义，映射到粘性格子）
+            'U' => buf = crate::ir::ContentBuf::Uri,
+            'I' => {
+                buf = crate::ir::ContentBuf::Uri;
+                case_insensitive = true;
+            }
+            'P' => buf = crate::ir::ContentBuf::ClientBody,
+            'H' => buf = crate::ir::ContentBuf::Header, // Hm/Hmi 的 m/ci 由 i 分支处理
+            'm' => {} // multiline（rust regex 默认按行 ^/$ 已兼容常见用法）
+            other => {
+                return err(format!(
+                    "不支持的 pcre 标志 `{other}`（子集仅 i / R / U / I / P / H）"
+                ));
+            }
         }
     }
     // PCRE 的 `\/` 在 rust regex 里是非法转义：按 PCRE 语义还原为字面 `/`
@@ -393,7 +427,7 @@ fn parse_pcre(body: &str) -> Result<crate::ir::PcreMatch> {
         .size_limit(4096)
         .build()
         .map_err(|e| RuleError(format!("pcre 无法编译（越界或超大小上限）：{e}")))?;
-    Ok(crate::ir::PcreMatch { re, relative })
+    Ok(crate::ir::PcreMatch { re, relative, buf })
 }
 
 /// threshold 子集：`type limit|both, track by_src, count N, seconds S`。
@@ -723,10 +757,16 @@ mod tests {
         );
         assert!(
             parse_err(
-                r#"alert tcp any any -> any any (msg:"t"; content:"x"; pcre:"/x/U"; sid:1;)"#
+                r#"alert tcp any any -> any any (msg:"t"; content:"x"; pcre:"/x/Q"; sid:1;)"#
             )
             .contains("pcre 标志")
         );
+        // F780 v2：/U 映射 uri 格（合法）
+        let p = parse_rule(
+            r#"alert tcp any any -> any any (msg:"t"; content:"x"; pcre:"/x/U"; sid:2;)"#,
+        )
+        .unwrap();
+        assert_eq!(p.pcre[0].buf, crate::ir::ContentBuf::Uri);
     }
 
     #[test]

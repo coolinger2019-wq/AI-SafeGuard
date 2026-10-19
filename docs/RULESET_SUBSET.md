@@ -1,8 +1,12 @@
-# Suricata/ET 风格规则子集规范（v1，冻结）
+# Suricata/ET 风格规则子集规范（v2）
 
-> 对应 ROADMAP-0.5.md Batch F1（P0）。**本文件冻结 0.5 的规则子集范围**：
+> 对应 ROADMAP-0.5.md Batch F1（P0）。**本文件冻结规则子集范围**：
 > 超出本规范的关键字/动作/修饰符 → 规则加载失败（整包拒绝，不半生效）。
-> 变更本文件 = 显式版本 bump（v1 → v2），并同步匹配引擎实现与测试。
+> 变更本文件 = 显式版本 bump。**v2（2026-10-20，F780）**：新增五个粘性缓冲区关键字
+> （http_method/http_uri/http_header/http_user_agent/http_client_body，sticky 前置与
+> modifier 后置两形态等价）+ pcre 快捷标志映射（/U /I /P /H，/Hm 系容忍）；
+> 其余 http_*/tls.*/file_data 仍拒绝；pcre 白名单/线性时间/4KB 上限红线不放松。
+> 原注：变更本文件 = 显式版本 bump（v1 → v2），并同步匹配引擎实现与测试。
 
 ## 设计立场
 

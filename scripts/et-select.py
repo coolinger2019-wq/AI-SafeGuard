@@ -32,6 +32,8 @@ except Exception:
 ALLOWED_KEYWORDS = {
     "msg", "sid", "rev", "classtype", "content", "nocase", "offset", "depth",
     "distance", "within", "pcre", "flow", "threshold", "metadata",
+    # F780 v2：粘性缓冲区五格（引擎已支持，两形态等价）
+    "http_method", "http_uri", "http_header", "http_user_agent", "http_client_body",
 }
 ALLOWED_CLASSTYPE = {
     "attempted-admin", "web-application-attack", "attempted-user",

@@ -93,6 +93,32 @@ pub struct Flow {
     pub from_server: bool,
 }
 
+/// F780 粘性缓冲区：content/pcre 的匹配目标区域。Raw = 原始窗口（未指定时
+/// 缺省——既有规则行为一字不变）；其余 = HTTP 请求的语义段（非 HTTP 窗口
+/// 上带缓冲区的规则不可达 = false）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ContentBuf {
+    #[default]
+    Raw,
+    Method,
+    Uri,
+    Header,
+    UserAgent,
+    ClientBody,
+}
+
+/// 子集支持的粘性缓冲区关键字（v1 → v2：五格）；其他 http_*/tls.*/file_data 仍拒绝。
+pub fn buffer_for_kw(kw: &str) -> Option<ContentBuf> {
+    match kw {
+        "http_method" => Some(ContentBuf::Method),
+        "http_uri" => Some(ContentBuf::Uri),
+        "http_header" => Some(ContentBuf::Header),
+        "http_user_agent" => Some(ContentBuf::UserAgent),
+        "http_client_body" => Some(ContentBuf::ClientBody),
+        _ => None,
+    }
+}
+
 /// 单条 content 匹配（顺序 AND；修饰符语义见 matcher）。
 #[derive(Debug, Clone)]
 pub struct ContentMatch {
@@ -102,6 +128,7 @@ pub struct ContentMatch {
     pub depth: Option<u32>,
     pub distance: Option<u32>,
     pub within: Option<u32>,
+    pub buf: ContentBuf,
 }
 
 /// pcre 匹配（已编译 rust regex；relative = `R` 标志，锚定上一匹配之后）。
@@ -109,6 +136,8 @@ pub struct ContentMatch {
 pub struct PcreMatch {
     pub re: regex::Regex,
     pub relative: bool,
+    /// F780：pcre 的目标缓冲区（粘性/修饰符同 content 规则）
+    pub buf: ContentBuf,
 }
 
 /// threshold 类型（子集：limit / both）。

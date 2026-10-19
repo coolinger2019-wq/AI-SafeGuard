@@ -112,10 +112,127 @@ fn cidr_contains(base: &IpAddr, prefix: u8, ip: IpAddr) -> bool {
     }
 }
 
+/// F780：HTTP 请求的语义分段（粘性缓冲区的匹配目标）。
+pub(crate) struct HttpSegments<'a> {
+    pub method: &'a [u8],
+    pub uri: &'a [u8],
+    /// 请求头区（不含请求行；到空行前）
+    pub header: &'a [u8],
+    pub user_agent: &'a [u8],
+    pub body: &'a [u8],
+}
+
+/// 极简 HTTP 请求分段（规则引擎自包含，不依赖 l7）：请求行必须以字母方法开头
+/// ——二进制/非 HTTP 窗口返回 None（带缓冲区的规则在其上不可达）。
+pub(crate) fn http_segments(window: &[u8]) -> Option<HttpSegments<'_>> {
+    let line_end = window.windows(2).position(|w| w == b"\r\n")?;
+    let line = &window[..line_end];
+    let sp1 = line.iter().position(|&b| b == b' ')?;
+    let method = &line[..sp1];
+    if method.is_empty() || !method.iter().all(|b| b.is_ascii_alphabetic()) {
+        return None;
+    }
+    let rest = &line[sp1 + 1..];
+    let sp2 = rest.iter().position(|&b| b == b' ')?;
+    let uri = &rest[..sp2];
+    if uri.is_empty() {
+        return None;
+    }
+    let hdr_start = line_end + 2;
+    let hdr_end = window[hdr_start..]
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|p| hdr_start + p)
+        .unwrap_or(window.len());
+    let header = &window[hdr_start..hdr_end];
+    let ua_pos = header
+        .to_ascii_lowercase()
+        .windows(11)
+        .position(|w| w == b"user-agent:");
+    let user_agent = ua_pos
+        .map(|p| {
+            let vstart = p + 11;
+            let vend = header[vstart..]
+                .windows(2)
+                .position(|w| w == b"\r\n")
+                .map(|q| vstart + q)
+                .unwrap_or(header.len());
+            &header[vstart..vend]
+        })
+        .unwrap_or(&[]);
+    let body_start = if hdr_end < window.len() {
+        hdr_end + 4
+    } else {
+        window.len()
+    };
+    let body = &window[body_start.min(window.len())..];
+    Some(HttpSegments {
+        method,
+        uri,
+        header,
+        user_agent,
+        body,
+    })
+}
+
 /// 选项匹配：窗口字节上顺序执行 content/pcre。
+/// F780：按缓冲区分组——组内沿用顺序链（cursor/distance/within 语义不变），
+/// 组间独立 AND；Raw 组窗口=原始载荷，语义组窗口=对应分段；非 HTTP 窗口上
+/// 带语义组的规则不可达。
 fn options_match(rule: &Rule, window: &[u8]) -> bool {
-    let mut cursor: usize = 0; // 上一匹配的结束位置（顺序 AND 锚点）
+    use crate::ir::ContentBuf;
+    let needs_http = rule.contents.iter().any(|c| c.buf != ContentBuf::Raw)
+        || rule.pcre.iter().any(|p| p.buf != ContentBuf::Raw);
+    if !needs_http {
+        let cs: Vec<&crate::ir::ContentMatch> = rule.contents.iter().collect();
+        let ps: Vec<&crate::ir::PcreMatch> = rule.pcre.iter().collect();
+        return chain_match(&cs, &ps, window);
+    }
+    let Some(seg) = http_segments(window) else {
+        return false;
+    };
+    // 按出现顺序分组（contents 与 pcre 各自保序；组=连续同 buf 段）
+    let mut groups: Vec<(
+        ContentBuf,
+        Vec<&crate::ir::ContentMatch>,
+        Vec<&crate::ir::PcreMatch>,
+    )> = Vec::new();
     for c in &rule.contents {
+        match groups.last_mut() {
+            Some((b, cs, _)) if *b == c.buf => cs.push(c),
+            _ => groups.push((c.buf, vec![c], Vec::new())),
+        }
+    }
+    for p in &rule.pcre {
+        match groups.last_mut() {
+            Some((b, _, ps)) if *b == p.buf => ps.push(p),
+            _ => groups.push((p.buf, Vec::new(), vec![p])),
+        }
+    }
+    for (buf, cs, ps) in &groups {
+        let target: &[u8] = match buf {
+            ContentBuf::Raw => window,
+            ContentBuf::Method => seg.method,
+            ContentBuf::Uri => seg.uri,
+            ContentBuf::Header => seg.header,
+            ContentBuf::UserAgent => seg.user_agent,
+            ContentBuf::ClientBody => seg.body,
+        };
+        if !chain_match(cs, ps, target) {
+            return false;
+        }
+    }
+    true
+}
+
+/// 单一目标区上的顺序链（原 options_match 主体；cursor 组内独立）。
+fn chain_match(
+    contents: &[&crate::ir::ContentMatch],
+    pcre: &[&crate::ir::PcreMatch],
+    window: &[u8],
+) -> bool {
+    let mut cursor: usize = 0; // 上一匹配的结束位置（顺序 AND 锚点）
+    for c in contents {
         let pattern: Vec<u8> = if c.nocase {
             c.bytes.to_ascii_lowercase()
         } else {
@@ -152,7 +269,7 @@ fn options_match(rule: &Rule, window: &[u8]) -> bool {
             None => return false,
         }
     }
-    for p in &rule.pcre {
+    for p in pcre {
         // R 标志：从上一匹配结束处继续搜；否则整个窗口任意位置
         let region_start = if p.relative {
             cursor.min(window.len())
@@ -480,5 +597,122 @@ mod tests {
         // 第二条在窗口外 → 第一条已滑出，此时是窗口内第 1 条
         assert!(!tt.allow(&t, "3", 1011));
         assert!(tt.allow(&t, "3", 1012));
+    }
+
+    // ---------- F780 粘性缓冲区 ----------
+
+    fn http_window() -> Vec<u8> {
+        b"POST /admin/login HTTP/1.1\r\nHost: honeypot\r\nUser-Agent: sqlmap/1.8\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nuser=admin&passwd=secret".to_vec()
+    }
+
+    fn sg_session(window: &[u8]) -> Session<'static> {
+        Session {
+            client_ip: "203.0.113.9".parse().unwrap(),
+            client_port: 40000,
+            server_ip: "10.0.0.1".parse().unwrap(),
+            server_port: 8081,
+            to_server: true,
+            proto: crate::ir::Proto::Tcp,
+            is_home: &|ip: std::net::IpAddr| {
+                ip.is_loopback() || matches!(ip, std::net::IpAddr::V4(v4) if v4.is_private())
+            },
+        }
+    }
+
+    #[test]
+    fn sticky_and_modifier_forms_equivalent() {
+        let w = http_window();
+        let sess = sg_session(&w);
+        // sticky 前置形态
+        let sticky = parse_rule(
+            "alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:\"m\"; http_uri; content:\"/admin\"; sid:1; rev:1;)",
+        )
+        .unwrap();
+        // modifier 后置形态（ET 老写法）
+        let modifier = parse_rule(
+            "alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:\"m\"; content:\"/admin\"; http_uri; sid:2; rev:1;)",
+        )
+        .unwrap();
+        assert!(rule_matches(&sticky, &w, &sess));
+        assert!(rule_matches(&modifier, &w, &sess));
+        // 两形态的 buf 落位一致
+        assert_eq!(sticky.contents[0].buf, modifier.contents[0].buf);
+    }
+
+    #[test]
+    fn buffer_scoping_is_precise() {
+        let w = http_window();
+        let sess = sg_session(&w);
+        // passwd 只在 body：命中
+        let body_rule = parse_rule(
+            "alert tcp any any -> any any (msg:\"b\"; http_client_body; content:\"passwd\"; sid:3; rev:1;)",
+        )
+        .unwrap();
+        assert!(rule_matches(&body_rule, &w, &sess));
+        // 同词放进 uri 格：本请求 uri 没有 passwd → 不命中（整窗搜会误中正文）
+        let uri_rule = parse_rule(
+            "alert tcp any any -> any any (msg:\"u\"; http_uri; content:\"passwd\"; sid:4; rev:1;)",
+        )
+        .unwrap();
+        assert!(!rule_matches(&uri_rule, &w, &sess));
+        // method 格
+        let m_rule = parse_rule(
+            "alert tcp any any -> any any (msg:\"m\"; http_method; content:\"POST\"; sid:5; rev:1;)",
+        )
+        .unwrap();
+        assert!(rule_matches(&m_rule, &w, &sess));
+        let m_bad = parse_rule(
+            "alert tcp any any -> any any (msg:\"m\"; http_method; content:\"admin\"; sid:6; rev:1;)",
+        )
+        .unwrap();
+        assert!(!rule_matches(&m_bad, &w, &sess));
+        // user_agent 格
+        let ua_rule = parse_rule(
+            "alert tcp any any -> any any (msg:\"ua\"; http_user_agent; content:\"sqlmap\"; sid:7; rev:1;)",
+        )
+        .unwrap();
+        assert!(rule_matches(&ua_rule, &w, &sess));
+        // header 格（Host 头在头区）
+        let h_rule = parse_rule(
+            "alert tcp any any -> any any (msg:\"h\"; http_header; content:\"honeypot\"; sid:8; rev:1;)",
+        )
+        .unwrap();
+        assert!(rule_matches(&h_rule, &w, &sess));
+    }
+
+    #[test]
+    fn non_http_window_unreachable_for_buffered_rules() {
+        // 二进制窗口（非 HTTP）——带缓冲区规则不可达；Raw 规则照旧可达
+        let bin: Vec<u8> = [0x16, 0x03, 0x01, 0x00, 0xA0, 0x01, 0x00, 0x9C].to_vec();
+        let sess = sg_session(&bin);
+        let buf_rule = parse_rule(
+            "alert tcp any any -> any any (msg:\"x\"; http_uri; content:\"admin\"; sid:9; rev:1;)",
+        )
+        .unwrap();
+        assert!(!rule_matches(&buf_rule, &bin, &sess));
+        let raw_rule = parse_rule(
+            "alert tcp any any -> any any (msg:\"x\"; content:\"|16 03 01|\"; sid:10; rev:1;)",
+        )
+        .unwrap();
+        assert!(rule_matches(&raw_rule, &bin, &sess));
+    }
+
+    #[test]
+    fn mixed_groups_are_independent_ands() {
+        let w = http_window();
+        let sess = sg_session(&w);
+        // Raw 组 + Uri 组同时成立才命中
+        //（modifier 语义：http_uri 紧邻认领 c1；c0 无缓冲区标注 = Raw 整窗）
+        let both = parse_rule(
+            "alert tcp any any -> any any (msg:\"x\"; content:\"POST\"; content:\"/admin\"; http_uri; content:\"login\"; sid:11; rev:1;)",
+        )
+        .unwrap();
+        assert!(rule_matches(&both, &w, &sess));
+        // Raw 组不成立 → 整体 false
+        let half = parse_rule(
+            "alert tcp any any -> any any (msg:\"x\"; content:\"DELETE /admin\"; sid:12; rev:1;)",
+        )
+        .unwrap();
+        assert!(!rule_matches(&half, &w, &sess));
     }
 }

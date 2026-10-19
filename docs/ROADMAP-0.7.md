@@ -196,7 +196,7 @@
 - 一期（F720）只收单 IP 并统计网段丢弃比例；**若丢弃比例高**（初步判断会高）→ 二期：nftables interval 集合 + Windows COM 子网掩码写法 + XDP 明确降级（LPM trie 或「网段不进快速层」文档化）。
 - 红线不变：细粒度规则不镜像进 XDP 的既有原则（防语义放大）照抄。
 
-### F780 引擎粘性缓冲区（http_uri 等） — 规模 M（挂起）
+### F780 引擎粘性缓冲区（http_uri 等） — 规模 M ✅（2026-10-20 交付：v1→v2 规范 bump——五格缓冲区+pcre 标志映射 /U /I /P /H；白名单通过 20643→37039；终选包重选 50 条全带缓冲区；回放零误报；RULESET_SUBSET.md 已同步）
 
 - **背景**：ET 的 HTTP 规则大量使用 `http_uri`/`http_client_body`/`http_header` 粘性缓冲区；
   现有 IR 无此概念，可用规则面被压缩到「纯 content 风格」子集。

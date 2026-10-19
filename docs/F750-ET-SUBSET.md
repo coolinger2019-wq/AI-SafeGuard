@@ -93,3 +93,12 @@ auto_block = false                                # 观察期不自动封禁
 | 2027182 | trojan-activity | [139,445] | ET POLICY WMIC WMI Request Over SMB - Likely Lateral Movement |
 
 — 生成于 2026-10-19 17:33
+---
+
+## v2（F780 粘性缓冲区后重选，2026-10-20）
+
+- 引擎升级：五格粘性缓冲区（http_method/uri/header/user_agent/client_body）+ pcre 快捷标志映射（/U /I /P /H）——双形态（sticky/modifier）等价
+- 漏斗更新：语法白名单通过 20643 → **37039**（+16396 复活）；候选 400 → 整包修复 209（pcre /H /U 系已支持，剩余剔除=真不支持关键字）；**终选 50 条全部带粘性缓冲区**
+- 回放：26882 事件 **0 误报**；基准 2140 ns/事件（50 条）
+- SHA-256（文件字节）：`85693664a037fa94…`（加载器口径 `3f38ea502d6a3da6…`，差异=尾部空行）
+- 生成命令：`python scripts/et-select.py --raw emerging-all.rules --out-dir out --limit 400` → repaired 前 50
