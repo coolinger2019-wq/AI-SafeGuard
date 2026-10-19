@@ -36,6 +36,7 @@ pub const REVIEW_PROMPT: &str = r#"你是 AI-SafeGuard 的系统自审引擎。�
 - category: tuning=参数调优 coverage=覆盖盲区 rules=检测规则 ops=运维风险 roadmap=产品改进
 - priority: P1=正在造成漏报/误报/风险 P2=数据支持值得做 P3=探索性
 - 最多 5 条，宁缺毋滥；没有值得提的就给空数组
+- <open_suggestions> 段是已在跟踪的未决建议：除非有实质新证据要升级它们，否则不要重复提出相同主题
 "#;
 
 /// 一条改进建议（校验后形态）。
@@ -178,6 +179,14 @@ fn fingerprint(category: &str, title: &str) -> String {
     format!("{:016x}", h.finish())
 }
 
+/// 标题归一（只留字母，小写）——兜底去重用
+fn normalize_title(t: &str) -> String {
+    t.chars()
+        .filter(|c| c.is_alphabetic())
+        .collect::<String>()
+        .to_lowercase()
+}
+
 /// 标题词重叠度（Jaccard）：LLM 每轮措辞会变，指纹哈希对 AI 产出无效——
 /// 同类开放项重叠过半即视为同一主题（实证：第二轮回放 5 条全部重复建行）。
 fn title_overlap(a: &str, b: &str) -> f64 {
@@ -254,6 +263,25 @@ pub async fn run_review(
     let since_days: i64 = 7;
     let since = aisafeguard_core::now_ts() - since_days * 86_400;
     let digest = build_digest(eng, since);
+    // 主防线：未决清单喂回给 AI（中文 paraphrase 让文本相似度去重不可靠——
+    // 实证：词级重叠拦不住改写），声明「同主题别重复提」
+    let open_rows: Vec<_> = eng
+        .store
+        .list_suggestions(200)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.status == "pending" || r.status == "adopted")
+        .collect();
+    let open_section = if open_rows.is_empty() {
+        String::new()
+    } else {
+        let mut sec = String::from("\n<open_suggestions>\n");
+        for r in &open_rows {
+            sec.push_str(&format!("{} | {} | {}\n", r.category, r.priority, r.title));
+        }
+        sec.push_str("</open_suggestions>\n这些主题已在跟踪中，不要重复提出相同主题；若认为某条未决建议需修正方向/优先级，提出覆盖它的建议并在 title 前加「升级：」。");
+        sec
+    };
 
     let client = aisafeguard_ai::AiClient::with_protocol(
         &cfg.ai.api_protocol,
@@ -265,7 +293,12 @@ pub async fn run_review(
     let content = client
         .chat(
             REVIEW_PROMPT,
-            &format!("<metrics>\n{digest}\n</metrics>\n请分析并只输出 JSON。"),
+            &format!(
+                "<metrics>
+{digest}
+</metrics>{open_section}
+请分析并只输出 JSON。"
+            ),
         )
         .await?;
     let (analysis, suggestions) = parse_suggestions(&content)?;
@@ -289,10 +322,13 @@ pub async fn run_review(
         .filter(|r| r.status == "pending" || r.status == "adopted")
         .collect();
     for sg in &suggestions {
-        if open
-            .iter()
-            .any(|r| r.category == sg.category && title_overlap(&r.title, &sg.title) > 0.5)
-        {
+        // 代码兜底只拦归一化精确相同/极高重叠（主防线是喂回清单）
+        let norm = normalize_title(&sg.title);
+        let dup = open.iter().any(|r| {
+            r.category == sg.category
+                && (normalize_title(&r.title) == norm || title_overlap(&r.title, &sg.title) > 0.6)
+        });
+        if dup {
             continue;
         }
         let fp = fingerprint(&sg.category, &sg.title);
@@ -365,6 +401,20 @@ mod tests {
         assert!(parse_suggestions("没有 JSON").is_err());
     }
 
+    #[test]
+    fn dedup_semantics() {
+        // 中文 paraphrase 重叠度不可靠（无分词，实测 0.16）——代码侧只兜
+        // 归一化精确与极高重叠；主防线是喂回 open 清单
+        assert!(
+            title_overlap(
+                "防火墙规则高频抖动封禁不持久",
+                "防火墙规则频繁增删净保留仅条"
+            ) < 0.6
+        );
+        assert!(title_overlap("高危端口需要确认隔离", "高危端口需要确认隔离") > 0.6);
+        assert_eq!(normalize_title("积压 358 条！"), normalize_title("积压条"));
+        assert_ne!(normalize_title("积压"), normalize_title("防火墙"));
+    }
     #[test]
     fn renders_human_ticket() {
         let sg = Suggestion {
