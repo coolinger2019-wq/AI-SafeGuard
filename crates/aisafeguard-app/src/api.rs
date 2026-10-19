@@ -77,6 +77,7 @@ pub async fn serve(engine: Arc<EngineHandle>) {
         .route("/api/ai/test", post(ai_test))
         .route("/api/suggestions", get(list_suggestions_api))
         .route("/api/suggestions/{id}/status", post(decide_suggestion))
+        .route("/api/suggestions/{id}/edit", post(edit_suggestion_api))
         .route("/api/review/run", post(run_review_api))
         .layer(middleware::from_fn_with_state(state.clone(), auth));
     let app = Router::new()
@@ -565,6 +566,65 @@ struct SuggestionDecision {
     status: String,
     #[serde(default)]
     note: String,
+    // 可选的人工修正（评审页展开编辑后随决策一起提交——一次调用先改后转状态）
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    priority: Option<String>,
+    #[serde(default)]
+    evidence: Option<String>,
+    #[serde(default)]
+    action: Option<String>,
+}
+
+/// 人工修正建议内容（egui 远程模式走此端点；Web 的修正随决策一起提交）。
+#[derive(Deserialize)]
+struct SuggestionEdit {
+    title: String,
+    priority: String,
+    #[serde(default)]
+    evidence: String,
+    #[serde(default)]
+    action: String,
+}
+
+async fn edit_suggestion_api(
+    State(s): State<AppState>,
+    Path(id): Path<i64>,
+    Json(d): Json<SuggestionEdit>,
+) -> Response {
+    if !["P1", "P2", "P3"].contains(&d.priority.trim()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "优先级只允许 P1/P2/P3" })),
+        )
+            .into_response();
+    }
+    match s.engine.store.edit_suggestion(
+        id,
+        d.title.trim().chars().take(60).collect::<String>().as_str(),
+        d.priority.trim(),
+        d.evidence
+            .trim()
+            .chars()
+            .take(200)
+            .collect::<String>()
+            .as_str(),
+        d.action
+            .trim()
+            .chars()
+            .take(200)
+            .collect::<String>()
+            .as_str(),
+    ) {
+        Ok(true) => Json(json!({ "ok": true })).into_response(),
+        Ok(false) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "已终态的建议不可修正" })),
+        )
+            .into_response(),
+        Err(e) => err_resp(e),
+    }
 }
 
 async fn decide_suggestion(
@@ -572,6 +632,39 @@ async fn decide_suggestion(
     Path(id): Path<i64>,
     Json(d): Json<SuggestionDecision>,
 ) -> Response {
+    // 修正先行：带了修正字段就先应用（优先级白名单/长度上限，非法 400）
+    if d.title.is_some() || d.priority.is_some() || d.evidence.is_some() || d.action.is_some() {
+        let pr = d.priority.clone().unwrap_or_default();
+        if !pr.is_empty() && !["P1", "P2", "P3"].contains(&pr.as_str()) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "优先级只允许 P1/P2/P3" })),
+            )
+                .into_response();
+        }
+        let cap = |v: &Option<String>, max: usize| -> Option<String> {
+            v.as_ref()
+                .map(|x: &String| x.trim().chars().take(max).collect::<String>())
+                .filter(|x: &String| !x.is_empty())
+        };
+        match s.engine.store.edit_suggestion(
+            id,
+            &cap(&d.title, 60).unwrap_or_default(),
+            &pr,
+            &cap(&d.evidence, 200).unwrap_or_default(),
+            &cap(&d.action, 200).unwrap_or_default(),
+        ) {
+            Ok(true) => {}
+            Ok(false) => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": "已终态的建议不可修正" })),
+                )
+                    .into_response();
+            }
+            Err(e) => return err_resp(e),
+        }
+    }
     match s
         .engine
         .store

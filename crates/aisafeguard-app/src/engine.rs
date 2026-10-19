@@ -2811,6 +2811,24 @@ impl Console for EmbeddedConsole {
         Ok(())
     }
 
+    fn edit_suggestion(
+        &self,
+        id: i64,
+        title: &str,
+        priority: &str,
+        evidence: &str,
+        action: &str,
+    ) -> anyhow::Result<()> {
+        if !self
+            .0
+            .store
+            .edit_suggestion(id, title, priority, evidence, action)?
+        {
+            anyhow::bail!("已终态的建议不可修正");
+        }
+        Ok(())
+    }
+
     fn trigger_review(&self) -> bool {
         self.0.trigger_review()
     }

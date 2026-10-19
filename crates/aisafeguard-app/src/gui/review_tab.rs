@@ -8,6 +8,11 @@ pub(crate) struct ReviewDraft {
     pub loaded: bool,
     pub sel: Option<i64>,
     pub note: String,
+    // 详情编辑草稿（选中行时填充；保存修正走 edit_suggestion）
+    pub edit_title: String,
+    pub edit_priority: String,
+    pub edit_evidence: String,
+    pub edit_action: String,
 }
 
 impl AisafeApp {
@@ -68,25 +73,65 @@ impl AisafeApp {
                     "{} · {} · {}",
                     row.category, row.priority, row.day
                 )));
-                if !row.evidence.is_empty() {
-                    ui.label(caption(&format!(
-                        "{}：{}",
-                        t("证据", "Evidence"),
-                        row.evidence
-                    )));
-                }
-                if !row.action.is_empty() {
-                    ui.label(caption(&format!(
-                        "{}：{}",
-                        t("建议动作", "Action"),
-                        row.action
-                    )));
-                }
+                // 可编辑详情：评审者修正提案本体（如把累进阶梯改成自己的口径），
+                // 修正版才是采纳/拒绝的记录；fingerprint 不动（去重锚保持原主题）
+                let editable = row.status == "pending" || row.status == "adopted";
+                ui.add_space(space::S);
+                ui.label(caption(t("标题（可修正）", "Title (editable)")));
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.review.edit_title)
+                        .desired_width(560.0)
+                        .interactive(editable),
+                );
+                ui.horizontal(|ui| {
+                    ui.label(caption(t("优先级", "Priority")));
+                    egui::ComboBox::from_id_salt("sg-pr")
+                        .selected_text(&self.review.edit_priority)
+                        .show_ui(ui, |ui| {
+                            for p in ["P1", "P2", "P3"] {
+                                ui.selectable_value(
+                                    &mut self.review.edit_priority,
+                                    p.to_string(),
+                                    p,
+                                );
+                            }
+                        });
+                });
+                ui.label(caption(t("证据（可修正）", "Evidence (editable)")));
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.review.edit_evidence)
+                        .desired_width(560.0)
+                        .interactive(editable),
+                );
+                ui.label(caption(t("建议动作（可修正）", "Action (editable)")));
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.review.edit_action)
+                        .desired_width(560.0)
+                        .interactive(editable),
+                );
                 if !row.note.is_empty() {
                     ui.label(caption(&format!("{}：{}", t("决策备注", "Note"), row.note)));
                 }
                 ui.horizontal_wrapped(|ui| {
                     let note = self.review.note.clone();
+                    let (title, pr, ev, act) = (
+                        self.review.edit_title.clone(),
+                        self.review.edit_priority.clone(),
+                        self.review.edit_evidence.clone(),
+                        self.review.edit_action.clone(),
+                    );
+                    if editable && ui.button(t("💾 保存修正", "💾 Save amendment")).clicked()
+                    {
+                        match self.eng.edit_suggestion(row.id, &title, &pr, &ev, &act) {
+                            Ok(()) => {
+                                self.set_toast(t("修正已保存", "Amendment saved"));
+                                self.review_reload();
+                            }
+                            Err(e) => {
+                                self.set_toast(format!("{}: {e}", t("修正失败", "Edit failed")))
+                            }
+                        }
+                    }
                     match row.status.as_str() {
                         "pending" => {
                             if ui.button(t("✓ 采纳", "✓ Adopt")).clicked() {
@@ -154,6 +199,10 @@ impl AisafeApp {
                 {
                     self.review.sel = Some(r.id);
                     self.review.note = r.note.clone();
+                    self.review.edit_title = r.title.clone();
+                    self.review.edit_priority = r.priority.clone();
+                    self.review.edit_evidence = r.evidence.clone();
+                    self.review.edit_action = r.action.clone();
                 }
             }
             if self.review.rows.is_empty() {

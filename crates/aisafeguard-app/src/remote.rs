@@ -386,6 +386,21 @@ impl Console for RemoteConsole {
         Ok(())
     }
 
+    fn edit_suggestion(
+        &self,
+        id: i64,
+        title: &str,
+        priority: &str,
+        evidence: &str,
+        action: &str,
+    ) -> anyhow::Result<()> {
+        self.post_json(
+            &format!("/api/suggestions/{id}/edit"),
+            &serde_json::json!({ "title": title, "priority": priority, "evidence": evidence, "action": action }),
+        )?;
+        Ok(())
+    }
+
     fn trigger_review(&self) -> bool {
         self.post("/api/review/run").is_ok()
     }

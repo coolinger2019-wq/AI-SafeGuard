@@ -71,6 +71,15 @@ pub trait Console: Send + Sync {
     fn list_suggestions(&self, limit: u32)
     -> anyhow::Result<Vec<aisafeguard_store::SuggestionRow>>;
     fn decide_suggestion(&self, id: i64, status: &str, note: &str) -> anyhow::Result<()>;
+    /// 人工修正建议内容（评审展开编辑——修正后的版本才是采纳/拒绝的记录）
+    fn edit_suggestion(
+        &self,
+        id: i64,
+        title: &str,
+        priority: &str,
+        evidence: &str,
+        action: &str,
+    ) -> anyhow::Result<()>;
     fn trigger_review(&self) -> bool;
     fn save_config(&self, cfg: AppConfig) -> anyhow::Result<()>;
     /// AI Key 凭据管理（内嵌走本机凭据管理器，远程走服务 API → 服务侧凭据管理器）

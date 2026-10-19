@@ -1383,6 +1383,27 @@ impl Store {
             .map_err(|e| Error::Store(e.to_string()))?;
         Ok(n == 1)
     }
+    /// 人工修正建议内容（评审页展开编辑——评审者可能改写提案本体，如把
+    /// 累进阶梯 1h→24h→7d→永久 改成 1h→24h→7d→31d→6month→1year）。
+    /// 只允许未决/已采纳状态（终态是历史记录）；title 可改但 fingerprint
+    /// 不动（去重锚保持原始主题）。
+    pub fn edit_suggestion(
+        &self,
+        id: i64,
+        title: &str,
+        priority: &str,
+        evidence: &str,
+        action: &str,
+    ) -> Result<bool> {
+        let n = self
+            .lock()?
+            .execute(
+                "UPDATE suggestions SET title = ?1, priority = ?2, evidence = ?3, action = ?4 WHERE id = ?5 AND status IN ('pending','adopted')",
+                params![title, priority, evidence, action, id],
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(n == 1)
+    }
 
     pub fn set_proposal_status(
         &self,

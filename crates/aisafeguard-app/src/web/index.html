@@ -361,6 +361,12 @@ const EN = {
   'AI 连接正常 — ': 'AI connection OK — ',
   'AI 连接失败：': 'AI connection failed: ',
     'sg.hint': 'Improvement suggestions from the daily self-review — decide adopt/reject here; progress fully tracked. MD snapshots live in node data/suggestions/.',
+  '标题': 'Title', '优先级': 'Priority', '证据': 'Evidence', '建议动作': 'Action',
+  '决策备注（去向/理由/完成记录）': 'Decision note (destination / reason / completion)',
+  '采纳填去向；拒绝填理由': 'Adopt = destination; Reject = reason',
+  '💾 保存修正': '💾 Save amendment',
+  '暂无自审建议——AI 每日生成一轮，或点「立即自审」': 'No suggestions yet — daily, or run now',
+  '✓ 采纳': '✓ Adopt', '✕ 拒绝': '✕ Reject', '✔ 完成': '✔ Complete',
   '评审': 'Review',
   '立即自审': 'Run review now',
   '待决策': 'pending', '已采纳': 'adopted', '已拒绝': 'rejected', '已完成': 'completed',
@@ -936,23 +942,64 @@ function parseExempt(v) {
   if (!inner) return [];
   return [...inner[1].matchAll(/"([^"]*)"/g)].map((m) => m[1]);
 }
-/* ---------- F760-B 评审页 ---------- */
+/* ---------- F760-B 评审页（展开编辑模式：人工修正后决策，修正版即记录） ---------- */
 let sgCache = [];
+const expandedSg = new Set();
 async function loadSuggestions() {
   const r = await fetch('/api/suggestions', { headers: { 'Authorization': 'Bearer ' + token } });
   if (r.status === 401) return logout();
-  const rows = await r.json().catch(() => []);
-  sgCache = rows;
-  const stMap = { pending: ['待决策', 'badge warn'], adopted: ['已采纳', 'badge ok'], rejected: ['已拒绝', 'badge'], completed: ['已完成', 'badge ok'] };
-  $('sg').innerHTML = '<tr><th>日期</th><th>类别</th><th>优先</th><th>标题</th><th>状态</th><th>决策备注</th><th>操作</th></tr>'
-    + rows.map((x) => {
-        const [st, cls] = stMap[x.status] || [x.status, ''];
-        let ops = '';
-        if (x.status === 'pending') ops = `<button class="act" data-act="adopted" data-id="${x.id}">${t('采纳')}</button> <button class="act" data-act="rejected" data-id="${x.id}">${t('拒绝')}</button>`;
-        else if (x.status === 'adopted') ops = `<button class="act" data-act="completed" data-id="${x.id}">${t('完成')}</button>`;
-        return `<tr><td>${x.day}</td><td>${x.category}</td><td>${x.priority}</td><td title="${esc(x.evidence)}（建议动作：${esc(x.action)}）">${esc(x.title)}</td><td><span class="${cls}">${t(st)}</span></td><td>${esc(x.note)}</td><td>${ops}</td></tr>`;
-      }).join('');
+  sgCache = await r.json().catch(() => []);
+  renderSg();
 }
+function sgDetail(x) {
+  const editable = x.status === 'pending' || x.status === 'adopted';
+  const f = (label, id, val, tag) => `<label style="display:block;margin:4px 0"><span class="hint">${label}</span><${tag} id="${id}" ${tag === 'textarea' ? 'rows="2" style="width:95%"' : 'style="width:95%"'} ${editable ? '' : 'disabled'}>${esc(val)}</${tag}></label>`;
+  const pr = (v) => ['P1','P2','P3'].map((p) => `<option ${p === v ? 'selected' : ''}>${p}</option>`).join('');
+  const note = `<label style="display:block;margin:4px 0"><span class="hint">${t('决策备注（去向/理由/完成记录）')}</span><input id="sg-note-${x.id}" style="width:95%" placeholder="${t('采纳填去向；拒绝填理由')}" value="${esc(x.note)}"></label>`;
+  const btn = (act, label, cls) => `<button class="act ${cls || ''}" data-act="${act}" data-id="${x.id}">${label}</button>`;
+  let ops = '';
+  if (x.status === 'pending') ops = btn('adopted', t('✓ 采纳')) + ' ' + btn('rejected', t('✕ 拒绝'));
+  else if (x.status === 'adopted') ops = btn('completed', t('✔ 完成'));
+  return '<td colspan="7">' + f(t('标题'), `sg-title-${x.id}`, x.title, 'input')
+    + f(t('优先级'), `sg-pr-${x.id}`, pr(x.priority), 'select')
+    + f(t('证据'), `sg-ev-${x.id}`, x.evidence, 'textarea')
+    + f(t('建议动作'), `sg-act-${x.id}`, x.action, 'textarea')
+    + note + '<div style="margin:6px 0">' + btn('edit', t('💾 保存修正')) + ' ' + ops + '</div></td>';
+}
+function renderSg() {
+  const stMap = { pending: ['待决策', 'badge warn'], adopted: ['已采纳', 'badge ok'], rejected: ['已拒绝', 'badge'], completed: ['已完成', 'badge ok'] };
+  const body = sgCache.map((x) => {
+    const [st, cls] = stMap[x.status] || [x.status, ''];
+    const open = expandedSg.has(x.id);
+    const main = `<tr data-id="${x.id}" style="cursor:pointer"><td>${x.day}</td><td>${x.category}</td><td>${x.priority}</td><td>${esc(x.title)}</td><td><span class="${cls}">${t(st)}</span></td><td>${esc(x.note)}</td><td class="hint">${open ? '▲' : '▼'}</td></tr>`;
+    const detail = open ? `<tr class="payload" data-for="${x.id}">${sgDetail(x)}</tr>` : '';
+    return main + detail;
+  }).join('');
+  setHtml('sg', $('sg'), '<tr><th>日期</th><th>类别</th><th>优先</th><th>标题</th><th>状态</th><th>决策备注</th><th></th></tr>' + (body || '<tr><td colspan="7" class="hint">' + t('暂无自审建议——AI 每日生成一轮，或点「立即自审」') + '</td></tr>'));
+}
+$('sg').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-act]');
+  if (btn) { decideSg(Number(btn.dataset.id), btn.dataset.act); return; }
+  const tr = e.target.closest('tr[data-id]');
+  if (!tr) return;
+  const id = Number(tr.dataset.id);
+  expandedSg.has(id) ? expandedSg.delete(id) : expandedSg.add(id);
+  renderSg();
+});
+async function decideSg(id, act) {
+  const v = (sfx) => { const el = document.getElementById(`sg-${sfx}-${id}`); return el ? el.value : undefined; };
+  const noteEl = document.getElementById(`sg-note-${id}`);
+  const body = { status: act, note: noteEl ? noteEl.value : '', title: v('title'), priority: v('pr'), evidence: v('ev'), action: v('act') };
+  const r = await fetch(`/api/suggestions/${id}/status`, {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (r.status === 401) return logout();
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) return alert(j.error || 'HTTP ' + r.status);
+  loadSuggestions();
+};
 document.querySelector('#sg').addEventListener('click', async (e) => {
   const b = e.target.closest('button[data-act]');
   if (!b) return;
