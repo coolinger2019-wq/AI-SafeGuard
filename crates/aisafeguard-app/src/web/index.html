@@ -379,6 +379,7 @@ const EN = {
   '💾 保存修正': '💾 Save amendment',
   '暂无自审建议——AI 每日生成一轮，或点「立即自审」': 'No suggestions yet — daily, or run now',
   '✓ 采纳': '✓ Adopt', '✕ 拒绝': '✕ Reject', '✔ 完成': '✔ Complete',
+  '采纳': 'Adopt',
   '改配置': 'config change', '需改码': 'needs code', '人工操作': 'manual ops',
   '评审': 'Review',
   '立即自审': 'Run review now',
@@ -790,13 +791,14 @@ async function refreshProp() {
               : p.severity === 'medium' ? 'warn' : 'acc';
     const acts = p.status === 'pending'
       ? '<button class="act" style="padding:2px 10px;font-size:11.5px" data-apply="' + p.id + '">' +
-        (p.action === 'credential_spray' ? t('确认封禁') : t('应用')) + '</button> ' +
+        (p.action === 'credential_spray' ? t('确认封禁') : p.action === 'tune_detection' ? t('采纳') : t('应用')) + '</button> ' +
         '<button class="act ghost" style="padding:2px 10px;font-size:11.5px" data-dismiss="' + p.id + '">' + t('驳回') + '</button>'
       : '';
     const main = '<tr data-pid="' + p.id + '">' +
       '<td class="mono hint">' + fmtTs(p.created_ts) + '</td>' +
       '<td><span class="badge ' + sev + '">' + esc(p.severity) + '</span></td>' +
-      '<td>' + esc(p.action) + '</td>' +
+      '<td>' + esc(p.action) + (p.action === 'tune_detection' && p.tune_param ? ' <span class="badge acc">' + esc(p.tune_param) + '=' + esc(p.tune_value) + '</span>' : '')
+      + (p.rule_name ? ' <span class="badge acc">' + esc(p.rule_name) + '</span>' : '') + '</td>' +
       '<td class="mono">' + esc(p.remote_ip) + (p.local_port ? ':' + p.local_port : '') + '</td>' +
       '<td>' + esc(p.reason) + '</td>' +
       '<td>' + propBadge(p.status) +

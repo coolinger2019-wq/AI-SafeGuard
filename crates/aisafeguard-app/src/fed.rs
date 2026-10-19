@@ -877,6 +877,9 @@ async fn fed_proposals(
             valid.ttl_secs,
             &valid.reason,
             "组织协同共享建议（接收方本地复验通过，待人工确认）",
+            "",
+            "",
+            "",
         ) {
             state.engine.bus.publish(SecurityEvent::ProposalCreated {
                 ts: now_ts(),
@@ -2432,6 +2435,9 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
                                 None,
                                 reason,
                                 "组织建议（本地复验通过，待人工确认）",
+                                "",
+                                "",
+                                "",
                             ) {
                                 let _ =
                                     eng.store.insert_org_event(now, "suggestion", "", key, 0, "");

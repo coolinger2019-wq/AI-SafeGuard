@@ -217,7 +217,7 @@ impl Console for RemoteConsole {
         Ok(())
     }
 
-    fn apply_proposal(&self, id: i64) -> anyhow::Result<RuleRow> {
+    fn apply_proposal(&self, id: i64) -> anyhow::Result<Option<RuleRow>> {
         Ok(self.post(&format!("/api/proposals/{id}/apply"))?.json()?)
     }
 

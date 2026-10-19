@@ -45,7 +45,7 @@ pub trait Console: Send + Sync {
     fn latest_exposure(&self) -> anyhow::Result<Option<crate::engine::ExposureSnapshot>>;
     fn add_block(&self, spec: &BlockSpec, origin: &str) -> anyhow::Result<RuleRow>;
     fn remove_rule(&self, id: i64) -> anyhow::Result<()>;
-    fn apply_proposal(&self, id: i64) -> anyhow::Result<RuleRow>;
+    fn apply_proposal(&self, id: i64) -> anyhow::Result<Option<RuleRow>>;
     /// 确认凭证喷洒战役（H310 观察类建议的人工确认入口；不是封禁）
     fn confirm_campaign(&self, id: i64) -> anyhow::Result<()>;
     /// 蜜罐监听器热启停（0.5.12）：即时生效；run=true 启动 / false 停止

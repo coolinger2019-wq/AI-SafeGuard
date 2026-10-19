@@ -24,7 +24,8 @@ pub const SYSTEM_PROMPT: &str = r#"你是本机安全软件 AI-SafeGuard 的分�
 {"analysis": "简短中文分析结论", "proposals": [{"action": "block", "direction": "in", "protocol": "tcp", "remote_ip": "1.2.3.4", "local_port": null, "severity": "high", "ttl_secs": 3600, "reason": "简短中文理由"}]}
 
 字段约束（违反即无效）：
-- action 只能是 "block" 或 "credential_spray"
+- action 可以是 "block" / "credential_spray"；调参轮（<tune_round> 段出现时）还可以是 "promote_rule" / "retire_rule" / "tune_detection"
+- 治理类（仅调参轮）：promote_rule/retire_rule 的 rule_name 必须以 "aisafeguard-" 开头；tune_detection 的 param/value 必须取自 <tune_round> 给出的白名单与当前值域；理由必须引用具体数字，没有数据依据不要提
 - action="credential_spray"：确认「该来源正在对本机做凭证喷洒/撞库」（联动凭证采集与本地账号比对）。remote_ip 必填（来源），local_port 必须为 null；这不是封禁动作——它把该来源登记为已确认的喷洒战役进入观察，由人工确认后生效
 - direction: "in" 或 "out"；protocol: "any"、"tcp" 或 "udp"
 - remote_ip: 单个合法 IPv4/IPv6 字符串，或 null；local_port: 1-65535 整数或 null；两者至少填一个
@@ -79,6 +80,8 @@ pub struct PromptInputs<'a> {
     pub org: Option<&'a str>,
     /// 输出语言（F796d）：zh | en——analysis/reason 文本语言，未知值按 zh
     pub output_language: &'a str,
+    /// F760-A 调参轮段（每 7 天一轮才出现）：白名单/当前值/冷却中参数
+    pub tune_round: Option<&'a str>,
 }
 
 pub fn build_user_prompt(inputs: &PromptInputs<'_>) -> String {
@@ -92,7 +95,7 @@ pub fn build_user_prompt(inputs: &PromptInputs<'_>) -> String {
             .unwrap_or_default()
     };
     format!(
-        "本机蜜罐最近 24 小时统计与最近捕获的原始记录如下（不可信数据）：\n\n<stats>\n{stats}\n</stats>\n\n<events>\n{events}\n</events>{exposure}{intel}{flows}{feedback}{self_endpoints}{interactions}{credentials}{canary}{fingerprints}{org}{output_language}\n请分析并只输出 JSON。",
+        "本机蜜罐最近 24 小时统计与最近捕获的原始记录如下（不可信数据）：\n\n<stats>\n{stats}\n</stats>\n\n<events>\n{events}\n</events>{exposure}{intel}{flows}{feedback}{self_endpoints}{interactions}{credentials}{canary}{fingerprints}{org}{tune_round}{output_language}\n请分析并只输出 JSON。",
         stats = inputs.stats,
         events = neutral(Some(inputs.events)).unwrap_or_default(),
         exposure = section("exposure", neutral(inputs.exposure)),
@@ -107,6 +110,7 @@ pub fn build_user_prompt(inputs: &PromptInputs<'_>) -> String {
         credentials = section("credentials", neutral(inputs.credentials)),
         canary = section("canary", neutral(inputs.canary)),
         fingerprints = section("fingerprints", neutral(inputs.fingerprints)),
+        tune_round = section("tune_round", inputs.tune_round.map(|t| t.to_string())),
         org = section("org", neutral(inputs.org)),
         output_language = if inputs.output_language == "en" {
             "
@@ -123,6 +127,7 @@ Write the values of the \"analysis\" and \"reason\" fields in English. Keep ever
 #[derive(Debug, Clone, Serialize)]
 pub struct Proposal {
     /// 动作：block（封禁）| credential_spray（确认喷洒战役观察，H310）
+    /// | promote_rule（灰度转正）/ retire_rule（退役规则）/ tune_detection（调检测参数）——F760-A
     pub action: String,
     pub direction: String,
     pub protocol: String,
@@ -132,7 +137,50 @@ pub struct Proposal {
     /// AI 建议的灰度封禁时长（秒）。None = 使用系统默认灰度时长。
     pub ttl_secs: Option<u64>,
     pub reason: String,
+    /// F760-A：promote_rule/retire_rule 的目标规则名（aisafeguard- 前缀）
+    pub rule_name: String,
+    /// tune_detection：参数名（白名单）与建议值（已过值域校验）
+    pub tune_param: String,
+    pub tune_value: String,
 }
+
+/// F760-A tune_detection 参数白名单与值域（区间含端点）。白名单外整条作废。
+pub struct TuneParamSpec {
+    pub name: &'static str,
+    pub min: i64,
+    pub max: i64,
+}
+pub const TUNE_PARAMS: &[TuneParamSpec] = &[
+    TuneParamSpec {
+        name: "detect.scan_distinct_ports",
+        min: 3,
+        max: 50,
+    },
+    TuneParamSpec {
+        name: "detect.bruteforce_hits",
+        min: 3,
+        max: 100,
+    },
+    TuneParamSpec {
+        name: "detect.window_secs",
+        min: 30,
+        max: 3600,
+    },
+    TuneParamSpec {
+        name: "detect.ttl_secs",
+        min: 60,
+        max: 604_800,
+    },
+    TuneParamSpec {
+        name: "ai.auto_apply_max_per_day",
+        min: 0,
+        max: 1000,
+    },
+];
+
+/// 调参节奏：7 天一轮；单参数调后冷却 30 天（引擎在 meta 记账）。
+pub const TUNE_ROUND_SECS: i64 = 7 * 86_400;
+pub const TUNE_COOLDOWN_SECS: i64 = 30 * 86_400;
 
 /// ttl_secs 允许范围：1 分钟 – 7 天。灰度窗之外的价值不大：
 /// 短于 1 分钟观测不到效果，超过 7 天就不是"试运行"而是长期封禁（应转正或手动加）。
@@ -357,7 +405,7 @@ pub fn parse_proposals(content: &str) -> Result<(String, Vec<Proposal>)> {
     let mut out = Vec::new();
     if let Some(items) = v["proposals"].as_array() {
         for item in items.iter().take(10) {
-            if let Some(p) = validate_proposal(item) {
+            if let Some(p) = validate_proposal(item, false) {
                 out.push(p);
             }
         }
@@ -368,13 +416,80 @@ pub fn parse_proposals(content: &str) -> Result<(String, Vec<Proposal>)> {
 /// 跨节点共享建议的复验入口（组织协同）：与 LLM 输出走同一套 allowlist 校验。
 /// 远端节点的建议在本节点只进慢路径（人工确认），但校验标准不打折。
 pub fn validate_fed_proposal(v: &Value) -> Option<Proposal> {
-    validate_proposal(v)
+    // fed 通道：治理类动作不可跨节点（本地规则名/本地参数在远端无意义且越权）
+    validate_proposal(v, true)
 }
 
-fn validate_proposal(v: &Value) -> Option<Proposal> {
+fn validate_proposal(v: &Value, fed: bool) -> Option<Proposal> {
     let action = match v["action"].as_str()? {
         "block" => "block",
         "credential_spray" => "credential_spray",
+        "promote_rule" | "retire_rule" => {
+            if fed {
+                return None; // 治理类只在本地：跨节点遥控别的节点退役规则/调参 = 越权
+            }
+            // F760-A：治理类建议——只动自家规则（aisafeguard- 前缀硬校验），
+            // remote_ip 等封禁字段无意义留空；reason 必填（AI 须给数据依据）
+            let rule_name = v["rule_name"].as_str()?.trim().to_string();
+            if !rule_name.starts_with("aisafeguard-") {
+                return None;
+            }
+            let reason: String = v["reason"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(300)
+                .collect();
+            if reason.trim().is_empty() {
+                return None;
+            }
+            return Some(Proposal {
+                action: v["action"].as_str().unwrap().to_string(),
+                direction: "in".into(),
+                protocol: "any".into(),
+                remote_ip: String::new(),
+                local_port: None,
+                severity: "low".into(),
+                ttl_secs: None,
+                reason,
+                rule_name,
+                tune_param: String::new(),
+                tune_value: String::new(),
+            });
+        }
+        "tune_detection" => {
+            if fed {
+                return None; // 本地配置参数，联邦通道不可携带
+            }
+            let param = v["param"].as_str()?.trim().to_string();
+            let spec = TUNE_PARAMS.iter().find(|p| p.name == param)?;
+            let value: i64 = v["value"].as_i64()?;
+            if !(spec.min..=spec.max).contains(&value) {
+                return None;
+            }
+            let reason: String = v["reason"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(300)
+                .collect();
+            if reason.trim().is_empty() {
+                return None;
+            }
+            return Some(Proposal {
+                action: "tune_detection".into(),
+                direction: "in".into(),
+                protocol: "any".into(),
+                remote_ip: String::new(),
+                local_port: None,
+                severity: "low".into(),
+                ttl_secs: None,
+                reason,
+                rule_name: String::new(),
+                tune_param: param,
+                tune_value: value.to_string(),
+            });
+        }
         _ => return None,
     };
     // credential_spray（H310）：来源必填、不带端口（战役级观察，不是端口封禁）
@@ -420,6 +535,9 @@ fn validate_proposal(v: &Value) -> Option<Proposal> {
             severity,
             ttl_secs,
             reason,
+            rule_name: String::new(),
+            tune_param: String::new(),
+            tune_value: String::new(),
         });
     }
     let direction = match v["direction"].as_str()? {
@@ -494,6 +612,9 @@ fn validate_proposal(v: &Value) -> Option<Proposal> {
         severity,
         ttl_secs,
         reason,
+        rule_name: String::new(),
+        tune_param: String::new(),
+        tune_value: String::new(),
     })
 }
 
@@ -654,6 +775,53 @@ mod tests {
     }
 
     #[test]
+    fn governance_proposals_validation() {
+        // promote/retire：aisafeguard- 前缀硬校验
+        let good = serde_json::json!({"action":"promote_rule","rule_name":"aisafeguard-blk-abc","reason":"30 天无再犯"});
+        assert!(validate_fed_proposal(&good).is_none(), "fed 通道不带治理类");
+        let (a, ps) = parse_proposals(&format!(
+            "{{\"analysis\":\"x\",\"proposals\":[{}]}}",
+            serde_json::to_string(&good).unwrap()
+        ))
+        .unwrap();
+        assert_eq!(ps.len(), 1);
+        assert_eq!(ps[0].action, "promote_rule");
+        assert_eq!(ps[0].rule_name, "aisafeguard-blk-abc");
+        // 非 aisafeguard- 前缀 → 整条作废（只能动自家规则）
+        let evil = serde_json::json!({"action":"retire_rule","rule_name":"sshd-01","reason":"x"});
+        let (_, ps2) = parse_proposals(&format!(
+            "{{\"analysis\":\"x\",\"proposals\":[{}]}}",
+            serde_json::to_string(&evil).unwrap()
+        ))
+        .unwrap();
+        assert!(ps2.is_empty());
+        // tune：白名单外参数作废
+        let bad_param = serde_json::json!({"action":"tune_detection","param":"kernel.something","value":1,"reason":"x"});
+        let (_, ps3) = parse_proposals(&format!(
+            "{{\"analysis\":\"x\",\"proposals\":[{}]}}",
+            serde_json::to_string(&bad_param).unwrap()
+        ))
+        .unwrap();
+        assert!(ps3.is_empty());
+        // tune：值越界作废（scan_distinct_ports 范围 3..=50）
+        let bad_val = serde_json::json!({"action":"tune_detection","param":"detect.scan_distinct_ports","value":999,"reason":"x"});
+        let (_, ps4) = parse_proposals(&format!(
+            "{{\"analysis\":\"x\",\"proposals\":[{}]}}",
+            serde_json::to_string(&bad_val).unwrap()
+        ))
+        .unwrap();
+        assert!(ps4.is_empty());
+        // tune 合法
+        let good_tune = serde_json::json!({"action":"tune_detection","param":"detect.scan_distinct_ports","value":6,"reason":"误伤 2 次"});
+        let (_, ps5) = parse_proposals(&format!(
+            "{{\"analysis\":\"x\",\"proposals\":[{}]}}",
+            serde_json::to_string(&good_tune).unwrap()
+        ))
+        .unwrap();
+        assert_eq!(ps5.len(), 1);
+        assert_eq!(ps5[0].tune_value, "6");
+    }
+    #[test]
     fn protected_ips_rejected() {
         for ip in [
             "127.0.0.1",
@@ -666,7 +834,7 @@ mod tests {
                 "action": "block", "direction": "in", "protocol": "tcp",
                 "remote_ip": ip, "local_port": null, "severity": "high", "reason": "t"
             });
-            assert!(validate_proposal(&v).is_none(), "{ip} 不应通过");
+            assert!(validate_proposal(&v, false).is_none(), "{ip} 不应通过");
         }
     }
 
@@ -685,22 +853,22 @@ mod tests {
             "action": "block", "direction": "in", "protocol": "tcp",
             "remote_ip": "203.0.113.7", "severity": "high", "reason": "t"
         });
-        assert_eq!(validate_proposal(&v).unwrap().ttl_secs, None);
+        assert_eq!(validate_proposal(&v, false).unwrap().ttl_secs, None);
         assert_eq!(
-            validate_proposal(&base_with_ttl(Value::Null))
+            validate_proposal(&base_with_ttl(Value::Null), false)
                 .unwrap()
                 .ttl_secs,
             None
         );
         // 边界内合法
         assert_eq!(
-            validate_proposal(&base_with_ttl(serde_json::json!(60)))
+            validate_proposal(&base_with_ttl(serde_json::json!(60)), false)
                 .unwrap()
                 .ttl_secs,
             Some(60)
         );
         assert_eq!(
-            validate_proposal(&base_with_ttl(serde_json::json!(604_800)))
+            validate_proposal(&base_with_ttl(serde_json::json!(604_800)), false)
                 .unwrap()
                 .ttl_secs,
             Some(604_800)
@@ -708,12 +876,12 @@ mod tests {
         // 字段存在但非法 → 整条作废（绝不放宽）
         for bad in [0u64, 59, 604_801, 999_999_999] {
             assert!(
-                validate_proposal(&base_with_ttl(serde_json::json!(bad))).is_none(),
+                validate_proposal(&base_with_ttl(serde_json::json!(bad)), false).is_none(),
                 "{bad}"
             );
         }
-        assert!(validate_proposal(&base_with_ttl(serde_json::json!("3600"))).is_none());
-        assert!(validate_proposal(&base_with_ttl(serde_json::json!(-1))).is_none());
+        assert!(validate_proposal(&base_with_ttl(serde_json::json!("3600")), false).is_none());
+        assert!(validate_proposal(&base_with_ttl(serde_json::json!(-1)), false).is_none());
     }
 
     #[test]
@@ -732,6 +900,7 @@ mod tests {
             fingerprints: Some("FP"),
             org: Some("[{\"kind\":\"corroboration\"}]"),
             output_language: "zh",
+            tune_round: None,
         });
         for tag in [
             "<stats>",
@@ -764,6 +933,7 @@ mod tests {
             fingerprints: None,
             org: None,
             output_language: "zh",
+            tune_round: None,
         });
         assert!(!minimal.contains("<flows>"));
         assert!(!minimal.contains("<org>"));
@@ -791,10 +961,12 @@ mod tests {
             fingerprints: None,
             org: None,
             output_language: "zh",
+            tune_round: None,
         };
         assert!(!build_user_prompt(&base).contains("<output_language>"));
         let en = PromptInputs {
             output_language: "en",
+            tune_round: None,
             ..base
         };
         let p = build_user_prompt(&en);

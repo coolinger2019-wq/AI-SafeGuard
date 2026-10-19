@@ -108,6 +108,11 @@ pub struct ProposalRow {
     pub analysis: String,
     /// AI 建议的灰度封禁时长（秒）；None = 引擎默认灰度时长
     pub ttl_secs: Option<i64>,
+    /// F760-A：promote_rule/retire_rule 的目标规则名（aisafeguard- 前缀）
+    pub rule_name: String,
+    /// tune_detection 的参数（白名单）与建议值
+    pub tune_param: String,
+    pub tune_value: String,
 }
 
 /// 误报反馈条目（抑制期内的来源）。
@@ -277,7 +282,11 @@ CREATE TABLE IF NOT EXISTS proposals (
     reason          TEXT NOT NULL DEFAULT '',
     status          TEXT NOT NULL DEFAULT 'pending',
     applied_rule_id INTEGER,
-    analysis        TEXT NOT NULL DEFAULT ''
+    analysis        TEXT NOT NULL DEFAULT '',
+    -- F760-A 调参/治理建议：promote_rule/retire_rule 的目标规则名；tune_detection 的参数与值
+    rule_name       TEXT NOT NULL DEFAULT '',
+    tune_param      TEXT NOT NULL DEFAULT '',
+    tune_value      TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status);
 
@@ -454,6 +463,9 @@ impl Store {
             "ALTER TABLE fed_members ADD COLUMN max_seq INTEGER NOT NULL DEFAULT -1",
             "ALTER TABLE fed_members ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
             "ALTER TABLE suggestions ADD COLUMN impl_path TEXT NOT NULL DEFAULT 'code'",
+            "ALTER TABLE proposals ADD COLUMN rule_name TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE proposals ADD COLUMN tune_param TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE proposals ADD COLUMN tune_value TEXT NOT NULL DEFAULT ''",
         ] {
             let _ = conn.execute(sql, []); // 列已存在时报错，忽略
         }
@@ -1154,6 +1166,7 @@ impl Store {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_proposal(
         &self,
         model: &str,
@@ -1166,12 +1179,15 @@ impl Store {
         ttl_secs: Option<u64>,
         reason: &str,
         analysis: &str,
+        rule_name: &str,
+        tune_param: &str,
+        tune_value: &str,
     ) -> Result<i64> {
         // 同一锁作用域内 INSERT + 取 rowid——两锁间隙他人插入会拿到别人的 id
         let conn = self.lock()?;
         conn.execute(
-            "INSERT INTO proposals (created_ts, model, action, severity, direction, protocol, remote_ip, local_port, ttl_secs, reason, status, analysis)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending', ?11)",
+            "INSERT INTO proposals (created_ts, model, action, severity, direction, protocol, remote_ip, local_port, ttl_secs, reason, status, analysis, rule_name, tune_param, tune_value)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending', ?11, ?12, ?13, ?14)",
             params![
                 aisafeguard_core::now_ts(),
                 model,
@@ -1183,7 +1199,10 @@ impl Store {
                 local_port,
                 ttl_secs.map(|t| t as i64),
                 reason,
-                analysis
+                analysis,
+                rule_name,
+                tune_param,
+                tune_value
             ],
         )
         .map_err(|e| Error::Store(e.to_string()))?;
@@ -1213,11 +1232,11 @@ impl Store {
         let conn = self.lock()?;
         let sql = match status {
             Some(_) => {
-                "SELECT id, created_ts, model, action, severity, direction, protocol, remote_ip, local_port, reason, status, applied_rule_id, analysis, ttl_secs
+                "SELECT id, created_ts, model, action, severity, direction, protocol, remote_ip, local_port, reason, status, applied_rule_id, analysis, ttl_secs, rule_name, tune_param, tune_value
                  FROM proposals WHERE status = ?1 ORDER BY id DESC LIMIT ?2"
             }
             None => {
-                "SELECT id, created_ts, model, action, severity, direction, protocol, remote_ip, local_port, reason, status, applied_rule_id, analysis, ttl_secs
+                "SELECT id, created_ts, model, action, severity, direction, protocol, remote_ip, local_port, reason, status, applied_rule_id, analysis, ttl_secs, rule_name, tune_param, tune_value
                  FROM proposals ORDER BY id DESC LIMIT ?2"
             }
         };
@@ -1239,6 +1258,9 @@ impl Store {
                     applied_rule_id: r.get(11)?,
                     analysis: r.get(12)?,
                     ttl_secs: r.get(13)?,
+                    rule_name: r.get(14)?,
+                    tune_param: r.get(15)?,
+                    tune_value: r.get(16)?,
                 })
             })
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -1251,7 +1273,7 @@ impl Store {
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, created_ts, model, severity, action, direction, protocol, remote_ip, local_port, reason, status, applied_rule_id, analysis, ttl_secs
+                "SELECT id, created_ts, model, severity, action, direction, protocol, remote_ip, local_port, reason, status, applied_rule_id, analysis, ttl_secs, rule_name, tune_param, tune_value
                  FROM proposals WHERE id = ?1",
             )
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -1272,6 +1294,9 @@ impl Store {
                     applied_rule_id: r.get(11)?,
                     analysis: r.get(12)?,
                     ttl_secs: r.get(13)?,
+                    rule_name: r.get(14)?,
+                    tune_param: r.get(15)?,
+                    tune_value: r.get(16)?,
                 })
             })
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -2219,6 +2244,9 @@ mod tests {
                 None,
                 "r",
                 "a",
+                "",
+                "",
+                "",
             )
             .unwrap();
         let pid2 = store
@@ -2233,11 +2261,14 @@ mod tests {
                 None,
                 "r",
                 "a",
+                "",
+                "",
+                "",
             )
             .unwrap();
         store
             .insert_proposal(
-                "ai", "block", "high", "in", "any", "1.2.3.4", None, None, "r", "a",
+                "ai", "block", "high", "in", "any", "1.2.3.4", None, None, "r", "a", "", "", "",
             )
             .unwrap();
         store.set_proposal_status(pid2, "dismissed", None).unwrap();
@@ -2498,6 +2529,9 @@ mod tests {
                 Some(900),
                 "r1",
                 "a",
+                "",
+                "",
+                "",
             )
             .unwrap();
         store
@@ -2512,6 +2546,9 @@ mod tests {
                 Some(900),
                 "r2",
                 "a",
+                "",
+                "",
+                "",
             )
             .unwrap();
         let ids: Vec<i64> = {
@@ -2816,6 +2853,9 @@ mod tests {
                 None,
                 "扫描",
                 "分析",
+                "",
+                "",
+                "",
             )
             .unwrap();
         assert!(

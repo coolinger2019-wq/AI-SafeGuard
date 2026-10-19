@@ -714,7 +714,7 @@ impl EngineHandle {
         Ok(())
     }
 
-    pub fn apply_proposal(&self, id: i64) -> Result<RuleRow> {
+    pub fn apply_proposal(&self, id: i64) -> Result<Option<RuleRow>> {
         // 原子认领（F795 C2）：pending→applying 抢占成功才继续，防并发双应用
         // 双封禁（Web 手点 / API / 自动应用回扫三通道并发）
         if !self
@@ -727,6 +727,58 @@ impl EngineHandle {
             .store
             .get_proposal(id)?
             .ok_or_else(|| Error::Store(format!("建议 #{id} 不存在")))?;
+        // F760-A 治理类建议三路：promote=真转正 / retire=真退役（规则表操作，产品本职）；
+        // tune=采纳记账待人工执行（2026-10-20 拍板：机器永不写 config）
+        match p.action.as_str() {
+            "promote_rule" => {
+                let row = self
+                    .store
+                    .list_rules()?
+                    .into_iter()
+                    .find(|r| r.name == p.rule_name)
+                    .ok_or_else(|| Error::Store(format!("目标规则 {} 不存在", p.rule_name)))?;
+                let ttl = self.config().ai.promote_ttl_secs as i64;
+                self.store.mark_promoted(row.id, now_ts() + ttl)?;
+                self.store
+                    .set_proposal_status_if(id, "applying", "applied", Some(row.id))?;
+                self.bus.publish(SecurityEvent::engine(
+                    "info",
+                    format!("治理建议已应用：{} 转正（TTL 延长至 {} 秒）", row.name, ttl),
+                ));
+                return Ok(Some(row));
+            }
+            "retire_rule" => {
+                let row = self
+                    .store
+                    .list_rules()?
+                    .into_iter()
+                    .find(|r| r.name == p.rule_name)
+                    .ok_or_else(|| Error::Store(format!("目标规则 {} 不存在", p.rule_name)))?;
+                self.remove_rule(row.id)?;
+                self.store
+                    .set_proposal_status_if(id, "applying", "applied", Some(row.id))?;
+                self.bus.publish(SecurityEvent::engine(
+                    "info",
+                    format!("治理建议已应用：{} 已退役", row.name),
+                ));
+                return Ok(Some(row));
+            }
+            "tune_detection" => {
+                self.store
+                    .set_proposal_status_if(id, "applying", "applied", None)?;
+                self.store
+                    .set_meta(&format!("tune_cd:{}", p.tune_param), &now_ts().to_string())?; // 应用即入 30 天冷却
+                self.bus.publish(SecurityEvent::engine(
+                    "info",
+                    format!(
+                        "调参建议已采纳（记账待人工执行）：{} = {}（30 天冷却启动）",
+                        p.tune_param, p.tune_value
+                    ),
+                ));
+                return Ok(None);
+            }
+            _ => {} // block / credential_spray 走原路径
+        }
         // F793 补全：观察类（credential_spray）的人工应用 = 「确认封禁」——人工点击
         // 即构成 H310 所等的人工确认，走正常 block 路径按建议自带 TTL 灰度封禁。
         // 红线不变：AI 自动应用仍只作用于 block（auto_apply_policy_ok 门控）；
@@ -788,7 +840,7 @@ impl EngineHandle {
             proposal_id: id,
             rule_name: row.name.clone(),
         });
-        Ok(row)
+        Ok(Some(row))
     }
 
     pub fn dismiss_proposal(&self, id: i64) -> Result<()> {
@@ -2331,6 +2383,60 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
         (!arr.is_empty()).then(|| serde_json::to_string(&arr).unwrap_or_default())
     };
 
+    // F760-A 调参轮：每 7 天一轮（meta 记账）；段内给白名单/当前值/冷却参数，
+    // 允许 AI 提 promote_rule/retire_rule/tune_detection 三类治理建议
+    let tune_due = match eng.store.get_meta("tune_round_at") {
+        Ok(Some(t)) => now_ts() - t.parse::<i64>().unwrap_or(0) >= aisafeguard_ai::TUNE_ROUND_SECS,
+        _ => true,
+    };
+    let tune_round_section: Option<String> = if tune_due {
+        let cur = [
+            (
+                "detect.scan_distinct_ports",
+                cfg.detect.scan_distinct_ports as i64,
+                3,
+                50,
+            ),
+            (
+                "detect.bruteforce_hits",
+                cfg.detect.bruteforce_hits as i64,
+                3,
+                100,
+            ),
+            ("detect.window_secs", cfg.detect.window_secs, 30, 3600),
+            ("detect.ttl_secs", cfg.detect.ttl_secs, 60, 604_800),
+            (
+                "ai.auto_apply_max_per_day",
+                cfg.ai.auto_apply_max_per_day as i64,
+                0,
+                1000,
+            ),
+        ];
+        let mut sec = String::from(
+            "每 7 天一次的调参轮：除 block/spray 外，可基于数据提治理建议（promote_rule/retire_rule/tune_detection）。参数白名单与当前值（value 必须在 min..=max 内）：\n",
+        );
+        let mut cooled = Vec::new();
+        for (name, v, min, max) in cur {
+            sec.push_str(&format!("{name} 当前={v} 范围={min}..={max}\n"));
+            if let Ok(Some(t)) = eng.store.get_meta(&format!("tune_cd:{name}")) {
+                let t = t.parse::<i64>().unwrap_or(0);
+                if now_ts() - t < aisafeguard_ai::TUNE_COOLDOWN_SECS {
+                    cooled.push(name.to_string());
+                }
+            }
+        }
+        sec.push_str(&format!(
+            "冷却中（30 天内已调过，禁止再提）：{}\n",
+            if cooled.is_empty() {
+                "无".to_string()
+            } else {
+                cooled.join(", ")
+            }
+        ));
+        Some(sec)
+    } else {
+        None
+    };
     let client = AiClient::with_protocol(
         &cfg.ai.api_protocol,
         &cfg.ai.base_url,
@@ -2354,6 +2460,7 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                 canary: canary_json.as_deref(),
                 fingerprints: fingerprints_json.as_deref(),
                 org: org_json.as_deref(),
+                tune_round: tune_round_section.as_deref(),
                 output_language: if cfg.ai.output_language == "en" {
                     "en"
                 } else {
@@ -2366,6 +2473,9 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
     match result {
         Ok(content) => match aisafeguard_ai::parse_proposals(&content) {
             Ok((analysis, proposals)) => {
+                if tune_due {
+                    let _ = eng.store.set_meta("tune_round_at", &now_ts().to_string());
+                }
                 let mut created = 0i64;
                 let mut auto_applied = 0i64;
                 // 失败记账（F795 C9）：入库/应用失败不再静默消失
@@ -2376,7 +2486,31 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                 let mut dedup_skipped = 0i64;
                 let mut first_error: Option<String> = None;
                 for p in proposals {
-                    if eng
+                    // F760-A 治理类：无 IP 维度，不走 IP 去重；tune 走冷却检查
+                    if matches!(
+                        p.action.as_str(),
+                        "promote_rule" | "retire_rule" | "tune_detection"
+                    ) {
+                        if p.action == "tune_detection" {
+                            let cd = format!("tune_cd:{}", p.tune_param);
+                            let cooled = eng
+                                .store
+                                .get_meta(&cd)
+                                .ok()
+                                .flatten()
+                                .and_then(|t| t.parse::<i64>().ok())
+                                .map(|t| now_ts() - t < aisafeguard_ai::TUNE_COOLDOWN_SECS)
+                                .unwrap_or(false);
+                            if cooled {
+                                tracing::info!(
+                                    "调参建议被冷却期拦截（留痕）：param={}",
+                                    p.tune_param
+                                );
+                                dedup_skipped += 1;
+                                continue;
+                            }
+                        }
+                    } else if eng
                         .store
                         .pending_proposal_exists(&p.remote_ip, p.local_port)
                         .unwrap_or(true)
@@ -2399,6 +2533,9 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                         p.ttl_secs,
                         &p.reason,
                         &analysis,
+                        &p.rule_name,
+                        &p.tune_param,
+                        &p.tune_value,
                     ) else {
                         dropped += 1;
                         if first_error.is_none() {
@@ -2755,7 +2892,7 @@ impl Console for EmbeddedConsole {
             .map_err(anyhow::Error::msg)
     }
 
-    fn apply_proposal(&self, id: i64) -> anyhow::Result<RuleRow> {
+    fn apply_proposal(&self, id: i64) -> anyhow::Result<Option<RuleRow>> {
         self.0.apply_proposal(id).map_err(anyhow::Error::msg)
     }
 

@@ -282,7 +282,7 @@ impl AisafeApp {
                                 .clicked()
                             {
                                 match self.eng.apply_proposal(pid) {
-                                    Ok(row) => {
+                                    Ok(Some(row)) => {
                                         let until = row
                                             .expires_ts
                                             .and_then(|t| {
@@ -299,6 +299,12 @@ impl AisafeApp {
                                             row.name,
                                             t("自动解封", "auto-unban"),
                                             until
+                                        ));
+                                    }
+                                    Ok(None) => {
+                                        self.set_toast(t(
+                                            "调参建议已采纳（待人工执行，见对话窗口）",
+                                            "Adopted (manual execution pending)",
                                         ));
                                     }
                                     Err(e) => self.set_toast(format!(
