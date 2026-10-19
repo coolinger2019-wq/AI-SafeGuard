@@ -557,8 +557,9 @@ async fn handle_conn(
             }
             Err(e) => Err(e),
         },
-        // F794a：RDP（X.224 协商 + mstshash 客户端自报捕获）
-        "rdp" => rdp::rdp_session(&mut stream).await,
+        // F794a+F799：RDP（X.224 协商 + mstshash 自报 + NLA/CredSSP 凭证捕获——
+        // TLS accept 要拿走流所有权，传值）
+        "rdp" => rdp::rdp_session(stream).await,
         // F794a：SMB2（NTLMSSP 挑战 + user/domain/ws 捕获 + 拒绝）
         "smb" => smb::smb_session(&mut stream).await,
         "telnet" => protocol::telnet_session(&mut stream, &ctx.fp.telnet_greeting).await,

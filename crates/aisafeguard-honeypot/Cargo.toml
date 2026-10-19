@@ -19,6 +19,13 @@ toml.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+# F799：RDP NLA 凭证捕获——真客户端协商 NLA 后发 TLS ClientHello，CredSSP 在
+# TLS 里走。自签证书（rcgen，fed 同款 ring 栈）+ tokio-rustls 服务端；rustls
+# 显式 ring provider（不走 aws-lc 默认，0.3.6 同款坑），蜜罐内自包含配置。
+rcgen.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+time.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # 文件系统蜜饵只读监听（H210 v1 仅 Linux；Windows 用户态无「文件被读取」对等 API）

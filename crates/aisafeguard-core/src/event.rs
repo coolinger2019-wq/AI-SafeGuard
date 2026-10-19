@@ -89,7 +89,7 @@ pub enum SecurityEvent {
     CredentialObserved {
         ts: i64,
         listener: String,
-        /// 协议 kind（ssh | telnet | http | mysql | redis）
+        /// 协议 kind（ssh | telnet | http | mysql | redis | smb | rdp）
         kind: String,
         port: u16,
         remote_ip: String,
