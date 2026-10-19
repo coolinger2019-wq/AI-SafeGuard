@@ -494,7 +494,7 @@ mod tests {
         pdu.extend_from_slice(&neg);
         let li = pdu.len() as u8;
         let mut data = vec![0x03, 0x00];
-        data.extend_from_slice(&((pdu.len() + 1) as u16).to_be_bytes());
+        data.extend_from_slice(&((pdu.len() + 5) as u16).to_be_bytes()); // TPKT 长度含 4 字节头（RFC1006）
         data.push(li);
         data.extend_from_slice(&pdu);
 
