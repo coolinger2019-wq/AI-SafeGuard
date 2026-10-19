@@ -171,7 +171,7 @@
 
 ## 第四批：AI 调参者（0.7.2）
 
-### F760 AI 策略调参建议管道 — 规模 L
+### F760 AI 策略调参建议管道 — 规模 L ✅（2026-10-19/20 交付：Track B 自审工单管道+评审决策 UI 双端 + Track A 治理三动作走 proposals 管道——promote/retire 真操作、tune 记账待人工（拍板：机器永不写 config）；7d 节奏+30d 冷却+fed 拒收全部就位；处置路径判定 config/code/ops + config_reference 校验）
 
 **范围（In）**
 - proposal schema 扩展三类 action（与 block/credential_spray 同一严格校验管道）：`promote_rule{rule_id}` / `retire_rule{rule_id}` / `tune_detection{param,value}`——param 白名单枚举（扫描端口数/窗口/频次阈值/TTL 等），枚举外整条作废。
