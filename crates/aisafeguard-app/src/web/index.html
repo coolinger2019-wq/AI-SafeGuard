@@ -129,6 +129,7 @@
     <button data-tab="dash" class="on">仪表盘</button>
     <button data-tab="events">事件</button>
     <button data-tab="prop">建议</button>
+    <button data-tab="review">评审</button>
     <button data-tab="fw">防火墙</button>
     <button data-tab="cfg">配置</button>
   </nav>
@@ -239,6 +240,11 @@
       <table id="prop"></table>
     </div>
 
+    <div id="tab-review" hidden>
+      <p class="hint" style="margin-bottom:8px"><span data-i18n="sg.hint">系统每日自审产生的改进建议——在这里做采纳/拒绝决策，进度全程留痕。md 快照在节点 data/suggestions/。</span>
+        <button class="act" id="sg-run" style="margin-left:12px"><span data-i18n="立即自审">立即自审</span></button></p>
+      <table id="sg"></table>
+    </div>
     <div id="tab-cfg" hidden>
       <div id="cfg-tools">
         <button class="act" id="cfg-save">保存</button>
@@ -354,7 +360,15 @@ const EN = {
   '测试连接中（最长 30 秒）……': 'Testing connection (up to 30 s)...',
   'AI 连接正常 — ': 'AI connection OK — ',
   'AI 连接失败：': 'AI connection failed: ',
-  'fw.hint': 'Active firewall block rules (AI trial / auto / manual / org origins), auto-refresh every 3s.',
+    'sg.hint': 'Improvement suggestions from the daily self-review — decide adopt/reject here; progress fully tracked. MD snapshots live in node data/suggestions/.',
+  '评审': 'Review',
+  '立即自审': 'Run review now',
+  '待决策': 'pending', '已采纳': 'adopted', '已拒绝': 'rejected', '已完成': 'completed',
+  '采纳': 'Adopt', '拒绝': 'Reject', '完成': 'Done',
+  '采纳去向（ROADMAP/改配置/立即处理）：': 'Destination (ROADMAP / config change / now): ',
+  '拒绝理由：': 'Reason for rejection: ',
+  '完成记录：': 'Completion note: ',
+'fw.hint': 'Active firewall block rules (AI trial / auto / manual / org origins), auto-refresh every 3s.',
   'ev.hint': 'Auto-refresh every 3s. Click a row to expand payload.',
   'prop.hint': 'AI slow path: evidence → proposal → human confirm. Apply = grey TTL ban (auto-unban at expiry).',
   'cfg.hint': 'Edits the raw config.toml on the node; server validates before saving, invalid is rejected. Items marked hot-reload take effect on save; others need a service restart.',
@@ -548,9 +562,10 @@ $('logout').onclick = logout;
 document.querySelectorAll('nav button').forEach((b) => {
   b.onclick = () => {
     document.querySelectorAll('nav button').forEach((x) => x.classList.toggle('on', x === b));
-    ['dash', 'events', 'prop', 'fw', 'cfg'].forEach((t) => { $('tab-' + t).hidden = t !== b.dataset.tab; });
+    ['dash', 'events', 'prop', 'review', 'fw', 'cfg'].forEach((t) => { $('tab-' + t).hidden = t !== b.dataset.tab; });
     if (b.dataset.tab === 'cfg' && !$('cfg').dataset.loaded) loadCfg();
     if (b.dataset.tab === 'events') refreshEvents(); // 别等下个轮询周期
+if (b.dataset.tab === 'review') loadSuggestions();
     if (b.dataset.tab === 'prop') refreshProp();
     if (b.dataset.tab === 'fw') refreshFw();
   };
@@ -921,6 +936,47 @@ function parseExempt(v) {
   if (!inner) return [];
   return [...inner[1].matchAll(/"([^"]*)"/g)].map((m) => m[1]);
 }
+/* ---------- F760-B 评审页 ---------- */
+let sgCache = [];
+async function loadSuggestions() {
+  const r = await fetch('/api/suggestions', { headers: { 'Authorization': 'Bearer ' + token } });
+  if (r.status === 401) return logout();
+  const rows = await r.json().catch(() => []);
+  sgCache = rows;
+  const stMap = { pending: ['待决策', 'badge warn'], adopted: ['已采纳', 'badge ok'], rejected: ['已拒绝', 'badge'], completed: ['已完成', 'badge ok'] };
+  $('sg').innerHTML = '<tr><th>日期</th><th>类别</th><th>优先</th><th>标题</th><th>状态</th><th>决策备注</th><th>操作</th></tr>'
+    + rows.map((x) => {
+        const [st, cls] = stMap[x.status] || [x.status, ''];
+        let ops = '';
+        if (x.status === 'pending') ops = `<button class="act" data-act="adopted" data-id="${x.id}">${t('采纳')}</button> <button class="act" data-act="rejected" data-id="${x.id}">${t('拒绝')}</button>`;
+        else if (x.status === 'adopted') ops = `<button class="act" data-act="completed" data-id="${x.id}">${t('完成')}</button>`;
+        return `<tr><td>${x.day}</td><td>${x.category}</td><td>${x.priority}</td><td title="${esc(x.evidence)}（建议动作：${esc(x.action)}）">${esc(x.title)}</td><td><span class="${cls}">${t(st)}</span></td><td>${esc(x.note)}</td><td>${ops}</td></tr>`;
+      }).join('');
+}
+document.querySelector('#sg').addEventListener('click', async (e) => {
+  const b = e.target.closest('button[data-act]');
+  if (!b) return;
+  const act = b.dataset.act;
+  const ask = act === 'rejected' ? t('拒绝理由：') : act === 'adopted' ? t('采纳去向（ROADMAP/改配置/立即处理）：') : t('完成记录：');
+  const note = prompt(ask);
+  if (note === null) return;
+  const r = await fetch(`/api/suggestions/${b.dataset.id}/status`, {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: act, note }),
+  });
+  if (r.status === 401) return logout();
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) return alert(j.error || 'HTTP ' + r.status);
+  loadSuggestions();
+});
+$('sg-run').onclick = async () => {
+  const r = await fetch('/api/review/run', { method: 'POST', headers: { 'Authorization': 'Bearer ' + token } });
+  if (r.status === 401) return logout();
+  const j = await r.json().catch(() => ({}));
+  if (j.message) alert(j.message);
+  setTimeout(loadSuggestions, 15000); // AI 审完需要点时间，15s 后刷新
+};
 function showPolMsg(cls, text) { const m = $('pol-msg'); m.className = cls; m.textContent = text; }
 // AI 连接探针：不发真实分析（不入 ai_runs 账本），服务端 30s 内返回连通状态
 $('pol-test').onclick = async () => {

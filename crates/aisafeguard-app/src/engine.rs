@@ -1021,9 +1021,13 @@ impl EngineHandle {
                 let cfg = eng.config().ai;
                 if cfg.enabled {
                     match crate::review::run_review(&eng).await {
-                        Ok(path) => eng.bus.publish(SecurityEvent::engine(
+                        Ok((path, fresh)) => eng.bus.publish(SecurityEvent::engine(
                             "info",
-                            format!("系统自审完成，评审工单已生成：{}", path.display()),
+                            format!(
+                                "系统自审完成：新建议 {} 条，评审工单 {}（评审页可决策）",
+                                fresh,
+                                path.display()
+                            ),
                         )),
                         Err(e) => tracing::info!("系统自审跳过/失败（每日重试）: {e}"),
                     }
@@ -1031,6 +1035,24 @@ impl EngineHandle {
                 tokio::time::sleep(Duration::from_secs(86_400)).await;
             }
         });
+    }
+    /// 手动触发一轮自审（Web 评审页「立即自审」）；完成时事件流通告。
+    pub fn trigger_review(self: &Arc<Self>) -> bool {
+        let eng = Arc::clone(self);
+        self.rt.spawn(async move {
+            match crate::review::run_review(&eng).await {
+                Ok((path, fresh)) => eng.bus.publish(SecurityEvent::engine(
+                    "info",
+                    format!(
+                        "系统自审完成：新建议 {} 条，评审工单 {}",
+                        fresh,
+                        path.display()
+                    ),
+                )),
+                Err(e) => tracing::info!("手动自审失败: {e}"),
+            }
+        });
+        true
     }
     pub fn save_config(&self, new_cfg: AppConfig) -> Result<()> {
         let old = self.config();

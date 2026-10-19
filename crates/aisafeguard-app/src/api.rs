@@ -75,6 +75,9 @@ pub async fn serve(engine: Arc<EngineHandle>) {
         .route("/api/ai/runs", get(ai_runs))
         .route("/api/ai/analyze", post(ai_analyze))
         .route("/api/ai/test", post(ai_test))
+        .route("/api/suggestions", get(list_suggestions_api))
+        .route("/api/suggestions/{id}/status", post(decide_suggestion))
+        .route("/api/review/run", post(run_review_api))
         .layer(middleware::from_fn_with_state(state.clone(), auth));
     let app = Router::new()
         .route("/", get(web_console))
@@ -548,6 +551,47 @@ async fn ai_test(State(s): State<AppState>) -> Response {
     }
 }
 
+/// F760-B 自审建议列表（评审页）。
+async fn list_suggestions_api(State(s): State<AppState>) -> Response {
+    match s.engine.store.list_suggestions(200) {
+        Ok(rows) => Json(rows).into_response(),
+        Err(e) => err_resp(e),
+    }
+}
+
+/// 评审决策：pending→采纳/拒绝、采纳→完成（状态机在 store 层校验）。
+#[derive(Deserialize)]
+struct SuggestionDecision {
+    status: String,
+    #[serde(default)]
+    note: String,
+}
+
+async fn decide_suggestion(
+    State(s): State<AppState>,
+    Path(id): Path<i64>,
+    Json(d): Json<SuggestionDecision>,
+) -> Response {
+    match s
+        .engine
+        .store
+        .set_suggestion_status(id, d.status.trim(), d.note.trim())
+    {
+        Ok(true) => Json(json!({ "ok": true })).into_response(),
+        Ok(false) => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "状态转换不合法（待决策→采纳/拒绝；已采纳→完成）" })),
+        )
+            .into_response(),
+        Err(e) => err_resp(e),
+    }
+}
+
+/// 手动触发一轮自审（完成时事件流通告）。
+async fn run_review_api(State(s): State<AppState>) -> Response {
+    s.engine.trigger_review();
+    Json(json!({ "ok": true, "message": "自审已开始，完成后事件流通告" })).into_response()
+}
 async fn get_exposure(State(s): State<AppState>) -> Response {
     match s.engine.latest_exposure() {
         Ok(Some(snap)) => Json(snap).into_response(),

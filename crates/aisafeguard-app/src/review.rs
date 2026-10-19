@@ -169,6 +169,15 @@ pub fn build_digest(eng: &crate::engine::EngineHandle, since: i64) -> String {
     lines.join("\n")
 }
 
+/// 主题指纹（category+title）——同主题跨轮评审不重复建行。
+fn fingerprint(category: &str, title: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    category.hash(&mut h);
+    title.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
 /// 评审工单文件路径：<data_dir>/suggestions/YYYY-MM-DD.md（同日重跑覆盖）。
 pub fn review_path(data_dir: &std::path::Path, day: time::Date) -> PathBuf {
     let name = format!(
@@ -215,7 +224,7 @@ pub fn render_review(
 /// 任何失败只记日志不刷事件流（每日任务，失败明天再来）。
 pub async fn run_review(
     eng: &std::sync::Arc<crate::engine::EngineHandle>,
-) -> Result<std::path::PathBuf> {
+) -> Result<(std::path::PathBuf, usize)> {
     let cfg = eng.config();
     if !cfg.ai.enabled {
         return Err(Error::Ai("AI 未启用，自审随 AI 开关".into()));
@@ -246,10 +255,36 @@ pub async fn run_review(
     let dir = cfg.data_dir().join("suggestions");
     std::fs::create_dir_all(&dir).map_err(|e| Error::Ai(format!("建目录失败: {e}")))?;
     let today = time::OffsetDateTime::now_utc().date();
+    let day = format!(
+        "{:04}-{:02}-{:02}",
+        today.year(),
+        u8::from(today.month()),
+        today.day()
+    );
+    let mut fresh = 0usize;
+    for sg in &suggestions {
+        let fp = fingerprint(&sg.category, &sg.title);
+        if eng
+            .store
+            .insert_suggestion(
+                &day,
+                &fp,
+                &sg.category,
+                &sg.priority,
+                &sg.title,
+                &sg.evidence,
+                &sg.action,
+                &cfg.ai.model,
+            )
+            .map_err(|e| Error::Ai(format!("建议入库失败: {e}")))?
+        {
+            fresh += 1;
+        }
+    }
     let path = review_path(&cfg.data_dir(), today);
     let md = render_review(&cfg.ai.model, since_days, &analysis, &suggestions);
     std::fs::write(&path, md).map_err(|e| Error::Ai(format!("写评审工单失败: {e}")))?;
-    Ok(path)
+    Ok((path, fresh))
 }
 
 #[cfg(test)]

@@ -165,6 +165,23 @@ pub struct ValueMetrics {
     pub auto_blocks: i64,
 }
 
+/// F760-B 自审建议行（评审工单的结构化形态；md 快照另存）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuggestionRow {
+    pub id: i64,
+    pub created_ts: i64,
+    pub day: String,
+    pub category: String,
+    pub priority: String,
+    pub title: String,
+    pub evidence: String,
+    pub action: String,
+    pub model: String,
+    /// pending | adopted | rejected | completed
+    pub status: String,
+    pub note: String,
+    pub decided_ts: Option<i64>,
+}
 /// F300 组织事件账本行（org_events）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrgEventRow {
@@ -326,6 +343,23 @@ CREATE TABLE IF NOT EXISTS fp_feedback (
     note       TEXT NOT NULL DEFAULT '',
     local_port INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS suggestions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_ts  INTEGER NOT NULL,
+    day         TEXT NOT NULL,
+    fingerprint TEXT NOT NULL UNIQUE,
+    category    TEXT NOT NULL,
+    priority    TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    evidence    TEXT NOT NULL DEFAULT '',
+    action      TEXT NOT NULL DEFAULT '',
+    model       TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT 'pending',
+    note        TEXT NOT NULL DEFAULT '',
+    decided_ts  INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_suggestions_status ON suggestions(status);
 "#;
 
 /// 事件链哈希：H(prev_hash | 规范化行)。规范化用 serde_json 默认的字典序键，
@@ -1250,6 +1284,80 @@ impl Store {
                 |r| r.get(0),
             )
             .map_err(|e| Error::Store(e.to_string()))
+    }
+    /// ---------- F760-B 系统自审建议（评审工单）----------
+
+    /// 入库一条自审建议；fingerprint 去重（同主题重复评审不重复建行）。
+    /// 返回是否新建（false = 已存在）。
+    pub fn insert_suggestion(
+        &self,
+        day: &str,
+        fingerprint: &str,
+        category: &str,
+        priority: &str,
+        title: &str,
+        evidence: &str,
+        action: &str,
+        model: &str,
+    ) -> Result<bool> {
+        let n = self
+            .lock()?
+            .execute(
+                "INSERT OR IGNORE INTO suggestions(created_ts, day, fingerprint, category, priority, title, evidence, action, model) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![aisafeguard_core::now_ts(), day, fingerprint, category, priority, title, evidence, action, model],
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(n == 1)
+    }
+
+    pub fn list_suggestions(&self, limit: u32) -> Result<Vec<SuggestionRow>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT id, created_ts, day, category, priority, title, evidence, action, model, status, note, decided_ts FROM suggestions ORDER BY id DESC LIMIT ?1")
+            .map_err(|e| Error::Store(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![limit], |r| {
+                Ok(SuggestionRow {
+                    id: r.get(0)?,
+                    created_ts: r.get(1)?,
+                    day: r.get(2)?,
+                    category: r.get(3)?,
+                    priority: r.get(4)?,
+                    title: r.get(5)?,
+                    evidence: r.get(6)?,
+                    action: r.get(7)?,
+                    model: r.get(8)?,
+                    status: r.get(9)?,
+                    note: r.get(10)?,
+                    decided_ts: r.get(11)?,
+                })
+            })
+            .map_err(|e| Error::Store(e.to_string()))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| Error::Store(e.to_string()))
+    }
+
+    /// 状态机：pending→adopted/rejected；adopted→completed。其余转换拒绝（返回 false）。
+    /// note 记录决策去向/理由，decided_ts 记最后决策时间——进度留痕。
+    pub fn set_suggestion_status(&self, id: i64, status: &str, note: &str) -> Result<bool> {
+        let allowed_from = match status {
+            "adopted" | "rejected" => vec!["pending"],
+            "completed" => vec!["adopted"],
+            _ => return Ok(false),
+        };
+        let marks = allowed_from
+            .iter()
+            .map(|f| format!("'{f}'"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "UPDATE suggestions SET status = ?1, note = ?2, decided_ts = ?3 WHERE id = ?4 AND status IN ({marks})"
+        );
+        let n = self
+            .lock()?
+            .execute(&sql, params![status, note, aisafeguard_core::now_ts(), id])
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(n == 1)
     }
 
     pub fn set_proposal_status(
