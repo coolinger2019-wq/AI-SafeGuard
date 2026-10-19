@@ -2466,6 +2466,15 @@ fn auto_apply_policy_ok(
     if action != "block" || !cfg.ai.auto_apply {
         return false;
     }
+    // 已知测绘/扫描服务（F760 首片）：无害背景声不该被自动封——建议照常
+    // 产出等人工，自动应用直接拒绝。口径④ 实证：3/40 抽样错误全属此类
+    if remote_ip
+        .parse::<IpAddr>()
+        .map(|ip| aisafeguard_core::scanner_nets::is_known_scanner(ip))
+        .unwrap_or(false)
+    {
+        return false;
+    }
     // 已生效去重（F795 数据驱动）：同目标已有封禁规则时无需重复应用——
     // 覆盖回扫路径（存量 pending 在目标已被封后不再重复建规则）
     if eng

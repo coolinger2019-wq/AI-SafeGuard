@@ -5,6 +5,7 @@ pub mod canary;
 pub mod config;
 pub mod error;
 pub mod event;
+pub mod scanner_nets;
 pub mod secrets;
 
 use std::net::IpAddr;

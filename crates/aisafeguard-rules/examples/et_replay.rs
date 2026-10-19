@@ -58,11 +58,7 @@ fn main() {
     if !dropped.is_empty() {
         let repaired = rules_path.with_extension("repaired.rules");
         std::fs::write(&repaired, lines.join("\n")).expect("写 repaired");
-        println!(
-            "整包修复: 剔 {} 行 → {}",
-            dropped.len(),
-            repaired.display()
-        );
+        println!("整包修复: 剔 {} 行 → {}", dropped.len(), repaired.display());
         for d in &dropped {
             println!("  {d}");
         }
@@ -89,13 +85,18 @@ fn main() {
         // 极简字段抽取（导出格式固定，值均为无转义安全字符）
         let grab = |key: &str| -> String {
             let pat = format!("\"{key}\":");
-            let i = line.find(&pat).unwrap_or_else(|| panic!("缺字段 {key}: {line}"));
+            let i = line
+                .find(&pat)
+                .unwrap_or_else(|| panic!("缺字段 {key}: {line}"));
             let rest = &line[i + pat.len()..];
             let v = rest.trim_start();
             if let Some(stripped) = v.strip_prefix('"') {
                 stripped.split('"').next().unwrap_or("").to_string()
             } else {
-                v.split(|c: char| !c.is_ascii_digit()).next().unwrap_or("0").to_string()
+                v.split(|c: char| !c.is_ascii_digit())
+                    .next()
+                    .unwrap_or("0")
+                    .to_string()
             }
         };
         let ip: IpAddr = grab("ip").parse().expect("ip");
