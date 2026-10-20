@@ -377,9 +377,13 @@ CREATE INDEX IF NOT EXISTS idx_suggestions_status ON suggestions(status);
 
 /// 事件链哈希：H(prev_hash | 规范化行)。规范化用 serde_json 默认的字典序键，
 /// 同一行数据在任何平台重算结果一致。
-/// prune 级联重链的行元组（id + canonical_event 所需字段）
-type PruneRow = (i64, i64, String, String, String, i64, String, String);
+/// v2（审计 run-1 B1）：canonical 补齐 http_hint/tls_fp/tls_ja4/rule_id/
+/// interaction 全部证据列——旧 v1 只链 7 列，未被链住的证据列可被原地改写
+/// 而 verify-log 照样报完整。升级由 ensure_chain_v2 一次性全量重链。
+/// prune 级联重链的行元组（id + canonical_event 所需 12 字段）
+type PruneRow = (i64, i64, String, String, String, i64, String, String, String, String, String, String, String);
 
+#[allow(clippy::too_many_arguments)] // 12 字段并列比拆结构体直白（链规范读得懂）
 fn canonical_event(
     ts: i64,
     kind: &str,
@@ -388,14 +392,24 @@ fn canonical_event(
     remote_port: i64,
     summary: &str,
     payload: &str,
+    http_hint: &str,
+    tls_fp: &str,
+    tls_ja4: &str,
+    rule_id: &str,
+    interaction: &str,
 ) -> String {
     serde_json::json!({
+        "http_hint": http_hint,
+        "interaction": interaction,
         "kind": kind,
         "listener": listener,
         "payload": payload,
         "remote_ip": remote_ip,
         "remote_port": remote_port,
+        "rule_id": rule_id,
         "summary": summary,
+        "tls_fp": tls_fp,
+        "tls_ja4": tls_ja4,
         "ts": ts,
     })
     .to_string()
@@ -417,8 +431,9 @@ pub struct Store {
     conn: Mutex<Connection>,
 }
 
-/// 迁移补链的行数据 (id, ts, kind, listener, remote_ip, remote_port, summary, payload)
-type ChainSeedRow = (i64, i64, String, String, String, i64, String, String);
+/// 迁移/重链的行数据 (id, ts, kind, listener, remote_ip, remote_port, summary,
+/// payload, http_hint, tls_fp, tls_ja4, rule_id, interaction)
+type ChainSeedRow = (i64, i64, String, String, String, i64, String, String, String, String, String, String, String);
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
@@ -437,6 +452,7 @@ impl Store {
             conn: Mutex::new(conn),
         };
         store.migrate_pre_0_2()?;
+        store.ensure_chain_v2()?;
         Ok(store)
     }
 
@@ -476,60 +492,105 @@ impl Store {
                 |r| r.get(0),
             )
             .map_err(|e| Error::Store(e.to_string()))?;
-        if seeded > 0 {
+        if seeded == 0 {
+            self.rechain_all(&conn)?;
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('chain_seeded', '1') ON CONFLICT(key) DO NOTHING",
+                [],
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// 哈希链 v2（审计 run-1 B1）：canonical_event 补齐 http_hint/tls_fp/tls_ja4/
+    /// rule_id/interaction 五个后加证据列——v1 只链 7 列，未链住的列可被原地
+    /// 改写而 verify-log 照样报完整。v1 哈希与 v2 规范不兼容，升级一次性全量
+    /// 重链（低频 O(n)）；meta chain_ver 标记版本。v1 时代的归档/导出需按
+    /// 当期口径校验，不能与 v2 混算。
+    fn ensure_chain_v2(&self) -> Result<()> {
+        let conn = self.lock()?;
+        let ver: Option<String> = conn
+            .query_row("SELECT value FROM meta WHERE key = 'chain_ver'", [], |r| r.get(0))
+            .ok();
+        if ver.as_deref() == Some("2") {
             return Ok(());
         }
-        let unchained: i64 = conn
-            .query_row("SELECT COUNT(*) FROM events WHERE hash = ''", [], |r| {
-                r.get(0)
-            })
-            .map_err(|e| Error::Store(e.to_string()))?;
-        if unchained > 0 {
-            let rows: Vec<ChainSeedRow> = {
-                let mut stmt = conn
-                    .prepare("SELECT id, ts, kind, listener, remote_ip, remote_port, summary, payload FROM events ORDER BY id")
-                    .map_err(|e| Error::Store(e.to_string()))?;
-                stmt.query_map([], |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                        r.get(6)?,
-                        r.get(7)?,
-                    ))
-                })
-                .map_err(|e| Error::Store(e.to_string()))?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|e| Error::Store(e.to_string()))?
-            };
-            let mut prev = String::new();
-            for (id, ts, kind, listener, remote_ip, remote_port, summary, payload) in rows {
-                let canonical = canonical_event(
-                    ts,
-                    &kind,
-                    &listener,
-                    &remote_ip,
-                    remote_port,
-                    &summary,
-                    &payload,
-                );
-                let h = chain_hash(&prev, &canonical);
-                conn.execute(
-                    "UPDATE events SET prev_hash = ?2, hash = ?3 WHERE id = ?1",
-                    params![id, prev, h],
-                )
-                .map_err(|e| Error::Store(e.to_string()))?;
-                prev = h;
-            }
-        }
+        self.rechain_all(&conn)?;
         conn.execute(
-            "INSERT INTO meta (key, value) VALUES ('chain_seeded', '1') ON CONFLICT(key) DO NOTHING",
+            "INSERT INTO meta (key, value) VALUES ('chain_ver', '2') ON CONFLICT(key) DO UPDATE SET value='2'",
             [],
         )
         .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(())
+    }
+
+    /// 全量重链（v1 补链与 v2 升级共用）：ORDER BY id、链起点 prev_hash=''。
+    fn rechain_all(&self, conn: &Connection) -> Result<()> {
+        let rows: Vec<ChainSeedRow> = {
+            let mut stmt = conn
+                .prepare("SELECT id, ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, tls_ja4, rule_id, interaction FROM events ORDER BY id")
+                .map_err(|e| Error::Store(e.to_string()))?;
+            stmt.query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                    r.get(9)?,
+                    r.get(10)?,
+                    r.get(11)?,
+                    r.get(12)?,
+                ))
+            })
+            .map_err(|e| Error::Store(e.to_string()))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| Error::Store(e.to_string()))?
+        };
+        let mut prev = String::new();
+        for (
+            id,
+            ts,
+            kind,
+            listener,
+            remote_ip,
+            remote_port,
+            summary,
+            payload,
+            http_hint,
+            tls_fp,
+            tls_ja4,
+            rule_id,
+            interaction,
+        ) in rows
+        {
+            let canonical = canonical_event(
+                ts,
+                &kind,
+                &listener,
+                &remote_ip,
+                remote_port,
+                &summary,
+                &payload,
+                &http_hint,
+                &tls_fp,
+                &tls_ja4,
+                &rule_id,
+                &interaction,
+            );
+            let h = chain_hash(&prev, &canonical);
+            conn.execute(
+                "UPDATE events SET prev_hash = ?2, hash = ?3 WHERE id = ?1",
+                params![id, prev, h],
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+            prev = h;
+        }
         Ok(())
     }
 
@@ -653,6 +714,11 @@ impl Store {
             remote_port,
             &summary,
             &payload,
+            &http_hint,
+            &tls_fp,
+            &tls_ja4,
+            &rule_id,
+            &interaction,
         );
         let hash = chain_hash(&prev_hash, &canonical);
         conn.execute(
@@ -900,7 +966,7 @@ impl Store {
             // O(n) 可接受。
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, ts, kind, listener, remote_ip, remote_port, summary, payload                      FROM events WHERE id > ?1 ORDER BY id",
+                    "SELECT id, ts, kind, listener, remote_ip, remote_port, summary, payload, http_hint, tls_fp, tls_ja4, rule_id, interaction FROM events WHERE id > ?1 ORDER BY id",
                 )
                 .map_err(|e| Error::Store(e.to_string()))?;
             let rows: Vec<PruneRow> = stmt
@@ -914,6 +980,11 @@ impl Store {
                         r.get(5)?,
                         r.get(6)?,
                         r.get(7)?,
+                        r.get(8)?,
+                        r.get(9)?,
+                        r.get(10)?,
+                        r.get(11)?,
+                        r.get(12)?,
                     ))
                 })
                 .map_err(|e| Error::Store(e.to_string()))?
@@ -921,8 +992,24 @@ impl Store {
                 .map_err(|e| Error::Store(e.to_string()))?;
             drop(stmt);
             let mut prev = String::new();
-            for (i, (id, ts, kind, listener, remote_ip, remote_port, summary, payload)) in
-                rows.into_iter().enumerate()
+            for (
+                i,
+                (
+                    id,
+                    ts,
+                    kind,
+                    listener,
+                    remote_ip,
+                    remote_port,
+                    summary,
+                    payload,
+                    http_hint,
+                    tls_fp,
+                    tls_ja4,
+                    rule_id,
+                    interaction,
+                ),
+            ) in rows.into_iter().enumerate()
             {
                 let canonical = canonical_event(
                     ts,
@@ -932,6 +1019,11 @@ impl Store {
                     remote_port,
                     &summary,
                     &payload,
+                    &http_hint,
+                    &tls_fp,
+                    &tls_ja4,
+                    &rule_id,
+                    &interaction,
                 );
                 let hash = chain_hash(&prev, &canonical);
                 if i == 0 {
@@ -978,6 +1070,11 @@ impl Store {
                 row.remote_port as i64,
                 &row.summary,
                 &row.payload,
+                &row.http_hint,
+                &row.tls_fp,
+                &row.tls_ja4,
+                &row.rule_id,
+                &row.interaction,
             );
             let expect = if row.prev_hash.is_empty() {
                 chain_hash("", &canonical)
@@ -1226,6 +1323,22 @@ impl Store {
             )
             .map_err(|e| Error::Store(e.to_string()))?;
         Ok(n == 1)
+    }
+
+    /// 启动清扫（审计 run-1 F2）：进程崩溃可能把建议遗留在 applying——
+    /// 认领是进程内语义，重启后无人持有；启动时全部退回 pending。
+    pub fn sweep_stuck_applying(&self) -> Result<usize> {
+        let n = self
+            .lock()?
+            .execute(
+                "UPDATE proposals SET status = 'pending' WHERE status = 'applying'",
+                [],
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        if n > 0 {
+            tracing::info!("启动清扫：{n} 条建议从 applying 退回 pending");
+        }
+        Ok(n)
     }
 
     pub fn list_proposals(&self, status: Option<&str>, limit: u32) -> Result<Vec<ProposalRow>> {
@@ -2366,6 +2479,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         Store::open(&dir.join("t.db")).unwrap()
+    }
+
+    #[test]
+    fn chain_v2_covers_evidence_columns() {
+        // 审计 run-1 B1：http_hint/tls_fp/tls_ja4/rule_id/interaction 进入
+        // canonical——原地改写任何一列必须断链（v1 时代 verify-log 会漏报）
+        let store = tmp_store("chainv2");
+        hit(&store, "203.0.113.7", "SSH probe");
+        assert!(store.verify_chain().unwrap().ok);
+        // 另开连接原地改一列（模拟持库写权限者篡改证据）
+        let dir = std::env::temp_dir().join(format!(
+            "aisafeguard-test-chainv2-{}",
+            std::process::id()
+        ));
+        let tamper = rusqlite::Connection::open(dir.join("t.db")).unwrap();
+        tamper.execute("UPDATE events SET interaction = '伪转录'", []).unwrap();
+        let report = store.verify_chain().unwrap();
+        assert!(!report.ok, "v2 必须检出行改写: {report:?}");
+    }
+
+    #[test]
+    fn sweep_stuck_applying_recovers() {
+        // 审计 run-1 F2：崩溃遗留的 applying 启动时退回 pending（可再处置）
+        let store = tmp_store("sweep");
+        let id = store
+            .insert_proposal(
+                "ai", "block", "high", "in", "tcp", "203.0.113.9", None, None, "r", "a", "", "",
+                "",
+            )
+            .unwrap();
+        assert!(
+            store
+                .set_proposal_status_if(id, "pending", "applying", None)
+                .unwrap()
+        );
+        assert_eq!(store.sweep_stuck_applying().unwrap(), 1);
+        assert_eq!(store.sweep_stuck_applying().unwrap(), 0, "幂等");
+        let rows = store.list_proposals(Some("pending"), 10).unwrap();
+        assert!(rows.iter().any(|r| r.id == id));
     }
 
     /// H200 验收（API 全字段扫描）：事件 API 的任何行都不携带口令明文或

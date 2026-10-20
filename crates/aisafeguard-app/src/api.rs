@@ -110,14 +110,44 @@ async fn auth(
     req: Request,
     next: Next,
 ) -> Response {
+    // 审计 run-1 F1：常量时间比较——Rust str 相等是 memcmp 早退，回环上任何
+    // 本地进程都可无凭证打 /api/*；244 位 token 的时序侧信道大概率不可利用，
+    // 但常量时间比较把这一类风险整体关死
     let ok = headers
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v == format!("Bearer {}", state.engine.token));
+        .is_some_and(|v| {
+            ct_eq(v.as_bytes(), format!("Bearer {}", state.engine.token).as_bytes())
+        });
     if ok {
         next.run(req).await
     } else {
         StatusCode::UNAUTHORIZED.into_response()
+    }
+}
+
+/// 常量时间字节比较（无逐字节早退；长度不等仍早退——长度本身不是秘密）
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::ct_eq;
+
+    #[test]
+    fn ct_eq_matches_and_rejects() {
+        assert!(ct_eq(b"Bearer tok", b"Bearer tok"));
+        assert!(!ct_eq(b"Bearer tok", b"Bearer toj"), "差一位必须拒");
+        assert!(!ct_eq(b"Bearer tok", b"Bearer"), "长度差必须拒");
+        assert!(!ct_eq(b"", b"x"));
+        assert!(ct_eq(b"", b""));
     }
 }
 

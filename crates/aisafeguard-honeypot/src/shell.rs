@@ -12,7 +12,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aisafeguard_core::config::ShellConfig;
 use aisafeguard_core::event::ShellStep;
@@ -28,6 +28,10 @@ const MAX_CMD_CHARS: usize = 4096;
 
 /// 交互会话空闲超时：超时由 russh 断开，防自动化脚本无限挂会话
 const SHELL_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// 交互会话总时限（审计 run-1 D4）：空闲超时只管「不发数据」，持续发
+/// 空回车/垃圾字节可无限续命并占满交互名额——总时限兜底，到期强断。
+const SHELL_MAX_SESSION: Duration = Duration::from_secs(1800);
 
 // ---------- 运行时装配（H104） ----------
 
@@ -130,6 +134,8 @@ struct ShellShared {
     auth_user: Mutex<String>,
     /// 认证口令（0.5.10 H200）：只在此暂存，会话出口哈希后即丢
     auth_pw: Mutex<String>,
+    /// 会话起点（审计 run-1 D4 总时限基准）
+    started: Instant,
 }
 
 /// 在已 accept 的 TCP 流上驱动一次 SSH 假 Shell 会话。
@@ -147,6 +153,7 @@ pub(crate) async fn ssh_shell_session(
         line: Mutex::new(String::new()),
         auth_user: Mutex::new(String::new()),
         auth_pw: Mutex::new(String::new()),
+        started: Instant::now(),
         rt,
     });
     let handler = SshShellHandler {
@@ -261,6 +268,7 @@ pub(crate) async fn telnet_shell_session(
     canary: Option<&crate::canary::CanaryState>,
 ) -> SessionOutcome {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let started = std::time::Instant::now();
     let mut shell = ShellSession::new(rt.username.clone(), rt.hostname.clone(), rt.max_commands)
         .with_decoys(ShellSession::build_decoys(canary, &rt.username));
     let mut line_buf: Vec<u8> = Vec::new();
@@ -325,6 +333,11 @@ pub(crate) async fn telnet_shell_session(
     ));
 
     loop {
+        // 总时限兜底（审计 run-1 D4）：空回车绕过命令计数与空闲计时
+        if started.elapsed() > SHELL_MAX_SESSION {
+            reply!("\r\n*** session limit reached, closing ***\r\n");
+            break;
+        }
         let line = match read_line(&mut stream, &mut line_buf, &mut raw).await {
             Ok(Some(l)) => l,
             _ => break,
@@ -451,6 +464,15 @@ impl Handler for SshShellHandler {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        // 总时限兜底（审计 run-1 D4）：空闲超时可被持续流量骗过，
+        // 到期强断，不因输入内容差异产生例外路径
+        if self.shared.started.elapsed() > SHELL_MAX_SESSION {
+            let _ = session
+                .data(channel, b"\r\n*** session limit reached, closing ***\r\n".to_vec())
+                .map_err(|e: russh::Error| e);
+            let _ = session.eof(channel);
+            return Err(russh::Error::Disconnect);
+        }
         // PTY 行组装：回显可见字符,退格删字符,\r 提交行进仿真层
         let mut line = self.shared.line.lock().await;
         for &b in data {
@@ -491,7 +513,9 @@ impl Handler for SshShellHandler {
                     let prompt = self.shared.session.lock().await.prompt();
                     session.data(channel, prompt.into_bytes())?;
                 }
-                0x20..=0x7e | b'\t' => {
+                // 未提交行缓冲上限（审计 run-1 D3）：MAX_CMD_CHARS 只在提交时
+                // 截断拦不住 here 无回车的无尽流——中段即停收，对齐 telnet 路径
+                b @ (0x20..=0x7e | b'\t') if line.len() < MAX_CMD_CHARS => {
                     line.push(b as char);
                     session.data(channel, vec![b])?;
                 }

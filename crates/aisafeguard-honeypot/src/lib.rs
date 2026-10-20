@@ -30,7 +30,7 @@ use tokio::io::AsyncReadExt;
 
 pub use http::{
     DECOY_PATHS, content_length, http_request_complete, is_decoy_path, is_login_path,
-    redact_secrets,
+    redact_credential_carriers,
 };
 pub use listener::{HoneypotHandle, ListenerState, start};
 
@@ -42,7 +42,9 @@ pub(crate) struct SessionOutcome {
     /// 交互会话逐命令记录：中交互假 Shell 填充，低交互恒 None
     pub interaction: Option<Vec<aisafeguard_core::event::ShellStep>>,
     /// 会话内采集的凭证对（0.5.10 H200）：口令明文只到 handle_conn 哈希为止，
-    /// 之后只发 argon2id PHC 哈希。由 [honeypot.credentials].enabled 门控发布。
+    /// 正式凭证记录（CredentialObserved）只发 argon2id PHC 哈希；蜜罐会话
+    /// payload 里的口令值按 2026-10-20 裁定保留明文作证据（口径见
+    /// THREAT_MODEL「口令证据」）。由 [honeypot.credentials].enabled 门控发布。
     pub credentials: Vec<cred::RawCredential>,
 }
 

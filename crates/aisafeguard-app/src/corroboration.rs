@@ -89,6 +89,9 @@ pub struct CorroborationConfig {
     pub emit_cooldown_secs: i64,
     /// 观测保留上限（对齐 F320 重放窗）
     pub retain_secs: i64,
+    /// 每节点窗口内活跃键配额（审计 run-1 E4）：单成员灌满共享键窗 =
+    /// 组织级检测失明——超配额节点的**新键**不再入窗（已有键照常刷新）
+    pub node_key_quota: usize,
 }
 
 impl Default for CorroborationConfig {
@@ -100,6 +103,7 @@ impl Default for CorroborationConfig {
             max_keys: 10_000,
             emit_cooldown_secs: 600,
             retain_secs: 24 * 3600,
+            node_key_quota: 1_000,
         }
     }
 }
@@ -126,6 +130,8 @@ pub struct CorroborationEngine {
     next_id: u64,
     /// 节点时钟偏移（秒，来自 hello 上报）：|offset| 超阈值 → 观测剔除
     offsets: HashMap<String, i64>,
+    /// 每节点当前占用的键位（审计 run-1 E4 配额计数；随键出窗归还）
+    node_keys: HashMap<String, usize>,
     /// F300 组织建议采纳回流聚合（协调者侧）
     pub adoption: OrgAdoption,
 }
@@ -144,6 +150,7 @@ impl CorroborationEngine {
             order: VecDeque::new(),
             next_id: 1,
             offsets: HashMap::new(),
+            node_keys: HashMap::new(),
             adoption: OrgAdoption::default(),
         }
     }
@@ -170,9 +177,29 @@ impl CorroborationEngine {
         let id = (obs.dim, obs.key.clone());
         // 有界：先逐最旧再落新观测（当前键随后会重新排到队尾）
         while self.order.len() >= self.cfg.max_keys {
-            if let Some(old) = self.order.pop_front() {
-                self.keys.remove(&old);
+            if let Some(old) = self.order.pop_front()
+                && let Some(s) = self.keys.remove(&old)
+            {
+                for n in s.nodes.keys() {
+                    if let Some(c) = self.node_keys.get_mut(n) {
+                        *c = c.saturating_sub(1);
+                    }
+                }
             }
+        }
+        // 每节点键配额（审计 run-1 E4）：只有新 (键, 节点) 对占配额；
+        // 配额满的节点其新键不进窗（已有键的刷新与印证不受影响）
+        let known_pair = self
+            .keys
+            .get(&id)
+            .map(|s| s.nodes.contains_key(&obs.node))
+            .unwrap_or(false);
+        if !known_pair {
+            let cnt = self.node_keys.entry(obs.node.clone()).or_insert(0);
+            if *cnt >= self.cfg.node_key_quota {
+                return None;
+            }
+            *cnt += 1;
         }
         let state = self.keys.entry(id.clone()).or_default();
         let e = state
@@ -236,12 +263,39 @@ impl CorroborationEngine {
     }
 
     /// 清扫：超保留窗的观测/键全部丢弃（对齐重放窗哲学：老观测只在外部审计日志里）。
+    /// 出窗的键/节点位同步归还配额计数（审计 run-1 E4）。
     fn prune(&mut self, now: i64) {
         let cutoff = now - self.cfg.retain_secs;
-        self.keys.retain(|_, s| {
-            s.nodes.retain(|_, o| o.last_ts >= cutoff);
-            s.last_active >= cutoff
-        });
+        let expired_keys: Vec<(Dim, String)> = self
+            .keys
+            .iter()
+            .filter(|(_, s)| s.last_active < cutoff)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in expired_keys {
+            if let Some(s) = self.keys.remove(&k) {
+                for n in s.nodes.keys() {
+                    if let Some(c) = self.node_keys.get_mut(n) {
+                        *c = c.saturating_sub(1);
+                    }
+                }
+            }
+        }
+        // 键存活但个别节点观测过期：该 (键, 节点) 位同样归还
+        for s in self.keys.values_mut() {
+            let expired_nodes: Vec<String> = s
+                .nodes
+                .iter()
+                .filter(|(_, o)| o.last_ts < cutoff)
+                .map(|(n, _)| n.clone())
+                .collect();
+            for n in &expired_nodes {
+                s.nodes.remove(n);
+                if let Some(c) = self.node_keys.get_mut(n) {
+                    *c = c.saturating_sub(1);
+                }
+            }
+        }
         self.order.retain(|k| self.keys.contains_key(k));
         self.offsets.retain(|_, _| true); // 偏移表随节点生命周期，体积小不扫
     }

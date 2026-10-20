@@ -9,8 +9,9 @@
 //! 接入两个面：①独立监听器 kind=`mcp`（显式配置=开启）；②既有 http 监听器的
 //! MCP 诱饵路径（[`is_mcp_path`]）——捕获已落在 8081 上的存量探测。
 //!
-//! 红线：响应内容全部合成（零真实数据）；请求按不可信数据清洗截断；参数中
-//! password 类键脱敏复用 [`crate::redact_secrets`]。
+//! 红线：响应内容全部合成（零真实数据）；请求按不可信数据清洗截断；头部载体
+//! 凭证脱敏（[`crate::redact_credential_carriers`]）。2026-10-20 裁定：参数
+//! payload 按证据保留明文（写进了什么工具、什么参数本身就是 TTP 证据）。
 
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
@@ -476,8 +477,8 @@ pub(crate) async fn mcp_session(
         if ghost_out.is_none() {
             ghost_out = resp.ghost.clone();
         }
-        // 载荷 = 脱敏请求头 + POST 体（GET/SSE 探测也要留下「请求了什么」的证据）
-        let mut text = crate::redact_secrets(&head_text);
+        // 载荷 = 头部载体脱敏后的请求头 + POST 体（GET/SSE 探测也要留下「请求了什么」的证据）
+        let mut text = crate::redact_credential_carriers(&head_text);
         if method == "POST" {
             text.push('\n');
             text.push_str(&String::from_utf8_lossy(&body));

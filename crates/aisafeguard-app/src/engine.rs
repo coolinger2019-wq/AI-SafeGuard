@@ -520,6 +520,7 @@ impl EngineHandle {
         let members = if cfg.fed.role == "coordinator" {
             let revoked: std::collections::HashSet<String> =
                 crate::fed::load_revocations(&cfg.data_dir())
+                    .unwrap_or_default()
                     .into_iter()
                     .collect();
             self.store
@@ -729,16 +730,27 @@ impl EngineHandle {
             .ok_or_else(|| Error::Store(format!("建议 #{id} 不存在")))?;
         // F760-A 治理类建议三路：promote=真转正 / retire=真退役（规则表操作，产品本职）；
         // tune=采纳记账待人工执行（2026-10-20 拍板：机器永不写 config）
+        // 审计 run-1 F2：认领后任何失败路径必须回退 pending——否则该建议永久
+        // 卡死在 applying（apply/dismiss/confirm/回扫全部只认 pending）
+        let rollback = |id: i64| {
+            let _ = self.store.set_proposal_status_if(id, "applying", "pending", None);
+        };
         match p.action.as_str() {
             "promote_rule" => {
-                let row = self
+                let Some(row) = self
                     .store
                     .list_rules()?
                     .into_iter()
                     .find(|r| r.name == p.rule_name)
-                    .ok_or_else(|| Error::Store(format!("目标规则 {} 不存在", p.rule_name)))?;
+                else {
+                    rollback(id);
+                    return Err(Error::Store(format!("目标规则 {} 不存在", p.rule_name)));
+                };
                 let ttl = self.config().ai.promote_ttl_secs as i64;
-                self.store.mark_promoted(row.id, now_ts() + ttl)?;
+                if let Err(e) = self.store.mark_promoted(row.id, now_ts() + ttl) {
+                    rollback(id);
+                    return Err(e);
+                }
                 self.store
                     .set_proposal_status_if(id, "applying", "applied", Some(row.id))?;
                 self.bus.publish(SecurityEvent::engine(
@@ -748,13 +760,19 @@ impl EngineHandle {
                 return Ok(Some(row));
             }
             "retire_rule" => {
-                let row = self
+                let Some(row) = self
                     .store
                     .list_rules()?
                     .into_iter()
                     .find(|r| r.name == p.rule_name)
-                    .ok_or_else(|| Error::Store(format!("目标规则 {} 不存在", p.rule_name)))?;
-                self.remove_rule(row.id)?;
+                else {
+                    rollback(id);
+                    return Err(Error::Store(format!("目标规则 {} 不存在", p.rule_name)));
+                };
+                if let Err(e) = self.remove_rule(row.id) {
+                    rollback(id);
+                    return Err(e);
+                }
                 self.store
                     .set_proposal_status_if(id, "applying", "applied", Some(row.id))?;
                 self.bus.publish(SecurityEvent::engine(
@@ -764,10 +782,21 @@ impl EngineHandle {
                 return Ok(Some(row));
             }
             "tune_detection" => {
-                self.store
-                    .set_proposal_status_if(id, "applying", "applied", None)?;
-                self.store
-                    .set_meta(&format!("tune_cd:{}", p.tune_param), &now_ts().to_string())?; // 应用即入 30 天冷却
+                if let Err(e) = self
+                    .store
+                    .set_proposal_status_if(id, "applying", "applied", None)
+                {
+                    rollback(id);
+                    return Err(e);
+                }
+                if let Err(e) = self
+                    .store
+                    .set_meta(&format!("tune_cd:{}", p.tune_param), &now_ts().to_string())
+                {
+                    // 记账失败：退回 pending（下一次应用重走一遍；set_meta 幂等）
+                    rollback(id);
+                    return Err(e);
+                }
                 self.bus.publish(SecurityEvent::engine(
                     "info",
                     format!(
@@ -1252,6 +1281,8 @@ struct L7Evidence {
 /// 频次引擎（蜜罐源）与采样捕获（真实流量源）都走这里，行为一致。
 /// F6 解耦：是否自动封禁由调用方决定——内置检测器看 [detect].auto_block，
 /// 规则命中看 [detect.rules].auto_block（默认 false 只告警）。
+/// 统一闸门（审计 run-1 A：与 AI 路径同源）：内网保护 → 测绘网段白名单
+/// （F760）→ [detect].exempt_ips 操作员豁免 → 误报抑制 → 同源去重。
 // 参数并列了判定/处置/L7 三组语义字段，逐位传参比拆结构体更直白
 #[allow(clippy::too_many_arguments)]
 fn handle_detection(
@@ -1289,6 +1320,26 @@ fn handle_detection(
         ));
         return;
     }
+    // 测绘网段白名单（审计 run-1 A，对齐 AI 路径 F760）：已知扫描测绘源不自动封
+    if aisafeguard_core::scanner_nets::is_known_scanner(ip) {
+        sink.bus.publish(SecurityEvent::engine(
+            "info",
+            format!("测绘网段白名单：跳过对 {src} 的自动封禁（{kind}）"),
+        ));
+        return;
+    }
+    // 操作员豁免名单（审计 run-1 A）：网关/DNS/管理机等封禁会伤及自身的目标
+    if dcfg
+        .exempt_ips
+        .iter()
+        .any(|s| s.trim().parse::<IpAddr>().map(|v| v == ip).unwrap_or(false))
+    {
+        sink.bus.publish(SecurityEvent::engine(
+            "info",
+            format!("豁免名单：跳过对 {src} 的自动封禁（{kind}）"),
+        ));
+        return;
+    }
     // 误报反馈：用户已判定该来源为正常业务，自动封禁跳过（人工封禁不受影响）
     if sink
         .store
@@ -1309,6 +1360,10 @@ fn handle_detection(
         note: format!("检测器自动封禁（TTL {}s）: {evidence}", dcfg.ttl_secs),
         tag: "检测器".into(),
     };
+    // 同源去重（审计 run-1 A）：已有未到期同类封禁就不再叠加重复规则
+    if sink.store.active_rule_exists(&src, None).unwrap_or(true) {
+        return;
+    }
     match apply_block(
         sink.fw,
         sink.store,
@@ -1894,7 +1949,9 @@ pub fn spawn_capture_task(eng: &Arc<EngineHandle>) {
                                 &evidence,
                                 Some(d.rule_id),
                                 &dcfg,
-                                dcfg.auto_block,
+                                // 审计 run-1 A：采集≠执法——抓包溯源的自动封禁
+                                // 还需 [detect.capture].enforce 显式开启
+                                dcfg.auto_block && dcfg.capture.enforce,
                                 "medium",
                                 l7ev,
                             );
@@ -1962,7 +2019,9 @@ pub fn spawn_capture_task(eng: &Arc<EngineHandle>) {
                                         &evidence,
                                         Some(&hit.rule_id),
                                         &eng.config().detect,
-                                        rcfg.auto_block,
+                                        // 审计 run-1 A：规则命中的来源 IP 同为抓包
+                                        // 溯源（可伪造），执法同样需 capture.enforce
+                                        rcfg.auto_block && cap_cfg.enforce,
                                         hit.severity,
                                         L7Evidence::default(),
                                     );

@@ -753,6 +753,9 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
     init_tracing(&data_dir)?;
 
     let store = Arc::new(Store::open(&cfg.db_path())?);
+    // 审计 run-1 F2：进程崩溃可能遗留 applying 状态的建议（无人持有认领），
+    // 启动时退回 pending；迁移/重链已在 Store::open 完成
+    store.sweep_stuck_applying()?;
     // 事件保留与归档（F795 方案 B）：retention_days=0 = 永不修剪；
     // 归档目录空 = <数据目录>/archive，被修剪事件先整行 JSONL 追加再删除
     let retention = cfg.store.event_retention_days;

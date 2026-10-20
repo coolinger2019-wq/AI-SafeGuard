@@ -98,11 +98,35 @@ struct GateState {
     sig_warned: HashSet<String>,
     /// F400：已广播过的成员隔离状态（node → status），状态变更才广播
     quarantine_announced: std::collections::HashMap<String, String>,
+    /// 告警发布预算（审计 run-1 E1）：每分钟 WARN_RATE 上限——成员绑定前的
+    /// 版本/签名告警曾按未验证节点名去重，换名即可无限刷事件库
+    warn_budget: (i64, u32),
 }
+
+/// 告警预算（条/分钟）：事件库与 GUI 的告警通道天花板
+const WARN_RATE_PER_MIN: u32 = 10;
 
 impl GateState {
     fn dedup(&mut self) -> &mut DedupSet {
         self.dedup.get_or_insert_with(|| DedupSet::new(50_000))
+    }
+
+    /// 审计 run-1 E1：告警预算 + 名字旋转容量控制（集合超限即清，只影响
+    /// 「每节点一次」的 dedup 精度，不影响安全判定）
+    fn warn_allow(&mut self) -> bool {
+        if self.version_warned.len() + self.sig_warned.len() > 5_000 {
+            self.version_warned.clear();
+            self.sig_warned.clear();
+        }
+        let now_min = aisafeguard_core::now_ts() / 60;
+        if self.warn_budget.0 != now_min {
+            self.warn_budget = (now_min, 0);
+        }
+        if self.warn_budget.1 >= WARN_RATE_PER_MIN {
+            return false;
+        }
+        self.warn_budget.1 += 1;
+        true
     }
 }
 
@@ -341,12 +365,18 @@ fn gate_envelope(state: &FedState, peer: &FedPeer, body: &Bytes) -> Result<Gate,
     };
     // 2) 版本协商：major 不同拒连，GUI 可见双方版本号（每节点只告警一次）
     if let Err(reason) = fedproto::version_compatible(&env.proto) {
-        let mut gate = state.gate.lock().unwrap();
-        if gate.version_warned.insert(env.node.clone()) {
-            state.engine.bus.publish(SecurityEvent::engine(
-                "warn",
-                format!("协同协议版本失配（{}）：{reason}", env.node),
-            ));
+        // 审计 run-1 E1：告警先过节点名合法性（未验证的可旋转名字不再作为
+        // 去重键），发布再受每分钟预算硬上限——换名 flood 有界
+        if valid_node_name(&env.node) {
+            let mut gate = state.gate.lock().unwrap();
+            let allow = gate.warn_allow() && gate.version_warned.insert(env.node.clone());
+            drop(gate);
+            if allow {
+                state.engine.bus.publish(SecurityEvent::engine(
+                    "warn",
+                    format!("协同协议版本失配（{}）：{reason}", env.node),
+                ));
+            }
         }
         return Err(err_status(StatusCode::UPGRADE_REQUIRED, reason));
     }
@@ -376,8 +406,11 @@ fn gate_envelope(state: &FedState, peer: &FedPeer, body: &Bytes) -> Result<Gate,
     };
     if !fedproto::verify_signature(&pubkey, &fedproto::signing_bytes(&env), &env.sig) {
         state.stats.sig_fail.fetch_add(1, Ordering::Relaxed);
+        // 审计 run-1 E1：告警发布受每分钟预算约束（node 已过合法性校验）
         let mut gate = state.gate.lock().unwrap();
-        if gate.sig_warned.insert(env.node.clone()) {
+        let allow = gate.warn_allow() && gate.sig_warned.insert(env.node.clone());
+        drop(gate);
+        if allow {
             state.engine.bus.publish(SecurityEvent::engine(
                 "warn",
                 format!(
@@ -390,6 +423,11 @@ fn gate_envelope(state: &FedState, peer: &FedPeer, body: &Bytes) -> Result<Gate,
             StatusCode::UNAUTHORIZED,
             "消息签名校验失败（须以本节点证书私钥签名）",
         ));
+    }
+    // 4b) 请求级吊销复查（审计 run-1 E3）：连接级检查只在 accept 时做一次，
+    // keep-alive/连接池的旧连接会绕过——每条信封复查，吊销一个请求内生效
+    if let Some(reason) = check_not_revoked(&state.engine.config().data_dir(), &peer.cert_fp) {
+        return Err(err_status(StatusCode::FORBIDDEN, reason));
     }
     // 5) 成员绑定（TOFU/预登记 + last_seen 刷新）
     check_member(state, &env.node, &peer.cert_fp)?;
@@ -532,16 +570,39 @@ struct FedEventsPayload {
 }
 
 /// 观测投影：节点事件 → 印证窗口的原始观测（只取节点/时间/维度/键四元组）。
+/// 键合法性（审计 run-1 E4）：印证键是组织共享内存窗的计量单位——未验证的
+/// 自由文本既稀释窗口又可灌满 max_keys 冲刷真实键。按维度收紧。
+fn valid_obs_key(dim: Dim, key: &str) -> bool {
+    let key = key.trim();
+    if key.is_empty() || key.chars().count() > 64 {
+        return false;
+    }
+    match dim {
+        // IP/蜜饵维度：必须可解析且非保护地址（恶意成员不能把内网/回环当攻击键）
+        Dim::Ip | Dim::Canary => key
+            .parse::<std::net::IpAddr>()
+            .map(|ip| !aisafeguard_core::is_protected_ip(ip))
+            .unwrap_or(false),
+        // 指纹维度：JA3/JA4/指纹都是字母数字与 - 的紧凑串
+        Dim::Fingerprint => key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+        // 凭证维度（用户名比对）：去控制字符即可（比对在成员侧有自己的口径）
+        Dim::Credential => !key.chars().any(char::is_control),
+    }
+}
+
 fn observations_of(node: &str, p: &FedEventsPayload) -> Vec<Observation> {
     let mut obs = Vec::new();
     for ev in &p.events {
+        if !valid_obs_key(Dim::Ip, &ev.remote_ip) {
+            continue;
+        }
         obs.push(Observation {
             node: node.to_string(),
             ts: ev.ts,
             dim: Dim::Ip,
             key: ev.remote_ip.clone(),
         });
-        if !ev.tls_fp.is_empty() {
+        if !ev.tls_fp.is_empty() && valid_obs_key(Dim::Fingerprint, &ev.tls_fp) {
             obs.push(Observation {
                 node: node.to_string(),
                 ts: ev.ts,
@@ -549,7 +610,7 @@ fn observations_of(node: &str, p: &FedEventsPayload) -> Vec<Observation> {
                 key: ev.tls_fp.clone(),
             });
         }
-        if !ev.tls_ja4.is_empty() {
+        if !ev.tls_ja4.is_empty() && valid_obs_key(Dim::Fingerprint, &ev.tls_ja4) {
             obs.push(Observation {
                 node: node.to_string(),
                 ts: ev.ts,
@@ -559,15 +620,20 @@ fn observations_of(node: &str, p: &FedEventsPayload) -> Vec<Observation> {
         }
         if ev.kind == "canary" {
             // 蜜饵水印触发（0.5.10 canary 事件）：横向移动线索维度
-            obs.push(Observation {
-                node: node.to_string(),
-                ts: ev.ts,
-                dim: Dim::Canary,
-                key: ev.remote_ip.clone(),
-            });
+            if valid_obs_key(Dim::Canary, &ev.remote_ip) {
+                obs.push(Observation {
+                    node: node.to_string(),
+                    ts: ev.ts,
+                    dim: Dim::Canary,
+                    key: ev.remote_ip.clone(),
+                });
+            }
         }
     }
     for c in &p.credentials {
+        if !valid_obs_key(Dim::Credential, &c.username) {
+            continue;
+        }
         obs.push(Observation {
             node: node.to_string(),
             ts: c.ts,
@@ -739,6 +805,10 @@ async fn fed_org_feed(
     if !valid_node_name(&q.node) {
         return err("node 名不合法");
     }
+    // 请求级吊销复查（审计 run-1 E3，同 gate_envelope）
+    if let Some(reason) = check_not_revoked(&state.engine.config().data_dir(), &peer.cert_fp) {
+        return err_status(StatusCode::FORBIDDEN, reason);
+    }
     if let Err(resp) = check_member(&state, &q.node, &peer.cert_fp) {
         return resp;
     }
@@ -753,7 +823,16 @@ async fn fed_org_feed(
 
 // ---------- 情报同步（双向） ----------
 
-async fn fed_intel_get(State(state): State<FedState>) -> Response {
+async fn fed_intel_get(
+    State(state): State<FedState>,
+    peer: Option<axum::Extension<FedPeer>>,
+) -> Response {
+    // 请求级吊销复查（审计 run-1 E3）：吊销对已在途的 keep-alive 连接也生效
+    if let Some(axum::Extension(peer)) = peer.as_ref()
+        && let Some(reason) = check_not_revoked(&state.engine.config().data_dir(), &peer.cert_fp)
+    {
+        return err_status(StatusCode::FORBIDDEN, reason);
+    }
     // 下发给 agent 的情报不含 fed:* 来源（避免回灌），且已过滤过期
     let rows: Vec<IntelRow> = state
         .engine
@@ -1021,7 +1100,16 @@ async fn fed_reports(
     Json(json!({ "ok": true, "accepted": accepted })).into_response()
 }
 
-async fn fed_members(State(state): State<FedState>) -> Response {
+async fn fed_members(
+    State(state): State<FedState>,
+    peer: Option<axum::Extension<FedPeer>>,
+) -> Response {
+    // 请求级吊销复查（审计 run-1 E3）
+    if let Some(axum::Extension(peer)) = peer.as_ref()
+        && let Some(reason) = check_not_revoked(&state.engine.config().data_dir(), &peer.cert_fp)
+    {
+        return err_status(StatusCode::FORBIDDEN, reason);
+    }
     let members: Vec<serde_json::Value> = state
         .engine
         .store
@@ -1174,19 +1262,22 @@ pub fn revocations_path(data_dir: &Path) -> PathBuf {
     fed_dir(data_dir).join("revoked.json")
 }
 
-/// 读吊销指纹集合；文件不存在/损坏返回空集（损坏留由命令侧提示）。
-pub fn load_revocations(data_dir: &Path) -> std::collections::HashSet<String> {
+/// 读吊销指纹集合。Err = 文件存在但损坏（调用方裁决 fail-closed）；不存在 = 空集。
+/// （审计 run-1 E2 之前：损坏静默按空集处理 = 已吊销证书静默通行。）
+pub fn load_revocations(
+    data_dir: &Path,
+) -> std::result::Result<std::collections::HashSet<String>, String> {
     let raw = match std::fs::read(revocations_path(data_dir)) {
         Ok(b) => b,
-        Err(_) => return Default::default(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(e) => return Err(format!("读取失败: {e}")),
     };
-    serde_json::from_str::<Vec<serde_json::Value>>(&String::from_utf8_lossy(&raw))
-        .map(|v| {
-            v.iter()
-                .filter_map(|e| e["fp"].as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
+    let list: Vec<serde_json::Value> = serde_json::from_slice(&raw)
+        .map_err(|e| format!("revoked.json 解析失败: {e}"))?;
+    Ok(list
+        .iter()
+        .filter_map(|e| e["fp"].as_str().map(str::to_string))
+        .collect())
 }
 
 /// `fed revoke <fp|node> [原因]`：按指纹或节点名（读 certs/<node>.pem 算指纹）吊销。
@@ -1211,26 +1302,44 @@ pub fn do_revoke(data_dir: &Path, target: &str, reason: &str) -> anyhow::Result<
     };
     std::fs::create_dir_all(fed_dir(data_dir))?;
     let path = revocations_path(data_dir);
-    let mut list: Vec<serde_json::Value> = std::fs::read(&path)
-        .map(|b| serde_json::from_str(&String::from_utf8_lossy(&b)).unwrap_or_default())
-        .unwrap_or_default();
+    let mut list: Vec<serde_json::Value> = match std::fs::read(&path) {
+        Ok(b) => serde_json::from_str(&String::from_utf8_lossy(&b)).map_err(|e| {
+            anyhow::anyhow!("revoked.json 损坏（{e}）——拒不覆盖现有吊销列表，请手工修复该文件后重试")
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e.into()),
+    };
     if list.iter().any(|e| e["fp"].as_str() == Some(fp.as_str())) {
         anyhow::bail!("该指纹已在吊销列表中");
     }
     list.push(serde_json::json!({
         "fp": fp, "ts": now_ts(), "reason": reason,
     }));
-    std::fs::write(&path, serde_json::to_string_pretty(&list)?)?;
+    // 原子写（审计 run-1 E2）：temp+rename，吊销中并发连接不会读到半截文件
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&list)?)?;
+    let _ = std::fs::remove_file(&path);
+    std::fs::rename(&tmp, &path)?;
     Ok(fp)
 }
 
-/// 连接级吊销检查：指纹在吊销集合中返回 false（并给拒绝原因）。
-/// Some(原因) = 已吊销应拒连；None = 通过。
+/// 连接级吊销检查。审计 run-1 E2 fail-closed：名单文件损坏/不可读 = 无法
+/// 确认「未吊销」——拒绝连接并告警，宁可短时全拒，不可静默放行已吊销证书。
 pub fn check_not_revoked(data_dir: &Path, cert_fp: &str) -> Option<String> {
-    if load_revocations(data_dir).contains(cert_fp) {
-        return Some("该证书已被吊销（fed revoke），组织同步被拒绝".to_string());
+    match load_revocations(data_dir) {
+        Ok(set) => {
+            if set.contains(cert_fp) {
+                return Some("该证书已被吊销（fed revoke），组织同步被拒绝".to_string());
+            }
+            None
+        }
+        Err(e) => {
+            tracing::error!("revoked.json 不可读，吊销检查 fail-closed 拒绝连接: {e}");
+            Some(format!(
+                "吊销名单不可读（{e}）——为防已吊销证书静默通行，连接被拒绝；请修复 fed/revoked.json"
+            ))
+        }
     }
-    None
 }
 
 /// 预登记表（0.4.0 C2）：`{node: expected_fp}` JSON——关闭该节点的 TOFU 抢注窗口：
@@ -1358,6 +1467,14 @@ pub fn cmd_stix_import(data_dir: &Path, path: &Path) -> anyhow::Result<()> {
     let store = aisafeguard_store::Store::open(&data_dir.join("aisafeguard.db"))?;
     let upserts: Vec<(String, String, String, String, i64, i64, bool)> = iocs
         .iter()
+        .filter(|i| {
+            // 审计 run-1 E6：对齐 fed_intel_post 的「内网保护前置拒收」基线
+            //（fed.rs 模块头注）——合法签名的包同样不能把内网地址标成 C2
+            i.value
+                .parse::<std::net::IpAddr>()
+                .map(|ip| !aisafeguard_core::is_protected_ip(ip))
+                .unwrap_or(true) // 非 IP IOC（域名/哈希）不受此过滤约束
+        })
         .map(|i| {
             (
                 format!("stix:{node}"),
@@ -2420,10 +2537,29 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
                             {
                                 continue;
                             }
-                            let severity = sg["severity"].as_str().unwrap_or("high");
-                            let reason = sg["reason"].as_str().unwrap_or("组织建议");
-                            let direction = sg["direction"].as_str().unwrap_or("in");
-                            let protocol = sg["protocol"].as_str().unwrap_or("any");
+                            // 审计 run-1 E7：org-feed 摄取与 /fed/proposals 同口径
+                            //（validate_fed_proposal 语义）——枚举白名单 + 理由
+                            // 清洗截断；恶意/被攻破 coordinator 不能塞任意标签、
+                            // 超长文本进待审列表与 LLM 上下文
+                            let severity = sg["severity"]
+                                .as_str()
+                                .filter(|s| matches!(*s, "low" | "medium" | "high" | "critical"))
+                                .unwrap_or("high");
+                            let reason = sg["reason"]
+                                .as_str()
+                                .unwrap_or("组织建议")
+                                .chars()
+                                .filter(|c| !c.is_control())
+                                .take(300)
+                                .collect::<String>();
+                            let direction = sg["direction"]
+                                .as_str()
+                                .filter(|d| matches!(*d, "in" | "out"))
+                                .unwrap_or("in");
+                            let protocol = sg["protocol"]
+                                .as_str()
+                                .filter(|p| matches!(*p, "any" | "tcp" | "udp"))
+                                .unwrap_or("any");
                             if let Ok(pid) = eng.store.insert_proposal(
                                 "fed:org",
                                 "block",
@@ -2433,7 +2569,7 @@ pub fn spawn_fed_agent_task(eng: &Arc<EngineHandle>) {
                                 remote_ip,
                                 None,
                                 None,
-                                reason,
+                                &reason,
                                 "组织建议（本地复验通过，待人工确认）",
                                 "",
                                 "",
@@ -2725,13 +2861,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         // 空表：不吊销任何人
-        assert!(load_revocations(&dir).is_empty());
+        assert!(load_revocations(&dir).unwrap().is_empty());
         assert!(check_not_revoked(&dir, "aabb").is_none());
 
         // 吊销：按指纹写入后立即可查；重复吊销拒绝
         let fp = cmd_revoke(&dir, "aabbccdd".repeat(8).as_str(), "测试吊销").unwrap();
         assert_eq!(fp.len(), 64);
-        assert!(load_revocations(&dir).contains(&fp));
+        assert!(load_revocations(&dir).unwrap().contains(&fp));
         assert!(check_not_revoked(&dir, &fp).is_some());
         assert!(check_not_revoked(&dir, "ffff").is_none());
         assert!(cmd_revoke(&dir, &fp, "重复").is_err(), "重复吊销应拒绝");

@@ -322,6 +322,36 @@ async fn spawn_guarded_listener(
 /// desired=true → bind 并服务；翻 false → 摘下监听（释放端口）后**驻留等待**
 /// （不杀任务：热停→热启由同一任务重绑，无端口竞态窗口）；bind 失败 → 留错误
 /// 事件后退出任务（热启动重拉重试，不做死循环重试）。全局 shutdown 任何状态立即退出。
+/// 每源连接事件限流（审计 run-1 D2）：连接 flood 把每个 accept 都灌成一条
+/// 落库事件（含零字节端口探测会话），无上限即拿磁盘当攻击面。同源每分钟
+/// 最多 CONN_EVENT_RATE 条常规事件；会话仿真与应答不受影响。
+const CONN_EVENT_RATE: u32 = 30;
+
+#[derive(Default)]
+struct EventGate {
+    /// (分钟桶, 桶内已用数)
+    buckets: std::collections::HashMap<std::net::IpAddr, (i64, u32)>,
+}
+
+impl EventGate {
+    fn allow(&mut self, ip: std::net::IpAddr) -> bool {
+        if self.buckets.len() > 10_000 {
+            // 多源 flood 时表自身也有界：粗暴清桶，只影响计数精度
+            self.buckets.clear();
+        }
+        let now_min = now_ts() / 60;
+        let slot = self.buckets.entry(ip).or_insert((now_min, 0));
+        if slot.0 != now_min {
+            *slot = (now_min, 0);
+        }
+        if slot.1 >= CONN_EVENT_RATE {
+            return false;
+        }
+        slot.1 += 1;
+        true
+    }
+}
+
 async fn run_listener(
     l: ListenerConfig,
     bus: EventBus,
@@ -386,6 +416,7 @@ async fn run_listener(
         ));
         let sem = Arc::new(Semaphore::new(MAX_CONCURRENT));
         let interactive_sem = Arc::new(Semaphore::new(MAX_INTERACTIVE));
+        let event_gate = Arc::new(Mutex::new(EventGate::default()));
         loop {
             let stream = tokio::select! {
                 _ = shutdown.changed() => return,
@@ -411,13 +442,21 @@ async fn run_listener(
                 match interactive_sem.clone().try_acquire_owned() {
                     Ok(p) => Some(p),
                     Err(_) => {
-                        bus.publish(SecurityEvent::engine(
-                            "info",
-                            format!(
-                                "蜜罐 [{}] 交互会话并发已满（{}），拒绝新会话",
-                                l.name, MAX_INTERACTIVE
-                            ),
-                        ));
+                        // 拒绝留痕同受每源限流（审计 run-1 D2：拒绝事件 flood 同样灌库）
+                        let allow = stream
+                            .peer_addr()
+                            .ok()
+                            .map(|a| event_gate.lock().unwrap().allow(a.ip()))
+                            .unwrap_or(true);
+                        if allow {
+                            bus.publish(SecurityEvent::engine(
+                                "info",
+                                format!(
+                                    "蜜罐 [{}] 交互会话并发已满（{}），拒绝新会话",
+                                    l.name, MAX_INTERACTIVE
+                                ),
+                            ));
+                        }
                         drop(stream);
                         drop(permit);
                         continue;
@@ -430,8 +469,9 @@ async fn run_listener(
             let name = l.name.clone();
             let kind = l.kind.clone();
             let ctx = ctx.clone();
+            let event_gate = event_gate.clone();
             tokio::spawn(async move {
-                handle_conn(stream, name, kind, bus, ctx).await;
+                handle_conn(stream, name, kind, bus, ctx, event_gate).await;
                 drop(interactive_permit);
                 drop(permit);
             });
@@ -482,11 +522,19 @@ async fn handle_conn(
     kind: String,
     bus: EventBus,
     ctx: Arc<SessionCtx>,
+    gate: Arc<Mutex<EventGate>>,
 ) {
     let (remote_ip, remote_port) = match stream.peer_addr() {
         Ok(a) => (a.ip().to_string(), a.port()),
         Err(_) => ("unknown".into(), 0),
     };
+    // 每源连接事件限流（审计 run-1 D2）：超限连接的会话仿真与应答不受影响，
+    // 只丢弃常规落库事件（ghost/jndi 定罪与 HoneypotHit）；正式凭证记录
+    // （CredentialObserved）不在此列——高价值证据不因限流丢失。
+    let allow_events = remote_ip
+        .parse::<std::net::IpAddr>()
+        .map(|ip| gate.lock().unwrap().allow(ip))
+        .unwrap_or(true);
     let local_port = stream.local_addr().map(|a| a.port()).unwrap_or(0);
 
     // ssh/telnet 假 Shell 启用时流被仿真层消费（提前取端口）;其余按 &mut 读一包。
@@ -623,8 +671,15 @@ async fn handle_conn(
         });
     }
 
+    // 每源连接事件限流判定（审计 run-1 D2）：超限在此收尾——ghost/jndi 定罪与
+    // HoneypotHit 已被丢弃；正式凭证记录（下方）发布不受限流
+    if !allow_events {
+        return;
+    }
+
     // 凭证采集（0.5.10 H200）：[honeypot.credentials].enabled 门控；口令明文只到
-    // 本函数为止——先 argon2id 加盐哈希，再进事件（事件与落盘表面只见哈希）
+    // 本函数为止——先 argon2id 加盐哈希，再进正式凭证记录（2026-10-20 口令证据
+    // 口径：正式记录只见哈希；蜜罐 payload 里的口令值明文作证据）
     if ctx.collect_creds {
         for raw in &outcome.credentials {
             if raw.username.is_empty() {

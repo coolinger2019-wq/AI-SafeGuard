@@ -27,7 +27,8 @@ pub const DECOY_PATHS: &[&str] = &[
 /// 假登录页路径（DECOY_PATHS 子集）：GET 下发表单，POST 记提交（login:post）
 const LOGIN_PATHS: &[&str] = &["/admin", "/login", "/api/login", "/wp-login.php"];
 
-/// 密码类表单键名（词边界匹配）：值一律脱敏，不落库明文（0.5.6 F12）
+/// 密码类表单键名（词边界匹配）：凭证采集识别用（CredentialObserved 走
+/// argon2id 哈希）；payload 里的值按 2026-10-20 裁定保留明文作证据
 const SECRET_KEYS: &[&str] = &["password", "passwd", "pwd", "pass"];
 
 /// 用户名类表单键名（0.5.10 H200 凭证采集用，词边界匹配）
@@ -113,51 +114,32 @@ pub fn content_length(head_text: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// 敏感字段值脱敏（0.5.6 F12）：password/passwd/pwd/pass 键名的值替换为 ***，
-/// 覆盖 form `k=v` 与 JSON `"k":"v"` 两种形态；键名原样保留——「出现过」可判定，
-/// 明文不落库。键匹配按词边界：`user_password` 命中，`bypass` 不误伤。
-pub fn redact_secrets(text: &str) -> String {
-    let lower = text.to_ascii_lowercase();
-    let chars: Vec<char> = text.chars().collect();
-    let lower_chars: Vec<char> = lower.chars().collect();
+/// 行载体凭证脱敏（审计 run-1 裁定 2026-10-20）：Authorization /
+/// Proxy-Authorization / X-Registry-Auth 头的值整体替换为 ***——头部载体携带的
+/// 凭证（Basic / Registry token / Bearer）无法区分「攻击者试探」与「真实客户端
+/// 误投递」，一律不落库。body 里的口令类字段按裁定保留明文作证据（cowrie 模式，
+/// 口径见 THREAT_MODEL「口令证据」）；正式凭证记录走 CredentialObserved
+/// （argon2id 哈希，cred.rs 红线只约束正式记录与可逆信息）。
+pub fn redact_credential_carriers(text: &str) -> String {
+    const CARRIERS: &[&str] = &["authorization:", "proxy-authorization:", "x-registry-auth:"];
     let mut out = String::with_capacity(text.len());
-    let mut i = 0usize;
-    while i < chars.len() {
-        let mut matched = false;
-        for key in SECRET_KEYS {
-            let kc: Vec<char> = key.chars().collect();
-            if lower_chars[i..].starts_with(&kc)
-                && boundary_before(&lower_chars, i)
-                && boundary_after(&lower_chars, i + kc.len())
-            {
-                let key_end = i + kc.len();
-                // 键名原样保留，跳过分隔符（= 或 ": "）后把值替换为 ***
-                out.extend(&chars[i..key_end]);
-                i = key_end;
-                let mut j = i;
-                while j < chars.len()
-                    && (chars[j] == '"' || chars[j] == ':' || chars[j] == '=' || chars[j] == ' ')
-                {
-                    out.push(chars[j]);
-                    j += 1;
+    for line in text.split_inclusive('\n') {
+        let lower = line.to_ascii_lowercase();
+        if CARRIERS.iter().any(|k| lower.trim_start().starts_with(k)) {
+            match line.find(':') {
+                Some(c) => {
+                    out.push_str(&line[..=c]);
+                    out.push_str(" ***");
+                    if line.ends_with("\r\n") {
+                        out.push_str("\r\n");
+                    } else if line.ends_with('\n') {
+                        out.push('\n');
+                    }
                 }
-                out.push_str("***");
-                i = j;
-                while i < chars.len()
-                    && chars[i] != '&'
-                    && chars[i] != '"'
-                    && chars[i] != '\n'
-                    && chars[i] != '\r'
-                {
-                    i += 1;
-                }
-                matched = true;
-                break;
+                None => out.push_str(line),
             }
-        }
-        if !matched {
-            out.push(chars[i]);
-            i += 1;
+        } else {
+            out.push_str(line);
         }
     }
     out
@@ -421,15 +403,15 @@ pub(crate) async fn http_session(
         h.tags = tags.clone();
         h
     });
-    let text = sanitize(redact_secrets(&head_text).as_bytes(), MAX_PAYLOAD);
+    let text = sanitize(redact_credential_carriers(&head_text).as_bytes(), MAX_PAYLOAD);
     let summary = format!(
         "{}{}",
         l7::request_summary(&text, "空 HTTP 请求"),
         l7::tags_suffix(&tags)
     );
     // 凭证采集（H200）：登录/模板路径的 POST body 提取 用户名/口令 对——
-    // 提取发生在 redact_secrets 之前，payload 落库仍是脱敏后的 ***。
-    // 模板的表单字段名追加进内置键名表（H300）
+    // payload 里的口令值按 2026-10-20 裁定保留明文作证据；正式凭证记录
+    // （CredentialObserved）只进 argon2id 哈希。模板的表单字段名追加进内置键名表（H300）
     let tpl_cred = tpl.is_some() && hint.is_some();
     let cred_body = if is_post && (login || tpl_cred) {
         body_start
@@ -494,8 +476,8 @@ pub(crate) async fn read_body(
 }
 
 /// HTTP-JSON 蜜罐会话骨架（F794：Docker API / Elasticsearch 共用）：keep-alive
-/// 流水最多 8 轮，每轮交给协议自己的路由函数。交互步逐请求记录、载荷含脱敏
-/// 请求头 + 请求体，幽灵定罪透传给 listener。
+/// 流水最多 8 轮，每轮交给协议自己的路由函数。交互步逐请求记录、载荷含头部
+/// 载体脱敏的请求头 + 明文请求体（证据口径），幽灵定罪透传给 listener。
 pub(crate) struct JsonRoute {
     pub status: &'static str,
     pub ctype: &'static str,
@@ -541,7 +523,7 @@ pub(crate) async fn http_json_session(
         if ghost_out.is_none() {
             ghost_out = resp.ghost.clone();
         }
-        let mut text = crate::redact_secrets(&head_text);
+        let mut text = crate::redact_credential_carriers(&head_text);
         if method == "POST" || method == "PUT" {
             text.push('\n');
             text.push_str(&String::from_utf8_lossy(&body));
@@ -631,26 +613,25 @@ mod tests {
     }
 
     #[test]
-    fn redact_secrets_form_and_json() {
-        // F12：密码只记「出现过」，值不落库明文
-        let form = "POST /login HTTP/1.1\r\n\r\nusername=admin&password=s3cret!&x=1";
-        let out = redact_secrets(form);
-        assert!(out.contains("password=***"), "实际: {out}");
-        assert!(out.contains("username=admin"));
-        assert!(out.contains("x=1"));
-        assert!(!out.contains("s3cret"));
-        let json = r#"{"user":"a","password":"plain","passwd":"x2"}"#;
-        let out = redact_secrets(json);
-        assert!(!out.contains("plain") && !out.contains("x2"), "实际: {out}");
-        assert!(
-            out.contains(r#""password":"***""#)
-                || out.contains("\"password\": \"***\"")
-                || out.contains("password\":\"***"),
-            "实际: {out}"
+    fn credential_carriers_masked_body_kept() {
+        // 头部载体凭证一律 ***（无法区分攻击者试探与真实客户端误投递）
+        let head = "POST /v1.41/containers/create HTTP/1.1\r\nHost: x\r\nAuthorization: Basic dXNlcjpwYXNz\r\nX-Registry-Auth: abc123\r\nProxy-Authorization: Bearer tok\r\n\r\n";
+        let out = redact_credential_carriers(head);
+        assert!(out.contains("Authorization: ***"), "实际: {out}");
+        assert!(out.contains("X-Registry-Auth: ***"), "实际: {out}");
+        assert!(out.contains("Proxy-Authorization: ***"), "实际: {out}");
+        assert!(!out.contains("dXNlcjpwYXNz") && !out.contains("abc123"), "实际: {out}");
+        // body 口令类值按裁定保留明文（证据口径）；普通头不受影响
+        let req = "POST /login HTTP/1.1\r\nHost: x\r\n\r\nusername=admin&password=s3cret!&x=1";
+        let out = redact_credential_carriers(req);
+        assert!(out.contains("password=s3cret!"), "体值不脱敏: {out}");
+        assert!(out.contains("username=admin") && out.contains("x=1"));
+        // 大小写/缩进容错与无冒号行原样
+        assert!(redact_credential_carriers("authorization: abc\r\n").contains("***"));
+        assert_eq!(
+            redact_credential_carriers("authorization-proxy: keep\r\n"),
+            "authorization-proxy: keep\r\n"
         );
-        // 词边界：bypass / overpass 值不误伤
-        assert_eq!(redact_secrets("bypass=ok&x=1"), "bypass=ok&x=1");
-        assert_eq!(redact_secrets("user_password=abc"), "user_password=***");
     }
 
     #[test]
@@ -667,7 +648,7 @@ mod tests {
                 })
                 .collect();
             let text = String::from_utf8_lossy(&bytes).to_string();
-            let _ = redact_secrets(&text);
+            let _ = redact_credential_carriers(&text);
             let _ = is_decoy_path(&text);
             let _ = content_length(&text);
             let _ = l7::parse_http_hint(&text);
@@ -798,8 +779,9 @@ mod tests {
                 ..
             } => {
                 assert!(summary.contains("login:post"), "实际: {summary}");
-                assert!(payload.contains("password=***"), "实际: {payload}");
-                assert!(!payload.contains("Tr0ub4dor"), "明文密码不得落库");
+                // 口令证据口径（2026-10-20）：body 值明文保留；头部载体仍 ***
+                assert!(payload.contains("password=Tr0ub4dor"), "实际: {payload}");
+                assert!(!payload.contains("Host: ***") && payload.contains("Host: x"), "实际: {payload}");
                 let hint = http_hint.expect("http 蜜罐事件必须带 HttpHint");
                 assert!(hint.tags.contains(&"login:post".to_string()));
             }

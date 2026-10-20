@@ -1,8 +1,11 @@
 //! 凭证采集（0.5.10 H200）：蜜罐会话内采集的 用户名/口令 对统一出口。
 //!
 //! 口令明文只存在于采集瞬间（本 crate 内存），离开前必须完成 argon2id 加盐
-//! 哈希——事件总线与任何落盘表面只见哈希（红线：事件与 API 永不包含口令明文
-//! 与可逆信息；COMPLIANCE 凭证哈希存储条目）。
+//! 哈希——正式凭证记录（CredentialObserved）只见哈希（COMPLIANCE 凭证哈希
+//! 存储条目）。2026-10-20 裁定（审计 run-1）：蜜罐会话 payload 里的攻击者
+//! 提交口令按证据保留明文（cowrie 模式）；「事件与 API 无口令明文」的旧
+//! 无条件口径废止——本红线现只约束正式凭证记录与可逆信息（头部载体凭证
+//! 仍由 redact_credential_carriers 脱敏）。
 
 use argon2::password_hash::PasswordHasher;
 use argon2::{Algorithm, Argon2, Params, Version};

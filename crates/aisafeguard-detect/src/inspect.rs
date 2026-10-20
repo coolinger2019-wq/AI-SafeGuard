@@ -376,6 +376,7 @@ mod tests {
     fn cfg() -> CaptureConfig {
         CaptureConfig {
             enabled: true,
+            enforce: false,
             mode: "control".into(),
             scan_distinct_ports: 3,
             driver_sha256: String::new(),

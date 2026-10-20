@@ -221,6 +221,14 @@ pub fn parse_package(bytes: &[u8]) -> Result<(String, Value), String> {
     let Some(node) = v["node"].as_str() else {
         return Err("包缺少 node 字段".into());
     };
+    // 审计 run-1 E5：包自报节点名必须过合法名校验——该名直接拼进验签证书
+    // 路径（certs/<node>.pem），携带路径序列可指向 certs 目录外的任意 .pem，
+    // 让攻击者自选验签信任锚（所有其余节点入口都强制本校验）
+    if !crate::fed::valid_node_name(node) {
+        return Err(format!(
+            "包内 node 名不合法（限字母数字_-，≤32 字符），拒收: {node:?}"
+        ));
+    }
     if v["bundle"]["type"].as_str() != Some("bundle") {
         return Err("包缺少 STIX bundle".into());
     }

@@ -158,10 +158,17 @@ fn parse_nego_blob(frame: &[u8]) -> Option<Vec<u8>> {
     let (_, outer_used) = der_read_len(frame, 1)?;
     let end = (1 + outer_used + der_read_len(frame, 1)?.0).min(frame.len());
     // EXPLICIT 包装：0x04 嵌在 [1]→SEQUENCE 层里——递归下钻
-    der_find_octet(&frame[1 + outer_used..end])
+    // 深度上限（审计 run-1 D1）：真实 TSRequest 嵌套 ≤6 层，无界套娃会
+    // 线性放大栈帧直至进程栈耗尽（Rust 栈溢出是 abort，不是可捕 panic）
+    der_find_octet(&frame[1 + outer_used..end], DER_MAX_DEPTH)
 }
 
-fn der_find_octet(buf: &[u8]) -> Option<Vec<u8>> {
+const DER_MAX_DEPTH: usize = 16;
+
+fn der_find_octet(buf: &[u8], depth: usize) -> Option<Vec<u8>> {
+    if depth == 0 {
+        return None;
+    }
     let mut j = 0usize;
     while j + 2 <= buf.len() {
         let tag = buf[j];
@@ -171,10 +178,10 @@ fn der_find_octet(buf: &[u8]) -> Option<Vec<u8>> {
         if tag == 0x04 {
             return Some(buf[bs..be].to_vec());
         }
-        if tag == 0x30 || tag == 0xA1 {
-            if let Some(found) = der_find_octet(&buf[bs..be]) {
-                return Some(found);
-            }
+        if matches!(tag, 0x30 | 0xA1)
+            && let Some(found) = der_find_octet(&buf[bs..be], depth - 1)
+        {
+            return Some(found);
         }
         j = be;
     }

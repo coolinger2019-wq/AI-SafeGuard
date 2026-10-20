@@ -394,12 +394,26 @@ window_secs = 60
 # Auto-ban TTL (s), auto-unbans at expiry.
 # 自动封禁 TTL（秒），到期自动解封。
 ttl_secs = 1800
+# Operator exempt list for fast-path auto-ban: gateway/DNS/management hosts the
+# ban would hurt. Parsed as IP; bad entries ignored. Hot-reload.
+# 快路径自动封禁豁免名单：网关/DNS/管理机等封禁会伤及自身的目标。按 IP 解析，
+# 非法条目忽略。热更。
+exempt_ips = []
 
 [detect.capture]
 # Real traffic packet capture (off by default: needs a driver/elevation and
 # touches the local network plane). Restart required.
 # 真实流量采样捕获（默认关：需要驱动/提权，是对本机网络面的行为）。需重启。
 enabled = false
+# Audit run-1 (capture≠enforcement): auto-ban from capture-attributed detections
+# additionally requires this flag (default off). Capture attribution relies on
+# packet-header source IPs, which can be forged off-path (third-party DoS
+# risk) — enable only if you accept that limitation (kernel conn-table
+# validation is on the ROADMAP).
+# 审计 run-1（采集≠执法）：抓包溯源检测的自动封禁还需本开关（默认关）。
+# 抓包溯源基于包头源地址、可被离线伪造（误封第三方风险）——确认接受该
+# 限制再开启（内核级连接表校验列 ROADMAP）。
+enforce = false
 # control = TCP SYN headers only (metadata) | full = all TCP segments (flow
 # reassembly forensics). Restart required.
 # control = 仅 TCP 纯 SYN 包头（元数据）| full = 全 TCP 段（流重组取证）。需重启。

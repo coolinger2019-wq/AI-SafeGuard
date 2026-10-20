@@ -234,6 +234,31 @@
 - **触发条件**：新周期（0.7.1）跑两周，RDP NLA 凭证/完整蜜罐面数据量级达标即排期；
   蜜罐 0-day 的现实预期要诚实——能抓「未公开的手法」不承诺「CVE 级零日」。
 
+### 安全审计 run-1（Cloudflare security-audit-skill，2026-10-20）修复批次 ✅
+
+- **交付**：18 条候选中 17 条代码修复 + 1 条 owner 裁定改口径（口令证据，见
+  THREAT_MODEL「口令证据口径」与 OWNER-DECISIONS）。要点：
+  ①capture 执法解耦（[detect.capture].enforce 默认关，采集≠执法）+ 快路径补齐
+  测绘白名单/exempt/去重闸门；②哈希链 v2（补 http_hint/tls_fp/tls_ja4/rule_id/
+  interaction 五列，chain_ver 一次性重链，断链测试钉住）；③0.1→0.2 迁移条件
+  修正（非空 key 也物理删除）；④RDP DER 递归深度上限 16；⑤SSH PTY 未提交行
+  中段截断 + 会话总时限 30min（空行占坑防绕过）；⑥每源连接事件限流 30/分 +
+  retention 默认 365 对齐文档；⑦fed 五条：告警每分钟预算 10 条 + 节点名校验
+  前置、吊销 fail-closed + temp+rename 原子写、每请求（信封+org-feed+intel/members
+  GET）吊销复查、协同观测键按维度校验 + 每节点键配额 1000、STIX 导入节点名
+  校验 + 内网保护过滤、org-feed 摄取与 /fed/proposals 同口径归一化；⑧API Bearer
+  常量时间比较；⑨apply_proposal 治理类失败回退 pending + 启动清扫。
+- **遗留（后续排期）**：
+  - **内核级连接表校验**（抓包溯源防伪造的真解）：capture 溯源基于包头源地址、
+    可被离线伪造（enforce 开启即知情承担）；正确修法 = 自动封禁前查 OS 连接表
+    （Linux /proc/net/tcp、Windows GetExtendedTcpTable——后者需要 unsafe 或
+    子进程 netstat，工作区 forbid(unsafe) 下用 netstat 外呼）。规模 M，与 F800
+    的 capture 默认化合并考虑。
+  - read_der_frame 长格式帧重组丢长度字节（0x81/0x82 头）导致标准 TSRequest
+    type3 切片不准——影响 NLA 捕获质量，非安全问题，F799 回归时一并修。
+  - hardening 清单（~40 条，配置原子写/egress 变更审计事件/Linux token 0600/
+    CSP 等）在审计 run 目录，评审后按需纳入。
+
 ---
 ---
 

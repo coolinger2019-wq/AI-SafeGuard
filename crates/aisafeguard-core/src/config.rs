@@ -26,7 +26,7 @@ pub struct AppConfig {
 }
 
 /// 事件存储保留与归档（F795 方案 B）。
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct StoreConfig {
     /// 事件保留天数：超过该天数的启动时归档（JSONL）后从 DB 删除。
@@ -35,6 +35,15 @@ pub struct StoreConfig {
     /// 归档目录：被修剪事件先整行导出追加到 <dir>/events-archive.jsonl 再删除
     ///（JSONL 与 `aisafeguard export-events` 同格式）。空 = <数据目录>/archive。
     pub archive_dir: String,
+}
+
+impl Default for StoreConfig {
+    fn default() -> Self {
+        Self {
+            event_retention_days: 365,
+            archive_dir: String::new(),
+        }
+    }
 }
 
 /// 界面外观（GUI 设置页可切换，保存后即时生效并保持）。
@@ -390,6 +399,10 @@ pub struct DetectConfig {
     pub ttl_secs: i64,
     /// 采样捕获（检测平台 MVP，0.3 第二批）：真实流量观测。
     pub capture: CaptureConfig,
+    /// 快路径自动封禁豁免来源（DNS/网关/管理机等；IPv4/IPv6 字符串，解析失败的条目忽略）。
+    /// 抓包溯源基于包头源地址、可被离线伪造（审计 run-1），此处名单用于保护
+    /// 封禁会伤及自身的目标；AI 自动封禁路径沿用 [ai].auto_apply_exempt_ips。
+    pub exempt_ips: Vec<String>,
     /// L7 解析与指纹（0.5.0 Batch E/H5）：full 捕获流前缀的 HttpHint / JA3。
     pub l7: L7Config,
     /// 开放规则子集引擎（0.5.0 Batch F，规范见 docs/RULESET_SUBSET.md）。
@@ -406,6 +419,7 @@ impl Default for DetectConfig {
             window_secs: 60,
             ttl_secs: 1800,
             capture: CaptureConfig::default(),
+            exempt_ips: Vec::new(),
             l7: L7Config::default(),
             rules: RulesConfig::default(),
         }
@@ -469,6 +483,11 @@ impl Default for RulesConfig {
 pub struct CaptureConfig {
     /// 默认关闭：捕获需要驱动/提权，且是对本机网络面的行为，用户显式开启
     pub enabled: bool,
+    /// 抓包检测的自动封禁执法开关（审计 run-1：采集≠执法，默认关）。
+    /// false 时抓包检测只产事件不封禁；true 时抓包溯源的自动封禁还需
+    /// [detect].auto_block 为真。注意：抓包溯源基于包头源地址、可被离线
+    /// 伪造（误封第三方），开启前须理解该限制（内核级连接表校验见 ROADMAP）。
+    pub enforce: bool,
     /// control = 仅 TCP 纯 SYN（默认，只看元数据）| full = 全 TCP 段（启用流重组取证）
     pub mode: String,
     /// 端口扫描判定：window_secs 内对 ≥ scan_distinct_ports 个不同目标端口发 SYN
@@ -490,6 +509,7 @@ impl Default for CaptureConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            enforce: false,
             mode: "control".into(),
             scan_distinct_ports: 15,
             driver_sha256: String::new(),
@@ -798,12 +818,14 @@ impl AppConfig {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let has_legacy_field = value.get("ai").and_then(|ai| ai.get("api_key")).is_some();
         if !legacy_key.is_empty() {
             secrets::set_ai_key(&legacy_key)?;
             tracing::info!("已将配置文件中的明文 API Key 迁移到凭据管理器");
         }
-        if legacy_key.is_empty() && value.get("ai").and_then(|ai| ai.get("api_key")).is_some() {
-            // 空 key 也清掉，让新结构能解析
+        if has_legacy_field {
+            // 搬完（或本就为空）即从文件物理删除——迁移完成后配置里
+            // 不再允许 api_key 字段，明文无论如何不能留在盘上。
             if let Some(t) = value.get_mut("ai").and_then(|v| v.as_table_mut()) {
                 t.remove("api_key");
             }

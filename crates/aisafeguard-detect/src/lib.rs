@@ -185,6 +185,7 @@ mod tests {
             window_secs: 60,
             ttl_secs: 1800,
             capture: Default::default(),
+            exempt_ips: Vec::new(),
             l7: Default::default(),
             rules: Default::default(),
         }
