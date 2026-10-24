@@ -391,8 +391,12 @@ bruteforce_hits = 10
 # Verdict window (s).
 # 判定窗口（秒）。
 window_secs = 60
-# Auto-ban TTL (s), auto-unbans at expiry.
-# 自动封禁 TTL（秒），到期自动解封。
+# Auto-ban TTL floor (s). F805 escalation ladder (review #43): repeat offenders
+# are banned 1h→24h→7d→31d→6mo→1y by prior ban count; this value is the FLOOR
+# (first offense gets max(1h, this)). FP feedback resets the count.
+# 自动封禁 TTL 下限（秒）。F805 累进阶梯（评审 #43）：重复犯按历史封禁次数
+# 1h→24h→7d→31d→6个月→1年 加码；本值为下限（首犯取 max(1h, 本值)）。
+# 误报反馈会清零累进计数。
 ttl_secs = 1800
 # Operator exempt list for fast-path auto-ban: gateway/DNS/management hosts the
 # ban would hurt. Parsed as IP; bad entries ignored. Hot-reload.

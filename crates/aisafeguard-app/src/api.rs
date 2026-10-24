@@ -33,6 +33,7 @@ pub async fn serve(engine: Arc<EngineHandle>) {
         .route("/api/rules/{id}", delete(remove_rule))
         .route("/api/rules/{id}/promote", post(promote_rule))
         .route("/api/proposals", get(list_proposals))
+        .route("/api/proposals/review-sample", get(proposals_review_sample))
         .route("/api/proposals/{id}/apply", post(apply_proposal))
         .route("/api/proposals/{id}/confirm", post(confirm_campaign))
         .route(
@@ -257,6 +258,15 @@ async fn remove_rule(State(s): State<AppState>, Path(id): Path<i64>) -> Response
 
 async fn list_proposals(State(s): State<AppState>) -> Response {
     match s.engine.list_proposals(None, 100) {
+        Ok(rows) => Json(rows).into_response(),
+        Err(e) => err_resp(e),
+    }
+}
+
+/// F804 每日抽样复核：近 24h 已应用提案随机抽 5 条（评审桥/控制台复核入口；
+/// 人工标记误报走既有 /api/feedback）。
+async fn proposals_review_sample(State(s): State<AppState>) -> Response {
+    match s.engine.sample_recent_applied(5, 86_400) {
         Ok(rows) => Json(rows).into_response(),
         Err(e) => err_resp(e),
     }

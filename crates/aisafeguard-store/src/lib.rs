@@ -168,6 +168,24 @@ pub struct ValueMetrics {
     pub applied: i64,
     pub fp: i64,
     pub auto_blocks: i64,
+    /// F803 口径拆分：快路径（origin=engine）与 AI 自动应用各自计数；
+    /// auto_blocks = 两者之和（事件文本口径，见 metrics_since 注释）
+    #[serde(default)]
+    pub auto_blocks_engine: i64,
+    #[serde(default)]
+    pub auto_blocks_ai: i64,
+}
+
+/// F802 转化漏斗（评审 #42/#5：hit→detection→proposal→applied 各级计数 +
+/// 按监听器命中分布——定位零转化面）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FunnelStats {
+    pub hits: i64,
+    pub detections: i64,
+    pub proposed: i64,
+    pub applied: i64,
+    /// 命中数 Top 监听器（listener, hits），降序取前 8
+    pub top_listeners: Vec<(String, i64)>,
 }
 
 /// F760-B 自审建议行（评审工单的结构化形态；md 快照另存）。
@@ -373,6 +391,12 @@ CREATE TABLE IF NOT EXISTS suggestions (
     decided_ts  INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_suggestions_status ON suggestions(status);
+CREATE INDEX IF NOT EXISTS idx_proposals_created ON proposals(created_ts);
+CREATE TABLE IF NOT EXISTS source_recidivism (
+    remote_ip   TEXT PRIMARY KEY,
+    ban_count   INTEGER NOT NULL DEFAULT 0,
+    last_ban_ts INTEGER NOT NULL DEFAULT 0
+);
 "#;
 
 /// 事件链哈希：H(prev_hash | 规范化行)。规范化用 serde_json 默认的字典序键，
@@ -785,8 +809,10 @@ impl Store {
     }
 
     /// 价值指标（0.4.0 B5）：三个单查询各取一个数，口径见 ValueMetrics 注释。
-    /// auto_blocks 以事件 summary 含「已自动封禁」识别（apply_block 的固定文案，
-    /// 手动/联邦规则的 firewall_add 文案不同）。
+    /// auto_blocks 以事件 summary 文本口径识别（apply_block 的固定文案，
+    /// 手动/联邦规则的 firewall_add 文案不同）。F803 拆分：快路径（origin=engine，
+    /// 文案「已自动封禁」）与 AI 自动应用（文案「AI 自动封禁」，apply_proposal_auto
+    /// 专属）各自计数——原合计口径曾与 ai.max_per_day 的日配额口径混淆。
     pub fn metrics_since(&self, since: i64) -> Result<ValueMetrics> {
         let conn = self.lock()?;
         let (proposed, applied) = conn
@@ -803,19 +829,171 @@ impl Store {
                 |r| r.get(0),
             )
             .map_err(|e| Error::Store(e.to_string()))?;
-        let auto_blocks = conn
+        let (auto_blocks_engine, auto_blocks_ai) = conn
             .query_row(
-                "SELECT COUNT(*) FROM events WHERE kind = 'engine' AND ts >= ?1 AND summary LIKE '%已自动封禁%'",
+                "SELECT COALESCE(SUM(summary LIKE '%已自动封禁%'), 0), COALESCE(SUM(summary LIKE '%AI 自动封禁%'), 0)
+                 FROM events WHERE kind = 'engine' AND ts >= ?1",
                 params![since],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(|e| Error::Store(e.to_string()))?;
         Ok(ValueMetrics {
             proposed,
             applied,
             fp,
-            auto_blocks,
+            auto_blocks: auto_blocks_engine + auto_blocks_ai,
+            auto_blocks_engine,
+            auto_blocks_ai,
         })
+    }
+
+    /// F802 转化漏斗（since 起）：hit→detection→proposal→applied 各级计数 +
+    /// 命中数 Top 监听器。检测/提案不按监听器归属（跨面聚合判定），漏斗前段
+    /// 按监听器、后段全局——如实呈现可归因的边界。
+    pub fn funnel_since(&self, since: i64) -> Result<FunnelStats> {
+        let conn = self.lock()?;
+        let hits = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind = 'honeypot_hit' AND ts >= ?1",
+                params![since],
+                |r| r.get(0),
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        let detections = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind = 'detection' AND ts >= ?1",
+                params![since],
+                |r| r.get(0),
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        let (proposed, applied) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(status = 'applied'), 0) FROM proposals WHERE created_ts >= ?1",
+                params![since],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT listener, COUNT(*) c FROM events WHERE kind = 'honeypot_hit' AND ts >= ?1 GROUP BY listener ORDER BY c DESC LIMIT 8",
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        let top_listeners = stmt
+            .query_map(params![since], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .map_err(|e| Error::Store(e.to_string()))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(FunnelStats {
+            hits,
+            detections,
+            proposed,
+            applied,
+            top_listeners,
+        })
+    }
+
+    /// F805 累进阶梯：自动封禁时累加该源的历史封禁次数，返回新次数（第 N 犯）。
+    /// 误报反馈（mark_false_positive）会清零——被判定误报的源不该继续受罚。
+    /// RETURNING 单语句原子自增（审查修正：execute+SELECT 两段在并发下可跳档）。
+    pub fn bump_ban_count(&self, remote_ip: &str, now: i64) -> Result<i64> {
+        self.lock()?
+            .query_row(
+                "INSERT INTO source_recidivism (remote_ip, ban_count, last_ban_ts) VALUES (?1, 1, ?2)
+                 ON CONFLICT(remote_ip) DO UPDATE SET ban_count = ban_count + 1, last_ban_ts = ?2
+                 RETURNING ban_count",
+                params![remote_ip, now],
+                |r| r.get(0),
+            )
+            .map_err(|e| Error::Store(e.to_string()))
+    }
+
+    /// F805：该源当前的历史封禁次数（0 = 初犯）——阶梯选档用，不改动计数。
+    pub fn peek_ban_count(&self, remote_ip: &str) -> Result<i64> {
+        self.lock()?
+            .query_row(
+                "SELECT ban_count FROM source_recidivism WHERE remote_ip = ?1",
+                params![remote_ip],
+                |r| r.get(0),
+            )
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(0),
+                e => Err(Error::Store(e.to_string())),
+            })
+    }
+
+    /// F805：误报反馈后重置累进计数。
+    pub fn reset_recidivism(&self, remote_ip: &str) -> Result<()> {
+        self.lock()?
+            .execute(
+                "DELETE FROM source_recidivism WHERE remote_ip = ?1",
+                params![remote_ip],
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(())
+    }
+
+    /// F804：该源是否有历史误报反馈（有 → 自动应用永久降级为 pending，
+    /// 纠错信号传导；人工应用不受影响）。
+    pub fn fp_history_exists(&self, remote_ip: &str) -> Result<bool> {
+        self.lock()?
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM fp_feedback WHERE value = ?1)",
+                params![remote_ip],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|v| v == 1)
+            .map_err(|e| Error::Store(e.to_string()))
+    }
+
+    /// F804：超期未决提案自动归档转 dismissed（带事件留痕由调用方发布）。
+    pub fn sweep_expired_pending(&self, older_than_secs: i64) -> Result<usize> {
+        let cutoff = aisafeguard_core::now_ts() - older_than_secs;
+        let n = self
+            .lock()?
+            .execute(
+                "UPDATE proposals SET status = 'dismissed' WHERE status = 'pending' AND created_ts < ?1",
+                params![cutoff],
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(n)
+    }
+
+    /// F804：近 since 秒已应用提案随机抽样 n 条（每日评审桥复核用）。
+    pub fn sample_recent_applied(&self, n: u32, since: i64) -> Result<Vec<ProposalRow>> {
+        let now = aisafeguard_core::now_ts();
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, created_ts, model, action, severity, direction, protocol, remote_ip, local_port, reason, status, applied_rule_id, analysis, ttl_secs, rule_name, tune_param, tune_value
+                 FROM proposals WHERE status = 'applied' AND created_ts >= ?1 ORDER BY RANDOM() LIMIT ?2",
+            )
+            .map_err(|e| Error::Store(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![now - since, n], |r| {
+                Ok(ProposalRow {
+                    id: r.get(0)?,
+                    created_ts: r.get(1)?,
+                    model: r.get(2)?,
+                    action: r.get(3)?,
+                    severity: r.get(4)?,
+                    direction: r.get(5)?,
+                    protocol: r.get(6)?,
+                    remote_ip: r.get(7)?,
+                    local_port: r.get(8)?,
+                    reason: r.get(9)?,
+                    status: r.get(10)?,
+                    applied_rule_id: r.get(11)?,
+                    analysis: r.get(12)?,
+                    ttl_secs: r.get(13)?,
+                    rule_name: r.get(14)?,
+                    tune_param: r.get(15)?,
+                    tune_value: r.get(16)?,
+                })
+            })
+            .map_err(|e| Error::Store(e.to_string()))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| Error::Store(e.to_string()))?;
+        Ok(rows)
     }
 
     /// 全量口径（F795 补全）：部署至今的事件总数与独立来源数（任意 kind，
@@ -2497,6 +2675,81 @@ mod tests {
         tamper.execute("UPDATE events SET interaction = '伪转录'", []).unwrap();
         let report = store.verify_chain().unwrap();
         assert!(!report.ok, "v2 必须检出行改写: {report:?}");
+    }
+
+    #[test]
+    fn f80x_lifecycle_methods() {
+        // F802/F804/F805 store 层：累进计数/误报重置/超期归档/随机抽样/漏斗
+        let dir = std::env::temp_dir().join(format!("aisafeguard-test-f80x-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("t.db")).unwrap();
+
+        // F805 累进：逐次递增、按源独立、误报重置归零
+        assert_eq!(store.bump_ban_count("203.0.113.7", 100).unwrap(), 1);
+        assert_eq!(store.bump_ban_count("203.0.113.7", 200).unwrap(), 2);
+        assert_eq!(store.bump_ban_count("203.0.113.8", 200).unwrap(), 1);
+        store.reset_recidivism("203.0.113.7").unwrap();
+        assert_eq!(
+            store.bump_ban_count("203.0.113.7", 300).unwrap(),
+            1,
+            "误报重置后从头计"
+        );
+        // F805 误报历史：插入反馈后可查
+        store
+            .insert_fp_feedback("203.0.113.9", 1000, "误报", None)
+            .unwrap();
+        assert!(store.fp_history_exists("203.0.113.9").unwrap());
+        assert!(!store.fp_history_exists("203.0.113.10").unwrap());
+
+        // F804 归档：7 天前创建的 pending → dismissed；applied 不受影响
+        let old = store
+            .insert_proposal(
+                "ai", "block", "high", "in", "tcp", "203.0.113.7", None, None, "r", "a", "", "",
+                "",
+            )
+            .unwrap();
+        let keep = store
+            .insert_proposal(
+                "ai", "block", "high", "in", "tcp", "203.0.113.8", None, None, "r", "a", "", "",
+                "",
+            )
+            .unwrap();
+        let tamper = rusqlite::Connection::open(dir.join("t.db")).unwrap();
+        tamper
+            .execute("UPDATE proposals SET created_ts = 1000 WHERE id = ?1", [old])
+            .unwrap();
+        assert_eq!(store.sweep_expired_pending(7 * 86400).unwrap(), 1);
+        let statuses: Vec<String> = store
+            .list_proposals(None, 10)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.status)
+            .collect();
+        assert!(statuses.contains(&"dismissed".into()), "{statuses:?}");
+        assert!(statuses.contains(&"pending".into()), "新提案不受归档影响");
+
+        // F804 抽样：applied 才可被抽中
+        assert!(
+            store
+                .set_proposal_status_if(keep, "pending", "applying", None)
+                .unwrap()
+        );
+        assert!(
+            store
+                .set_proposal_status_if(keep, "applying", "applied", Some(1))
+                .unwrap()
+        );
+        let sample = store.sample_recent_applied(5, 86400).unwrap();
+        assert!(sample.iter().any(|r| r.id == keep));
+        assert!(sample.iter().all(|r| r.status == "applied"));
+
+        // F802 漏斗：hit 计数 + top_listeners
+        hit(&store, "203.0.113.9", "SSH probe");
+        let f = store.funnel_since(0).unwrap();
+        assert!(f.hits >= 1);
+        assert!(!f.top_listeners.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

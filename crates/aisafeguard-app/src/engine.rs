@@ -256,6 +256,9 @@ pub struct StatusReport {
     pub fingerprint_24h: FingerprintStats,
     /// F300 组织协同价值指标（组织建议采纳率与印证命中率，比率展示层算）
     pub org_metrics: aisafeguard_store::OrgMetrics,
+    /// F802 转化漏斗（7 天窗）：hit→detection→proposal→applied + 命中 Top 监听器
+    #[serde(default)]
+    pub funnel_7d: aisafeguard_store::FunnelStats,
     /// 情报订阅状态（订阅反馈：在库条数 + 上次拉取结果）
     pub intel: IntelStatus,
 }
@@ -392,6 +395,10 @@ impl EngineHandle {
                 .store
                 .metrics_since(now_ts() - 7 * 86_400)
                 .unwrap_or_default(),
+            funnel_7d: self
+                .store
+                .funnel_since(now_ts() - 7 * 86_400)
+                .unwrap_or_default(),
             ai: AiStatus {
                 enabled: cfg.ai.enabled,
                 model: cfg.ai.model.clone(),
@@ -507,6 +514,11 @@ impl EngineHandle {
 
     pub fn list_proposals(&self, status: Option<&str>, limit: u32) -> Result<Vec<ProposalRow>> {
         self.store.list_proposals(status, limit)
+    }
+
+    /// F804：近 since 秒已应用提案随机抽样 n 条（每日复核用）。
+    pub fn sample_recent_applied(&self, n: u32, since: i64) -> Result<Vec<ProposalRow>> {
+        self.store.sample_recent_applied(n, since)
     }
 
     pub fn list_ai_runs(&self, limit: u32) -> Result<Vec<AiRunRow>> {
@@ -716,6 +728,18 @@ impl EngineHandle {
     }
 
     pub fn apply_proposal(&self, id: i64) -> Result<Option<RuleRow>> {
+        self.apply_proposal_inner(id, false)
+    }
+
+    /// F803/F805：AI 自动应用专用通路——与人工应用同一条执行路径，差异仅在
+    /// ①累进阶梯 TTL（第 2 犯起按阶梯加码）②发布「AI 自动封禁」标记事件
+    ///（指标口径与快路径分离，store::metrics_since 按本文案分别计数——
+    /// 曾因合计口径与 ai.auto_apply_max_per_day 混淆被判口径不一致）。
+    pub fn apply_proposal_auto(&self, id: i64) -> Result<Option<RuleRow>> {
+        self.apply_proposal_inner(id, true)
+    }
+
+    fn apply_proposal_inner(&self, id: i64, auto: bool) -> Result<Option<RuleRow>> {
         // 原子认领（F795 C2）：pending→applying 抢占成功才继续，防并发双应用
         // 双封禁（Web 手点 / API / 自动应用回扫三通道并发）
         if !self
@@ -847,7 +871,17 @@ impl EngineHandle {
         };
         // 灰度执行（AI 深度介入 v1）：建议应用即短 TTL 试运行，到期自动解封；
         // AI 明确给了 ttl_secs 用它的，否则用配置的默认灰度时长。人工"转正"才延长。
-        let trial_ttl = p.ttl_secs.unwrap_or(self.config().ai.trial_ttl_secs as i64);
+        // F805：自动应用路径按源**历史已生效封禁**次数累进——peek 选档、
+        // 封禁成功才 bump（审查修正：失败回滚重试不得虚增阶梯）；首次保持
+        // 建议 TTL 的灰度语义，第 2 犯起按阶梯加码；人工应用不受累进影响。
+        let mut trial_ttl = p.ttl_secs.unwrap_or(self.config().ai.trial_ttl_secs as i64);
+        let mut ban_count = 0i64;
+        if auto {
+            ban_count = self.store.peek_ban_count(&p.remote_ip).unwrap_or(0) + 1;
+            if ban_count >= 2 {
+                trial_ttl = escalation_ttl(ban_count);
+            }
+        }
         let row = match self.add_block_ex(
             &spec,
             if org { "org" } else { "ai" },
@@ -869,6 +903,26 @@ impl EngineHandle {
             proposal_id: id,
             rule_name: row.name.clone(),
         });
+        // F803 口径标记 + F805 计数与最高档告警（仅自动应用路径，成功后）
+        if auto {
+            let _ = self.store.bump_ban_count(&p.remote_ip, now_ts());
+            self.bus.publish(SecurityEvent::engine(
+                "info",
+                format!(
+                    "AI 自动封禁 {}（建议 #{id}，TTL {trial_ttl}s，第 {ban_count} 犯）",
+                    p.remote_ip
+                ),
+            ));
+            if ban_count >= 6 {
+                self.bus.publish(SecurityEvent::engine(
+                    "warn",
+                    format!(
+                        "累进封禁已达最高档（1 年）：{}（第 {ban_count} 犯）——长期封禁是重决策，请人工复核",
+                        p.remote_ip
+                    ),
+                ));
+            }
+        }
         Ok(Some(row))
     }
 
@@ -943,6 +997,8 @@ impl EngineHandle {
         let note: String = note.chars().filter(|c| !c.is_control()).take(200).collect();
         self.store
             .insert_fp_feedback(&src, now_ts(), &note, local_port)?;
+        // F805：误报反馈清零累进计数——被判定误报的源不该继续受罚升级
+        self.store.reset_recidivism(&src)?;
         let dismissed = self.store.dismiss_pending_proposals_for_ip(&src)?;
         let mut removed = 0usize;
         for r in self.store.list_rules()? {
@@ -1279,6 +1335,19 @@ struct L7Evidence {
 
 /// 快路径判定统一出口：广播 Detection；auto 时自动封禁（TTL + 内网保护 + 审计）。
 /// 频次引擎（蜜罐源）与采样捕获（真实流量源）都走这里，行为一致。
+/// F805 累进阶梯（评审 #43 人工修正版 2026-10-22）：第 N 次自动封禁的 TTL。
+/// 1h→24h→7d→31d→6 个月→1 年；≥6 全取 1 年（第 6 档到达时另有告警）。
+pub(crate) fn escalation_ttl(count: i64) -> i64 {
+    match count {
+        1 => 3600,
+        2 => 86_400,
+        3 => 7 * 86_400,
+        4 => 31 * 86_400,
+        5 => 180 * 86_400,
+        _ => 365 * 86_400,
+    }
+}
+
 /// F6 解耦：是否自动封禁由调用方决定——内置检测器看 [detect].auto_block，
 /// 规则命中看 [detect.rules].auto_block（默认 false 只告警）。
 /// 统一闸门（审计 run-1 A：与 AI 路径同源）：内网保护 → 测绘网段白名单
@@ -1352,12 +1421,22 @@ fn handle_detection(
         ));
         return;
     }
+    // F805 累进阶梯（评审 #43 人工修正版）：按源**历史已生效封禁**次数选 TTL，
+    // 阶梯值不低于 [detect].ttl_secs（运营者意图保留）；第 6 级（1 年）到达时
+    // 发告警请人工复核。审查修正：peek 选档 → 封禁成功才 bump——去重路径
+    //（已有活跃封禁的重复 detection）与封禁失败重试都不得虚增阶梯。
+    // 误报反馈清零计数（mark_false_positive）。
+    let prior = sink.store.peek_ban_count(&src).unwrap_or(0);
+    let ban_count = prior + 1;
+    let ttl = escalation_ttl(ban_count).max(dcfg.ttl_secs);
     let spec = BlockSpec {
         direction: Direction::In,
         protocol: Protocol::Any,
         remote_ip: Some(ip),
         local_port: None,
-        note: format!("检测器自动封禁（TTL {}s）: {evidence}", dcfg.ttl_secs),
+        note: format!(
+            "检测器自动封禁（TTL {ttl}s，第 {ban_count} 犯）: {evidence}"
+        ),
         tag: "检测器".into(),
     };
     // 同源去重（审计 run-1 A）：已有未到期同类封禁就不再叠加重复规则
@@ -1370,7 +1449,7 @@ fn handle_detection(
         sink.bus,
         &spec,
         "engine",
-        Some(now_ts() + dcfg.ttl_secs),
+        Some(now_ts() + ttl),
     ) {
         Ok(row) => {
             let until = row
@@ -1392,11 +1471,21 @@ fn handle_detection(
                 "info",
                 format!("已自动封禁 {src} 至 {until}（规则 {}）{via}", row.name),
             ));
+            // F805：封禁生效才计数（失败/去重路径不虚增阶梯）；第 6 档告警
+            let _ = sink.store.bump_ban_count(&src, now_ts());
+            if ban_count >= 6 {
+                sink.bus.publish(SecurityEvent::engine(
+                    "warn",
+                    format!(
+                        "累进封禁已达最高档（1 年）：{src}（第 {ban_count} 犯，{kind}）——长期封禁是重决策，请人工复核"
+                    ),
+                ));
+            }
         }
         Err(e) => {
             sink.bus.publish(SecurityEvent::engine(
                 "error",
-                format!("自动封禁 {src} 失败: {e}"),
+                format!("自动封禁 {src} 失败: {e}",),
             ));
         }
     }
@@ -1524,6 +1613,38 @@ pub fn spawn_detect_task(eng: &Arc<EngineHandle>) {
                                 L7Evidence::default(),
                             );
                         }
+                    }
+                }
+                // F802 凭据喷洒聚合：CredentialObserved 进频次引擎（同
+                // (源, 用户名) 5 次/10 分钟 → cred_spray detection）。正式
+                // 凭证记录仍哈希-only，这里只消费计数信号
+                Ok(SecurityEvent::CredentialObserved {
+                    ts,
+                    remote_ip,
+                    username,
+                    ..
+                }) => {
+                    let Ok(ip) = remote_ip.parse::<IpAddr>() else {
+                        continue;
+                    };
+                    let cfg = eng.config().detect;
+                    for d in eng.detect.observe_credential(ts, ip, &username) {
+                        handle_detection(
+                            &DetectionSink {
+                                fw: &*eng.firewall,
+                                store: &eng.store,
+                                bus: &eng.bus,
+                                fp_suppress_secs: eng.config().ai.fp_suppress_secs as i64,
+                            },
+                            d.kind,
+                            ip,
+                            &d.evidence,
+                            None,
+                            &cfg,
+                            cfg.auto_block,
+                            "high",
+                            L7Evidence::default(),
+                        );
                     }
                 }
                 Ok(_) => {}
@@ -2109,6 +2230,21 @@ pub fn spawn_expiry_janitor(eng: &Arc<EngineHandle>) {
         let mut ipopts_fail_streak: u32 = 0;
         loop {
             ticker.tick().await;
+            // F804：pending 超 7 天自动归档转 dismissed（每日一次；终态——
+            // 该 IP 再犯会重新产出建议，无需复活旧提案。dismissed 统计因此
+            // 真正生效）。评审 #39：积压不收敛的根因是没有超时语义。
+            let today = (now_ts() / 86400).to_string();
+            if eng.store.get_meta("pending_sweep_day").ok().flatten().as_deref() != Some(&today) {
+                if let Ok(n) = eng.store.sweep_expired_pending(7 * 86400) {
+                    if n > 0 {
+                        eng.bus.publish(SecurityEvent::engine(
+                            "info",
+                            format!("提案超时归档：{n} 条 pending 超 7 天自动转 dismissed"),
+                        ));
+                    }
+                    let _ = eng.store.set_meta("pending_sweep_day", &today);
+                }
+            }
             #[cfg(target_os = "linux")]
             {
                 match ipopts.poll() {
@@ -2617,7 +2753,7 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                         &p.remote_ip,
                         p.local_port,
                     ) {
-                        if eng.apply_proposal(pid).is_ok() {
+                        if eng.apply_proposal_auto(pid).is_ok() {
                             auto_applied += 1;
                         } else {
                             apply_failed += 1;
@@ -2646,7 +2782,7 @@ async fn run_analysis(eng: &Arc<EngineHandle>) {
                             &row.severity,
                             &row.remote_ip,
                             row.local_port,
-                        ) && eng.apply_proposal(row.id).is_ok()
+                        ) && eng.apply_proposal_auto(row.id).is_ok()
                         {
                             rescan_applied += 1;
                         }
@@ -2750,6 +2886,12 @@ fn auto_apply_policy_ok(
         })
         .unwrap_or(false);
     if !ignore_fp && fp_suppressed {
+        return false;
+    }
+    // F804 纠错传导：有过历史误报反馈的来源，自动应用永久降级 pending
+    //（建议照常产出等人工处理；人工应用不受影响——人工确认就是纠错本身）。
+    // fail-closed（审查修正）：查库失败时宁可降级不可放行。
+    if eng.store.fp_history_exists(remote_ip).unwrap_or(true) {
         return false;
     }
     // quorum（0.4.0 C3）：来源有协同上报但独立节点数不足时不自动应用；
@@ -3597,6 +3739,18 @@ mod tests {
     }
 
     #[test]
+    fn f805_escalation_ladder() {
+        // 评审 #43 人工修正版：1h→24h→7d→31d→6m→1y（≥6 取 1y）
+        assert_eq!(escalation_ttl(1), 3600);
+        assert_eq!(escalation_ttl(2), 86_400);
+        assert_eq!(escalation_ttl(3), 7 * 86_400);
+        assert_eq!(escalation_ttl(4), 31 * 86_400);
+        assert_eq!(escalation_ttl(5), 180 * 86_400);
+        assert_eq!(escalation_ttl(6), 365 * 86_400);
+        assert_eq!(escalation_ttl(99), 365 * 86_400);
+    }
+
+    #[test]
     fn detection_blocks_public_ip_with_ttl_and_audit() {
         let f = Fixture::new("block");
         let mut rx = f.bus.subscribe();
@@ -3632,7 +3786,11 @@ mod tests {
         assert_eq!(rules[0].origin, "engine");
         assert_eq!(rules[0].remote_ip, "203.0.113.7");
         let expires = rules[0].expires_ts.expect("自动封禁必须带 TTL");
-        assert!((before + 29..=now_ts() + 30).contains(&expires));
+        // F805 累进阶梯：首犯 TTL = max(阶梯第一档 1h, dcfg.ttl_secs 30) = 3600
+        assert!(
+            (before + 3599..=now_ts() + 3600).contains(&expires),
+            "首犯应取阶梯第一档 1h，实际 {expires}"
+        );
 
         // 事件：Detection（含 rule_id）+ 规则加入 + 自动封禁留痕
         let mut kinds = Vec::new();

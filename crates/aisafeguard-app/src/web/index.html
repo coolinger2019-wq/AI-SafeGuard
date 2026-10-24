@@ -633,6 +633,32 @@ async function refreshDash() {
     statCard(t('待处理建议'), st.pending_proposals) +
     statCard(t('生效规则'), st.rule_count);
 
+  // F802 转化漏斗（7 天窗）：hit→detection→proposal→applied + 命中 Top 监听器
+  const fu = st.funnel_7d || { hits: 0, detections: 0, proposed: 0, applied: 0, top_listeners: [] };
+  const rate = fu.hits > 0 ? (fu.detections / fu.hits * 100).toFixed(1) : '0';
+  const top = (fu.top_listeners || []).slice(0, 5)
+    .map(([l, n]) => esc(l) + ' ' + n).join(' · ');
+  const eng2 = [
+    [t('转化漏斗(7d)'), t('命中') + ' ' + fu.hits + ' → ' + t('检测') + ' ' + fu.detections +
+      ' (' + rate + '%) → ' + t('建议') + ' ' + fu.proposed + ' → ' + t('应用') + ' ' + fu.applied],
+  ];
+  if (top) eng2.push([t('命中 Top(7d)'), top]);
+  // F803 口径拆分：快路径 / AI 自动封禁分列（曾合计导致「配额超限」错觉）
+  const m7 = st.metrics_7d || {};
+  eng2.push([t('自动封禁(7d)'), (m7.auto_blocks || 0) + '（' + t('快路径') + ' ' + (m7.auto_blocks_engine || 0) +
+    ' / AI ' + (m7.auto_blocks_ai || 0) + '）']);
+  // 复用同一容器（轮询刷新不重复插块）
+  let fuBox = document.getElementById('funnel');
+  if (!fuBox) {
+    fuBox = document.createElement('div');
+    fuBox.id = 'funnel';
+    fuBox.style.cssText = 'display:flex;flex-wrap:wrap;gap:10px;margin:10px 0';
+    const engBox = $('engine');
+    if (engBox) engBox.after(fuBox);
+  }
+  fuBox.innerHTML = eng2.map(([k, v]) =>
+    '<div class="card" style="flex:1;min-width:260px"><div class="k">' + k + '</div><div class="v" style="font-size:14px">' + v + '</div></div>').join('');
+
   const ai = st.ai;
   const eng = [
     [t('运行时长'), fmtUptime(st.uptime_secs)],

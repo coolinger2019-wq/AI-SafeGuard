@@ -374,12 +374,47 @@ impl AisafeApp {
                     ui.label(RichText::new(label).strong().size(type_scale::BODY));
                     ui.label(
                         RichText::new(format!(
-                            "建议 {} · 采纳 {}（{}）· 误报 {}（{}）· 自动封禁 {}",
-                            m.proposed, m.applied, adopt_rate, m.fp, fp_rate, m.auto_blocks
+                            "建议 {} · 采纳 {}（{}）· 误报 {}（{}）· 自动封禁 {}（快路径 {} / AI {}）",
+                            m.proposed,
+                            m.applied,
+                            adopt_rate,
+                            m.fp,
+                            fp_rate,
+                            m.auto_blocks,
+                            m.auto_blocks_engine,
+                            m.auto_blocks_ai
                         ))
                         .size(type_scale::CAPTION),
                     );
                 });
+            }
+            // F802 转化漏斗（7 天窗）：命中→检测→建议→应用 + 命中 Top 监听器
+            let f = &st.funnel_7d;
+            let rate = if f.hits > 0 {
+                format!("{:.1}%", f.detections as f32 / f.hits as f32 * 100.0)
+            } else {
+                "—".into()
+            };
+            let top = f
+                .top_listeners
+                .iter()
+                .take(5)
+                .map(|(l, n)| format!("{l} {n}"))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            ui.label(
+                RichText::new(format!(
+                    "转化漏斗(7d)：命中 {} → 检测 {}（{}）→ 建议 {} → 应用 {}",
+                    f.hits, f.detections, rate, f.proposed, f.applied
+                ))
+                .size(type_scale::CAPTION),
+            );
+            if !top.is_empty() {
+                ui.label(
+                    RichText::new(format!("命中 Top(7d)：{top}"))
+                        .color(text_dim())
+                        .size(type_scale::CAPTION),
+                );
             }
         }
 

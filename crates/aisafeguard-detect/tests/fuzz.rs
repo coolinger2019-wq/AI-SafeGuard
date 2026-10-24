@@ -55,13 +55,18 @@ fn fuzz_freq_engine_never_panics_and_bounds_output() {
 
         let dets = eng.observe(ts, ip, listener, port, &cfg);
         assert!(
-            dets.len() <= 2,
-            "round {round}: 一次 observe 最多产出 2 条判定，得到 {}",
+            dets.len() <= 3,
+            "round {round}: 一次 observe 最多产出 3 条判定（scan/bruteforce/repeat），得到 {}",
             dets.len()
         );
         for d in &dets {
             assert!(!d.evidence.is_empty());
-            assert!(d.kind == "scan" || d.kind == "bruteforce");
+            // F802 起聚合判定新增 repeat；凭据喷洒走 observe_credential 不在此面
+            assert!(
+                d.kind == "scan" || d.kind == "bruteforce" || d.kind == "repeat",
+                "round {round}: 未知判定 kind {}",
+                d.kind
+            );
         }
     }
 }
