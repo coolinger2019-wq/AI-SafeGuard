@@ -42,11 +42,11 @@ impl XdpMode {
     }
 }
 
-/// 镜像资格：规则是否能由 XDP 承载（IP 级全端口入站 IPv4）。
+/// 镜像资格：规则是否能由 XDP 承载（IP 级全端口入站，v4/v6 双栈，F807）。
 /// **内网/回环/链路本地/多播地址永不镜像**（0.5.1 G2：内网前缀永不写入
 /// 高速丢弃表——误配置不能经内核直丢路径放大成全内网断网；nftables 兜底层
 /// 语义不变，内网侧处置仍完整）。负路径测试见 mirrorable_never_takes_protected_ips。
-pub fn mirrorable(spec: &BlockSpec) -> Option<Ipv4Addr> {
+pub fn mirrorable(spec: &BlockSpec) -> Option<IpAddr> {
     if spec.direction != Direction::In
         || spec.protocol != Protocol::Any
         || spec.local_port.is_some()
@@ -54,13 +54,7 @@ pub fn mirrorable(spec: &BlockSpec) -> Option<Ipv4Addr> {
         return None;
     }
     match spec.remote_ip {
-        Some(IpAddr::V4(v4)) => {
-            if aisafeguard_core::is_protected_ip(IpAddr::V4(v4)) {
-                None
-            } else {
-                Some(v4)
-            }
-        }
+        Some(ip) if !aisafeguard_core::is_protected_ip(ip) => Some(ip),
         _ => None,
     }
 }
@@ -82,15 +76,30 @@ pub struct XdpFastPath {
     /// 保活：aya 对象（程序/链接/map）同生命周期
     _ebpf: aya::Ebpf,
     blocklist: aya::maps::HashMap<aya::maps::MapData, u32, u32>,
-    /// 内核流表（G1：源三元组 → 包计数，LRU 有界）
+    /// F807：v6 封禁名单（key = 16 字节网络序 = Ipv6Addr::octets()）
+    blocklist_v6: aya::maps::HashMap<aya::maps::MapData, XdpKeyV6, u32>,
+    /// 内核流表（G1：源三元组 → 包计数，LRU 有界；v4-only，v6 流观测不在
+    /// XDP 范围——v6 只走封禁判定）
     flows: aya::maps::HashMap<aya::maps::MapData, XdpFlowKey, u32>,
     /// 全局丢弃计数（G3：内核单槽 u64）
     drop_total: aya::maps::Array<aya::maps::MapData, u64>,
-    /// 本侧已镜像的 IPv4（镜像集，resync 用它对账）
-    mirror: std::collections::HashSet<Ipv4Addr>,
+    /// 本侧已镜像的 IP（v4+v6 合并镜像集，resync 用它对账）
+    mirror: std::collections::HashSet<IpAddr>,
     pub iface: String,
     pub mode: XdpMode,
 }
+
+/// F807：v6 map key（与 eBPF 侧 `repr(C) KeyV6([u8;16])` 逐字节对齐——
+/// 网络序原始字节，与 Ipv6Addr::octets() 同序）。
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct XdpKeyV6(pub [u8; 16]);
+
+#[cfg(target_os = "linux")]
+// aya map key/value 约束：纯 Copy 数据按字节转译
+#[allow(unsafe_code)]
+unsafe impl aya::Pod for XdpKeyV6 {}
 
 /// 内核流表 key（与 eBPF 侧 `repr(C) FlowKey` 逐字段对齐）。
 #[cfg(target_os = "linux")]
@@ -136,6 +145,11 @@ impl XdpFastPath {
             .ok_or("eBPF 对象里找不到 map BLOCKLIST")?
             .try_into()
             .map_err(|e| format!("map 类型不匹配: {e}"))?;
+        let blocklist_v6: aya::maps::HashMap<aya::maps::MapData, XdpKeyV6, u32> = ebpf
+            .take_map("BLOCKLIST_V6")
+            .ok_or("eBPF 对象里找不到 map BLOCKLIST_V6")?
+            .try_into()
+            .map_err(|e| format!("map BLOCKLIST_V6 类型不匹配: {e}"))?;
         let flows: aya::maps::HashMap<aya::maps::MapData, XdpFlowKey, u32> = ebpf
             .take_map("FLOWS")
             .ok_or("eBPF 对象里找不到 map FLOWS")?
@@ -149,6 +163,7 @@ impl XdpFastPath {
         Ok(Self {
             _ebpf: ebpf,
             blocklist,
+            blocklist_v6,
             flows,
             drop_total,
             mirror: HashSet::new(),
@@ -157,34 +172,55 @@ impl XdpFastPath {
         })
     }
 
-    pub fn block(&mut self, ip: Ipv4Addr) -> std::result::Result<(), String> {
+    pub fn block(&mut self, ip: IpAddr) -> std::result::Result<(), String> {
         // value 语义 = 该源被 XDP 丢弃的包计数（内核侧递增），初始 0
-        self.blocklist
-            .insert(u32::from(ip), 0, 0)
-            .map_err(|e| format!("XDP map 写入 {ip} 失败: {e}"))?;
+        match ip {
+            IpAddr::V4(v4) => self
+                .blocklist
+                .insert(u32::from(v4), 0, 0)
+                .map_err(|e| format!("XDP map 写入 {ip} 失败: {e}"))?,
+            IpAddr::V6(v6) => self
+                .blocklist_v6
+                .insert(XdpKeyV6(v6.octets()), 0, 0)
+                .map_err(|e| format!("XDP map 写入 {ip} 失败: {e}"))?,
+        }
         self.mirror.insert(ip);
         Ok(())
     }
 
-    pub fn unblock(&mut self, ip: Ipv4Addr) -> std::result::Result<(), String> {
+    pub fn unblock(&mut self, ip: IpAddr) -> std::result::Result<(), String> {
         // 不在镜像集里的 key 直接判成功（幂等，与底层 remove 语义一致）
-        self.blocklist.remove(&u32::from(ip)).map_err(|e| {
-            // map 里本来就没有该 key 视为已解封
-            if self.mirror.contains(&ip) {
-                format!("XDP map 删除 {ip} 失败: {e}")
-            } else {
-                String::new()
-            }
-        })?;
+        match ip {
+            IpAddr::V4(v4) => self
+                .blocklist
+                .remove(&u32::from(v4))
+                .map_err(|e| {
+                    if self.mirror.contains(&ip) {
+                        format!("XDP map 删除 {ip} 失败: {e}")
+                    } else {
+                        String::new()
+                    }
+                })?,
+            IpAddr::V6(v6) => self
+                .blocklist_v6
+                .remove(&XdpKeyV6(v6.octets()))
+                .map_err(|e| {
+                    if self.mirror.contains(&ip) {
+                        format!("XDP map 删除 {ip} 失败: {e}")
+                    } else {
+                        String::new()
+                    }
+                })?,
+        }
         self.mirror.remove(&ip);
         Ok(())
     }
 
     /// 对账：以 desired 为准增删 map 条目（resync 用）。
-    pub fn reconcile(&mut self, desired: &[Ipv4Addr]) -> std::result::Result<(), String> {
-        let want: HashSet<Ipv4Addr> = desired.iter().copied().collect();
-        let stale: Vec<Ipv4Addr> = self.mirror.difference(&want).copied().collect();
-        let missing: Vec<Ipv4Addr> = want.difference(&self.mirror).copied().collect();
+    pub fn reconcile(&mut self, desired: &[IpAddr]) -> std::result::Result<(), String> {
+        let want: HashSet<IpAddr> = desired.iter().copied().collect();
+        let stale: Vec<IpAddr> = self.mirror.difference(&want).copied().collect();
+        let missing: Vec<IpAddr> = want.difference(&self.mirror).copied().collect();
         for ip in stale {
             self.unblock(ip)?;
         }
@@ -354,7 +390,7 @@ impl Firewall for CompositeFirewall {
         {
             // 对账期望与 add 的镜像资格同口径（mirrorable）：细粒度/保护 IP
             // 规则不得经重启对账进入 XDP map（G2 红线：内网永不进高速丢弃表）
-            let desired: Vec<Ipv4Addr> = specs.iter().filter_map(|s| mirrorable(s)).collect();
+            let desired: Vec<IpAddr> = specs.iter().filter_map(|s| mirrorable(s)).collect();
             if let Some(fast) = self.fast.lock().expect("XDP 状态锁中毒").as_mut() {
                 fast.reconcile(&desired)
                     .map_err(aisafeguard_core::error::Error::Firewall)?;
@@ -426,13 +462,23 @@ mod tests {
             )),
             None
         );
-        // IPv6 暂不镜像
+        // F807：公网 v6 可镜像（双栈 XDP，与 v4 同资格）
         assert_eq!(
             mirrorable(&spec(
                 Direction::In,
                 Protocol::Any,
                 Some("2001:db8::1".parse().unwrap()),
                 None
+            )),
+            Some("2001:db8::1".parse().unwrap())
+        );
+        // v6 带端口/细粒度协议同样不镜像（语义放大防护对两族一致）
+        assert_eq!(
+            mirrorable(&spec(
+                Direction::In,
+                Protocol::Any,
+                Some("2001:db8::1".parse().unwrap()),
+                Some(443)
             )),
             None
         );
@@ -451,6 +497,12 @@ mod tests {
             "0.0.0.0",
             "255.255.255.255",
             "224.0.0.1",
+            // F807：v6 侧保护段同样硬过滤（回环/唯一本地/链路本地/多播/未指定）
+            "::1",
+            "fc00::9",
+            "fe80::9",
+            "ff02::1",
+            "::",
         ] {
             assert_eq!(
                 mirrorable(&spec(
@@ -463,12 +515,21 @@ mod tests {
                 "{ip} 不得镜像进 XDP map"
             );
         }
-        // 公网地址不受影响
+        // 公网地址不受影响（v4 与 v6 双栈）
         assert!(
             mirrorable(&spec(
                 Direction::In,
                 Protocol::Any,
                 Some("203.0.113.7".parse().unwrap()),
+                None
+            ))
+            .is_some()
+        );
+        assert!(
+            mirrorable(&spec(
+                Direction::In,
+                Protocol::Any,
+                Some("2606:4700::1".parse().unwrap()),
                 None
             ))
             .is_some()

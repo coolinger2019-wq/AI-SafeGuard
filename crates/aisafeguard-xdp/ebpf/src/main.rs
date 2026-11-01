@@ -15,6 +15,15 @@ use aya_ebpf::{
 #[map]
 static BLOCKLIST: LruHashMap<u32, u32> = LruHashMap::with_max_entries(65536, 0);
 
+/// F807 封禁名单 v6：key = 源 IPv6 的 16 字节网络序（= Ipv6Addr::octets()），
+/// value 同 v4（按源丢包计数）。镜像资格同 v4（In + Any + 无端口 + 非保护）。
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct KeyV6([u8; 16]);
+
+#[map]
+static BLOCKLIST_V6: LruHashMap<KeyV6, u32> = LruHashMap::with_max_entries(65536, 0);
+
 /// 流表（0.5.1 G1）：入站五元组元数据（目标固定本机，故 key 只含源三元组），
 /// value = 观测包计数。LRU 有界：表满按最旧驱逐，不拖垮收包路径。
 /// 红线对齐：只存元数据与计数，无载荷。
@@ -72,13 +81,35 @@ fn observe_flow(src: u32, sport: u16, dport: u16) {
 
 #[inline(always)]
 fn try_drop(ctx: XdpContext) -> Result<u32, ()> {
-    // 以太网帧：偏移 12..14 = ethertype；23 = IP 协议号；IPv4 源地址在 26..30，
-    // 四层源/目的端口在 34..36 / 36..38（无 IPv4 options 时；带 options 的包
-    // 这两个偏移读到的是别的字段——计数仅是元数据信号，不影响放行/丢弃判定）
+    // 以太网帧：偏移 12..14 = ethertype。v4（0x0800）与 v6（0x86DD）双栈；
+    // 其他 ethertype 一律放行（快速层绝不能拖垮正常转发）。
     let etype = u16::from_be(unsafe { *ptr_at::<u16>(&ctx, 12)? });
-    if etype != 0x0800 {
-        return Ok(xdp_action::XDP_PASS);
+    match etype {
+        0x0800 => try_drop_v4(ctx),
+        0x86DD => try_drop_v6(ctx),
+        _ => Ok(xdp_action::XDP_PASS),
     }
+}
+
+/// 封禁命中处理：逐源 +1（BLOCKLIST value），全局 +1（DROP_TOTAL），丢包。
+#[inline(always)]
+fn hit_and_drop<K: Copy>(map: &LruHashMap<K, u32>, key: &K) -> u32 {
+    unsafe {
+        if let Some(c) = map.get_ptr_mut(key) {
+            *c = (*c).wrapping_add(1);
+        }
+        if let Some(c) = DROP_TOTAL.get_ptr_mut(0) {
+            *c = (*c).wrapping_add(1);
+        }
+    }
+    xdp_action::XDP_DROP
+}
+
+#[inline(always)]
+fn try_drop_v4(ctx: XdpContext) -> Result<u32, ()> {
+    // IPv4 头：23 = 协议号；源地址 26..30；四层端口 34..36/36..38（无 options 时；
+    // 带 options 的包这两个偏移读到的是别的字段——计数仅是元数据信号，不影响
+    // 放行/丢弃判定）
     let proto = unsafe { *ptr_at::<u8>(&ctx, 23)? };
     let raw = unsafe { *ptr_at::<u32>(&ctx, 26)? };
     let src = u32::from_be(raw);
@@ -88,16 +119,20 @@ fn try_drop(ctx: XdpContext) -> Result<u32, ()> {
         observe_flow(src, sport, dport);
     }
     if unsafe { BLOCKLIST.get(&src) }.is_some() {
-        // 丢弃计数：逐源 +1（BLOCKLIST value），全局 +1（DROP_TOTAL，status 直读）
-        unsafe {
-            if let Some(c) = BLOCKLIST.get_ptr_mut(&src) {
-                *c = (*c).wrapping_add(1);
-            }
-            if let Some(c) = DROP_TOTAL.get_ptr_mut(0) {
-                *c = (*c).wrapping_add(1);
-            }
-        }
-        Ok(xdp_action::XDP_DROP)
+        Ok(hit_and_drop(&BLOCKLIST, &src))
+    } else {
+        Ok(xdp_action::XDP_PASS)
+    }
+}
+
+#[inline(always)]
+fn try_drop_v6(ctx: XdpContext) -> Result<u32, ()> {
+    // IPv6 头（固定 40 字节）：下一包头 14+6=22，源地址 14+8=22..38。
+    // 扩展头场景：源地址偏移不受扩展头影响（扩展头在载荷侧），端口读取可能
+    // 偏移——与 v4 options 同理，仅影响元数据计数，不影响判定。
+    let raw = unsafe { *ptr_at::<KeyV6>(&ctx, 22)? };
+    if unsafe { BLOCKLIST_V6.get(&raw) }.is_some() {
+        Ok(hit_and_drop(&BLOCKLIST_V6, &raw))
     } else {
         Ok(xdp_action::XDP_PASS)
     }
