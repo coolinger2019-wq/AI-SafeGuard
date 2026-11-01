@@ -61,6 +61,9 @@ base64 = "0.22"
 hyper-util = { version = "0.1", features = ["service"] }
 time = { version = "0.3", default-features = false, features = ["std"] }
 etherparse = "0.18"
+# F806 蜜罐双栈监听：显式 IPV6_V6ONLY=false（Windows 默认 v6only=1，不显式设
+# 会导致 v4 蜜罐面消失）；tokio 传递依赖树里已有，仅提升为直接依赖
+socket2 = { version = "0.6", default-features = false }
 # Linux 采样捕获（AF_PACKET 原始套接字，安全 API，仅 Linux 目标编译）。
 # time 特性：rustix 1.1.5 的 net 单独启用时 linux_raw 后端缺 timespec（sockopt 需要）
 rustix = { version = "1.1", features = ["net", "time"] }

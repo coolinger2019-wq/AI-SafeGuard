@@ -360,7 +360,11 @@ async fn run_listener(
     running: Arc<AtomicBool>,
     mut desired: watch::Receiver<bool>,
 ) {
-    let addr = std::net::SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), l.port);
+    // F806 双栈监听：显式 IPV6_V6ONLY=false 的 [::] 套接字同时收 v6 与 v4-mapped
+    // （Windows 默认 v6only=1，必须显式关，否则 v4 蜜罐面消失）；无 v6 栈/被禁用
+    // → 回退 0.0.0.0 纯 v4。v4-mapped 对端地址在 handle_conn 入口归一化为 v4。
+    let addr_dual = std::net::SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), l.port);
+    let addr_v4 = std::net::SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), l.port);
     loop {
         // 期望状态闸门：false → 摘下监听驻留（不占端口、不占并发预算）
         while !*desired.borrow_and_update() {
@@ -374,9 +378,25 @@ async fn run_listener(
                 }
             }
         }
-        let listener = match TcpListener::bind(addr).await {
+        // 先试双栈（显式 v6only=false；Windows 默认 v6only=1 必须显式关，否则
+        // v4 蜜罐面消失）；无 v6 栈/被禁用 → 回退纯 v4
+        let bind_dual = || -> std::io::Result<TcpListener> {
+            let sock = socket2::Socket::new(
+                socket2::Domain::IPV6,
+                socket2::Type::STREAM,
+                Some(socket2::Protocol::TCP),
+            )?;
+            sock.set_only_v6(false)?; // 双栈：v4-mapped 一并收
+            sock.bind(&addr_dual.into())?;
+            sock.listen(1024)?;
+            let std_l: std::net::TcpListener = sock.into();
+            std_l.set_nonblocking(true)?;
+            TcpListener::from_std(std_l)
+        };
+        let listener = match bind_dual() {
             Ok(v) => v,
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                // 端口被占与栈无关，直接走原错误路径
                 running.store(false, Ordering::Relaxed);
                 bus.publish(SecurityEvent::engine(
                     "error",
@@ -387,27 +407,33 @@ async fn run_listener(
                 ));
                 return; // 退出任务：热启动会重拉重试
             }
-            Err(e) if e.raw_os_error() == Some(10013) => {
-                // Windows 专属：端口落在系统动态保留段（Hyper-V/winnat 随机圈走，
-                // netsh interface ipv4 show excludedportrange 可查且重启后可能变化）
-                running.store(false, Ordering::Relaxed);
-                bus.publish(SecurityEvent::engine(
-                    "error",
-                    format!(
-                        "蜜罐 [{}] 绑定 :{} 失败：端口落在 Windows 系统保留段（os error 10013）——换端口，或以管理员执行 netsh int ipv4 add excludedportrange 把该端口固定保留",
-                        l.name, l.port
-                    ),
-                ));
-                return;
-            }
-            Err(e) => {
-                running.store(false, Ordering::Relaxed);
-                bus.publish(SecurityEvent::engine(
-                    "error",
-                    format!("蜜罐 [{}] 绑定 :{} 失败: {e}", l.name, l.port),
-                ));
-                return; // 退出任务：热启动会重拉重试
-            }
+            Err(_) => match TcpListener::bind(addr_v4).await {
+                Ok(v) => {
+                    tracing::info!("蜜罐 [{}] 双栈绑定不可用，回退纯 IPv4 监听", l.name);
+                    v
+                }
+                Err(e) if e.raw_os_error() == Some(10013) => {
+                    // Windows 专属：端口落在系统动态保留段（Hyper-V/winnat 随机圈走，
+                    // netsh interface ipv4 show excludedportrange 可查且重启后可能变化）
+                    running.store(false, Ordering::Relaxed);
+                    bus.publish(SecurityEvent::engine(
+                        "error",
+                        format!(
+                            "蜜罐 [{}] 绑定 :{} 失败：端口落在 Windows 系统保留段（os error 10013）——换端口，或以管理员执行 netsh int ipv4 add excludedportrange 把该端口固定保留",
+                            l.name, l.port
+                        ),
+                    ));
+                    return;
+                }
+                Err(e) => {
+                    running.store(false, Ordering::Relaxed);
+                    bus.publish(SecurityEvent::engine(
+                        "error",
+                        format!("蜜罐 [{}] 绑定 :{} 失败: {e}", l.name, l.port),
+                    ));
+                    return; // 退出任务：热启动会重拉重试
+                }
+            },
         };
         running.store(true, Ordering::Relaxed);
         bus.publish(SecurityEvent::engine(
@@ -525,7 +551,18 @@ async fn handle_conn(
     gate: Arc<Mutex<EventGate>>,
 ) {
     let (remote_ip, remote_port) = match stream.peer_addr() {
-        Ok(a) => (a.ip().to_string(), a.port()),
+        Ok(a) => {
+            // F806：双栈监听下 v4 对端呈 ::ffff:x.y.z.w 形态——归一化回 v4，
+            // 否则事件/封禁/阶梯的整个管线都会被 v4-mapped 字符串污染
+            let ip = match a {
+                std::net::SocketAddr::V6(v6) => match v6.ip().to_ipv4_mapped() {
+                    Some(v4) => std::net::IpAddr::V4(v4),
+                    None => std::net::IpAddr::V6(*v6.ip()),
+                },
+                std::net::SocketAddr::V4(v4) => std::net::IpAddr::V4(*v4.ip()),
+            };
+            (ip.to_string(), a.port())
+        }
         Err(_) => ("unknown".into(), 0),
     };
     // 每源连接事件限流（审计 run-1 D2）：超限连接的会话仿真与应答不受影响，

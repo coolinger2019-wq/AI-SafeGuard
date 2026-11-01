@@ -26,6 +26,8 @@ rcgen.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
 time.workspace = true
+# F806：双栈监听（显式 IPV6_V6ONLY=false，Windows 默认开 v6only 会丢 v4 蜜罐面）
+socket2.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # 文件系统蜜饵只读监听（H210 v1 仅 Linux；Windows 用户态无「文件被读取」对等 API）
