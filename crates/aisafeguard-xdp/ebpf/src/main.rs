@@ -15,14 +15,11 @@ use aya_ebpf::{
 #[map]
 static BLOCKLIST: LruHashMap<u32, u32> = LruHashMap::with_max_entries(65536, 0);
 
-/// F807 封禁名单 v6：key = 源 IPv6 的 16 字节网络序（= Ipv6Addr::octets()），
-/// value 同 v4（按源丢包计数）。镜像资格同 v4（In + Any + 无端口 + 非保护）。
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct KeyV6([u8; 16]);
-
+/// F807 封禁名单 v6：key = 源 IPv6 的 16 字节大端整（u128::from_be_bytes(octets)，
+/// 与用户态写入侧同构）。用原语键而非自定义结构键——bpf-linker 0.9.15 会把
+/// 自定义结构键的 map 静态常量折叠进 .rodata（符号从 maps 段消失，加载端找不到）。
 #[map]
-static BLOCKLIST_V6: LruHashMap<KeyV6, u32> = LruHashMap::with_max_entries(65536, 0);
+static BLOCKLIST_V6: LruHashMap<u128, u32> = LruHashMap::with_max_entries(65536, 0);
 
 /// 流表（0.5.1 G1）：入站五元组元数据（目标固定本机，故 key 只含源三元组），
 /// value = 观测包计数。LRU 有界：表满按最旧驱逐，不拖垮收包路径。
@@ -127,12 +124,17 @@ fn try_drop_v4(ctx: XdpContext) -> Result<u32, ()> {
 
 #[inline(always)]
 fn try_drop_v6(ctx: XdpContext) -> Result<u32, ()> {
-    // IPv6 头（固定 40 字节）：下一包头 14+6=22，源地址 14+8=22..38。
-    // 扩展头场景：源地址偏移不受扩展头影响（扩展头在载荷侧），端口读取可能
-    // 偏移——与 v4 options 同理，仅影响元数据计数，不影响判定。
-    let raw = unsafe { *ptr_at::<KeyV6>(&ctx, 22)? };
-    if unsafe { BLOCKLIST_V6.get(&raw) }.is_some() {
-        Ok(hit_and_drop(&BLOCKLIST_V6, &raw))
+    // IPv6 头（固定 40 字节）：源地址 14+8=22..38。逐字节读取（BPF 对非对齐
+    // 宽加载会拒绝）；扩展头不影响源地址偏移。组装为大端 u128 作 map 键。
+    let mut b = [0u8; 16];
+    let mut i = 0usize;
+    while i < 16 {
+        b[i] = unsafe { *ptr_at::<u8>(&ctx, 22 + i)? };
+        i += 1;
+    }
+    let key = u128::from_be_bytes(b);
+    if unsafe { BLOCKLIST_V6.get(&key) }.is_some() {
+        Ok(hit_and_drop(&BLOCKLIST_V6, &key))
     } else {
         Ok(xdp_action::XDP_PASS)
     }

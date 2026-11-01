@@ -76,8 +76,9 @@ pub struct XdpFastPath {
     /// 保活：aya 对象（程序/链接/map）同生命周期
     _ebpf: aya::Ebpf,
     blocklist: aya::maps::HashMap<aya::maps::MapData, u32, u32>,
-    /// F807：v6 封禁名单（key = 16 字节网络序 = Ipv6Addr::octets()）
-    blocklist_v6: aya::maps::HashMap<aya::maps::MapData, XdpKeyV6, u32>,
+    /// F807：v6 封禁名单（key = 16 字节大端整 = u128::from_be_bytes(octets)，
+    /// 与 eBPF 侧 u128 键同构——eBPF 侧用原语键避开 bpf-linker 的结构键折叠）
+    blocklist_v6: aya::maps::HashMap<aya::maps::MapData, u128, u32>,
     /// 内核流表（G1：源三元组 → 包计数，LRU 有界；v4-only，v6 流观测不在
     /// XDP 范围——v6 只走封禁判定）
     flows: aya::maps::HashMap<aya::maps::MapData, XdpFlowKey, u32>,
@@ -88,18 +89,6 @@ pub struct XdpFastPath {
     pub iface: String,
     pub mode: XdpMode,
 }
-
-/// F807：v6 map key（与 eBPF 侧 `repr(C) KeyV6([u8;16])` 逐字节对齐——
-/// 网络序原始字节，与 Ipv6Addr::octets() 同序）。
-#[cfg(target_os = "linux")]
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct XdpKeyV6(pub [u8; 16]);
-
-#[cfg(target_os = "linux")]
-// aya map key/value 约束：纯 Copy 数据按字节转译
-#[allow(unsafe_code)]
-unsafe impl aya::Pod for XdpKeyV6 {}
 
 /// 内核流表 key（与 eBPF 侧 `repr(C) FlowKey` 逐字段对齐）。
 #[cfg(target_os = "linux")]
@@ -145,7 +134,7 @@ impl XdpFastPath {
             .ok_or("eBPF 对象里找不到 map BLOCKLIST")?
             .try_into()
             .map_err(|e| format!("map 类型不匹配: {e}"))?;
-        let blocklist_v6: aya::maps::HashMap<aya::maps::MapData, XdpKeyV6, u32> = ebpf
+        let blocklist_v6: aya::maps::HashMap<aya::maps::MapData, u128, u32> = ebpf
             .take_map("BLOCKLIST_V6")
             .ok_or("eBPF 对象里找不到 map BLOCKLIST_V6")?
             .try_into()
@@ -181,7 +170,7 @@ impl XdpFastPath {
                 .map_err(|e| format!("XDP map 写入 {ip} 失败: {e}"))?,
             IpAddr::V6(v6) => self
                 .blocklist_v6
-                .insert(XdpKeyV6(v6.octets()), 0, 0)
+                .insert(u128::from_be_bytes(v6.octets()), 0, 0)
                 .map_err(|e| format!("XDP map 写入 {ip} 失败: {e}"))?,
         }
         self.mirror.insert(ip);
@@ -203,7 +192,7 @@ impl XdpFastPath {
                 })?,
             IpAddr::V6(v6) => self
                 .blocklist_v6
-                .remove(&XdpKeyV6(v6.octets()))
+                .remove(&u128::from_be_bytes(v6.octets()))
                 .map_err(|e| {
                     if self.mirror.contains(&ip) {
                         format!("XDP map 删除 {ip} 失败: {e}")
