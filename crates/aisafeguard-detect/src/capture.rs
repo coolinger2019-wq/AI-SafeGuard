@@ -222,12 +222,20 @@ pub fn l3_payload(frame: &[u8]) -> Option<&[u8]> {
 }
 
 /// 模式过滤（Linux 捕获线程内做，与 Windows 内核过滤器同语义）：
-/// control 模式只放 TCP 纯 SYN；full 模式放全部 TCP 段；非 TCP 一律不放。
-/// 解析失败的畸形帧不放（宁缺毋滥）。
+/// control 模式只放 TCP 纯 SYN；full 模式放全部 TCP 段 + SCTP（F808：
+/// CVE-2026-98548 块级特征检测需要看到 SCTP PDU）；非 TCP/UDP 且非 SCTP 一律不放。
+/// 解析失败的畸形帧不放（宁缺毋滥）。Windows 侧 win_filter 不放行 SCTP——
+/// SCTP 检测为 Linux-only（WinDivert 过滤语言的协议关键字所限）。
 pub fn passes_mode_filter(ip: &[u8], full: bool) -> bool {
     let Ok(sp) = etherparse::SlicedPacket::from_ip(ip) else {
         return false;
     };
+    // F808：full 模式放行 SCTP over IPv4（协议 132）
+    if let Some(etherparse::NetSlice::Ipv4(v4)) = &sp.net {
+        if v4.header().protocol() == etherparse::IpNumber::SCTP {
+            return full;
+        }
+    }
     match sp.transport {
         Some(etherparse::TransportSlice::Tcp(t)) => full || (t.syn() && !t.ack()),
         _ => false,

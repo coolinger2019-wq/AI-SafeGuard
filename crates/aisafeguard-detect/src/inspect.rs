@@ -75,6 +75,14 @@ impl CapturePipeline {
         if !cfg.enabled {
             return Vec::new();
         }
+        // F808：SCTP（IP 协议 132）帧——CVE-2026-98548 捆绑块特征检测
+        //（要求捕获线程已放行该帧：full 模式下 passes_mode_filter 放行）
+        if let Some((src, dst, pdu)) = parse_sctp(data) {
+            if let Some(d) = self.check_sctp_uaf(ts, src, dst, pdu, cfg) {
+                return vec![d];
+            }
+            return Vec::new();
+        }
         let Some((src, dst, tcp)) = parse(data) else {
             return Vec::new();
         };
@@ -253,6 +261,78 @@ impl CapturePipeline {
             rule_id: "builtin.syn_flood",
         })
     }
+
+/// F808 检测（CVE-2026-98548）：同一 SCTP 包内捆绑 [ERROR(Stale Cookie)] 与
+/// [DATA] 块——内核 stale-cookie 重试路径删除"包正在用的 transport"、兄弟 DATA
+/// 块又将其重新登记，构成悬垂指针（use-after-free）。合法协议行为不可能在
+/// 单包内出现此组合（Stale Cookie ERROR 意味着握手重启，DATA 不再有效），
+/// 出现即利用特征。冷却与 scan/flood 同一机制。
+fn check_sctp_uaf(
+    &mut self,
+    ts: i64,
+    src: IpAddr,
+    dst: IpAddr,
+    pdu: &[u8],
+    cfg: &CaptureConfig,
+) -> Option<FlowDetection> {
+    if pdu.len() < 16 {
+        return None; // 公共头 12 + 至少一个块头 4
+    }
+    let sport = u16::from_be_bytes([pdu[0], pdu[1]]);
+    let dport = u16::from_be_bytes([pdu[2], pdu[3]]);
+    let mut off = 12usize;
+    let mut seen_data = false;
+    let mut seen_stale_cookie = false;
+    while off + 4 <= pdu.len() {
+        let ctype = pdu[off];
+        let clen = u16::from_be_bytes([pdu[off + 2], pdu[off + 3]]) as usize;
+        if clen < 4 {
+            break; // 长度非法，停止解析（宁缺毋滥）
+        }
+        let cend = (off + clen).min(pdu.len());
+        match ctype {
+            0 => seen_data = true, // DATA 块
+            9 => {
+                // ERROR 块：值区 = [cause_code(2)][cause_len(2)][...]，
+                // Stale Cookie Error 的 cause code = 11（0x000B，RFC 4960 §3.3.10.9）
+                if off + 6 <= cend && u16::from_be_bytes([pdu[off + 4], pdu[off + 5]]) == 0x000B {
+                    seen_stale_cookie = true;
+                }
+            }
+            _ => {}
+        }
+        off = cend;
+        if seen_data && seen_stale_cookie {
+            break;
+        }
+    }
+    if !(seen_data && seen_stale_cookie) {
+        return None;
+    }
+    if !should_fire(
+        &mut self.fired_at,
+        "sctp_uaf",
+        &src.to_string(),
+        ts,
+        cfg.window_secs,
+    ) {
+        return None;
+    }
+    Some(FlowDetection {
+        kind: "sctp_uaf",
+        src,
+        key: FlowKey {
+            src,
+            dst,
+            src_port: sport,
+            dst_port: dport,
+        },
+        evidence: format!(
+            "SCTP 单包捆绑 [ERROR(Stale Cookie)]+[DATA]（CVE-2026-98548 利用特征，采样捕获；源口 {sport} → 目的口 {dport}）"
+        ),
+        rule_id: "builtin.sctp_uaf",
+    })
+}
 }
 
 /// 帧解析：IP(v4/v6) + TCP，非 TCP 帧返回 None。
@@ -275,6 +355,28 @@ fn parse(data: &[u8]) -> Option<(IpAddr, IpAddr, TcpSlice<'_>)> {
     };
     Some((src, dst, tcp))
 }
+
+/// F808：SCTP over IPv4 帧解析（IP 协议 132）——返回 (源, 目的, SCTP PDU)。
+/// 手工解析 IPv4 头（IHL + 总长，剔除链路层填充）；v6 SCTP 不在 F808 范围。
+fn parse_sctp(data: &[u8]) -> Option<(IpAddr, IpAddr, &[u8])> {
+    if data.len() < 20 || data[0] >> 4 != 4 {
+        return None;
+    }
+    let ihl = (data[0] & 0x0f) as usize * 4;
+    if ihl < 20 || data[9] != 132 {
+        return None;
+    }
+    let total = u16::from_be_bytes([data[2], data[3]]) as usize;
+    let end = total.min(data.len());
+    if end < ihl + 12 {
+        return None; // 装不下 SCTP 公共头
+    }
+    let src = IpAddr::from([data[12], data[13], data[14], data[15]]);
+    let dst = IpAddr::from([data[16], data[17], data[18], data[19]]);
+    Some((src, dst, &data[ihl..end]))
+}
+
+
 
 /// 载荷摘要清洗：控制字符归空格、截断——与蜜罐回显同一纪律，进证据的都当不可信输入。
 fn sanitize_snippet(bytes: &[u8]) -> String {
@@ -372,6 +474,89 @@ pub(crate) mod testkit {
 mod tests {
     use super::testkit::*;
     use super::*;
+
+    // ---- F808：SCTP UAF 检测测试 ----
+
+    fn chunk(ctype: u8, body: &[u8]) -> Vec<u8> {
+        let mut c = vec![ctype, 0];
+        c.extend_from_slice(&((4 + body.len()) as u16).to_be_bytes());
+        c.extend_from_slice(body);
+        c
+    }
+
+    fn error_chunk(cause: u16) -> Vec<u8> {
+        let mut body = cause.to_be_bytes().to_vec();
+        body.extend_from_slice(&4u16.to_be_bytes());
+        body.extend_from_slice(&[0, 0]);
+        chunk(9, &body)
+    }
+
+    fn data_chunk() -> Vec<u8> {
+        chunk(0, &[0x41; 8])
+    }
+
+    fn sctp_pdu(chunks: &[Vec<u8>]) -> Vec<u8> {
+        let mut pdu = Vec::new();
+        pdu.extend_from_slice(&1234u16.to_be_bytes());
+        pdu.extend_from_slice(&5678u16.to_be_bytes());
+        pdu.extend_from_slice(&[0; 8]);
+        for c in chunks {
+            pdu.extend_from_slice(c);
+        }
+        pdu
+    }
+
+    fn sctp_frame(src: &str, dst: &str, pdu: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(20 + pdu.len());
+        out.push(0x45);
+        out.push(0x00);
+        out.extend_from_slice(&((20 + pdu.len()) as u16).to_be_bytes());
+        out.extend_from_slice(&[0x00, 0x01, 0x00, 0x00, 64, 132, 0x00, 0x00]);
+        out.extend_from_slice(&src.parse::<std::net::Ipv4Addr>().unwrap().octets());
+        out.extend_from_slice(&dst.parse::<std::net::Ipv4Addr>().unwrap().octets());
+        out.extend_from_slice(pdu);
+        out
+    }
+
+    #[test]
+    fn f808_sctp_uaf_bundle_fires_once() {
+        let mut p = CapturePipeline::new(&cfg());
+        let frame = sctp_frame(
+            "203.0.113.7",
+            "198.51.100.9",
+            &sctp_pdu(&[error_chunk(0x000B), data_chunk()]),
+        );
+        let out = p.on_frame(1000, &frame, &cfg());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].kind, "sctp_uaf");
+        assert_eq!(out[0].rule_id, "builtin.sctp_uaf");
+        assert!(out[0].evidence.contains("CVE-2026-98548"));
+        // 冷却：窗口（60s）内同源不重复触发
+        let out = p.on_frame(1050, &frame, &cfg());
+        assert!(out.is_empty(), "窗口内应冷却");
+    }
+
+    #[test]
+    fn f808_sctp_non_bundles_do_not_fire() {
+        let mut p = CapturePipeline::new(&cfg());
+        let src = "203.0.113.7";
+        let dst = "198.51.100.9";
+        // 只有 ERROR(Stale Cookie)
+        let f1 = sctp_frame(src, dst, &sctp_pdu(&[error_chunk(0x000B)]));
+        assert!(p.on_frame(1000, &f1, &cfg()).is_empty());
+        // 只有 DATA
+        let f2 = sctp_frame(src, dst, &sctp_pdu(&[data_chunk()]));
+        assert!(p.on_frame(1000, &f2, &cfg()).is_empty());
+        // ERROR cause 不是 Stale Cookie（cause=1 无效流标识）
+        let f3 = sctp_frame(src, dst, &sctp_pdu(&[error_chunk(1), data_chunk()]));
+        assert!(p.on_frame(1000, &f3, &cfg()).is_empty());
+        // 最后的捆绑包正常触发（前面的非捆绑不污染状态）
+        let f4 = sctp_frame(src, dst, &sctp_pdu(&[error_chunk(0x000B), data_chunk()]));
+        let out = p.on_frame(1200, &f4, &cfg());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].kind, "sctp_uaf");
+    }
+
 
     fn cfg() -> CaptureConfig {
         CaptureConfig {
