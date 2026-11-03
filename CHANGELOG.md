@@ -2,6 +2,34 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.8.0] - 2026-11-01
+
+> 0.7-0.8 周期主线：**IPv6 攻击面全覆盖 + 检测漏斗收口 + 全链安全审计加固 + 三通道部署架构**。
+> 批次明细见 [docs/ROADMAP-0.7.md](docs/ROADMAP-0.7.md)（F780-F808 各节）。
+
+### 新增（本周期重大）
+
+- **粘性缓冲区（F780）**：规则引擎五格缓冲（method/uri/header/user_agent/client_body），
+  sticky/modifier 双形态 + pcre 快捷标志映射，ET 白名单通过数 20643→37039（规范 bump v2）
+- **AI 协议模板（F797）**：OpenAI 兼容端点之外支持 chat/responses/anthropic 三协议模板 +
+  探针（/api/ai/test），兼容 opencode 等非标网关
+- **IPv6 攻击面三连（F806/F807/F808）**：蜜罐监听器双栈（socket2 显式 v6only=false，
+  v4-mapped 归一化）、XDP 增 BLOCKLIST_V6（u128 键，0x86DD 帧解析，保护段 v6 硬过滤）、
+  capture 管线增 builtin.sctp_uaf 检测器（CVE-2026-98548 同类洞的单包捆绑利用特征，
+  Linux full 模式）
+- **防火墙封禁累进阶梯（F805）**：重复犯源按 1h→24h→7d→31d→6month→1year 加码，
+  第 6 档告警请人工复核；误报反馈清零计数
+- **检测漏斗收口（F802 系列）**：检测/建议/镜像计数按 kind 与来源全量入库，
+  ws-CDN/hy2/reality 三通道部署架构（隧道级源站 IP 隐藏）
+
+### 变更（审计加固批次）
+
+- 全链安全审计（Cloudflare security-audit-skill 六阶段 + Judges Panel 45 评委交叉）后
+  修复 18+ 项真实发现：事件哈希链补齐 5 列证据（v2 re-chain）、快速路径封禁补齐
+  AI 同级闸门（采集≠执法解耦 enforce 开关）、建议 INSERT 补 impl_path 列（修复静默
+  入库失败）、SNI 默认值换冷门真实站、后量子签名（ML-DSA-65）可选启用、面板
+  仅回环强化、访问日志/limitIp=3/UUID 轮换纪律等（详见 ROADMAP-0.7.md 审计批次节）
+
 ## [未发布]
 
 ### 新增

@@ -4,7 +4,7 @@
 
 > **这不是 LLM 内容审核/Guardrail 产品**。AI 在这里只做一件事:把蜜罐与真实流量观测到的攻击证据读给 LLM,产出**严格校验的封禁建议**(默认人工确认)。检测与处置不依赖 AI——关掉 AI,快路径全功能照常。
 >
-> 当前版本 **0.6.0**。架构与设计:[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · 路线图:[docs/ROADMAP.md](docs/ROADMAP.md) + [ROADMAP-0.5.md](docs/ROADMAP-0.5.md) + [ROADMAP-0.5.3.md](docs/ROADMAP-0.5.3.md) + [ROADMAP-0.6.md](docs/ROADMAP-0.6.md) · 威胁模型:[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) · ISO 27001 对照:[docs/COMPLIANCE.md](docs/COMPLIANCE.md) · NGFW/协同演进:[docs/NGFW_EVOLUTION.md](docs/NGFW_EVOLUTION.md)
+> 当前版本 **0.8.0**。架构与设计:[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · 路线图:[docs/ROADMAP.md](docs/ROADMAP.md) + [ROADMAP-0.5.md](docs/ROADMAP-0.5.md) + [ROADMAP-0.5.3.md](docs/ROADMAP-0.5.3.md) + [ROADMAP-0.6.md](docs/ROADMAP-0.6.md) + [ROADMAP-0.7.md](docs/ROADMAP-0.7.md) · 威胁模型:[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) · ISO 27001 对照:[docs/COMPLIANCE.md](docs/COMPLIANCE.md) · NGFW/协同演进:[docs/NGFW_EVOLUTION.md](docs/NGFW_EVOLUTION.md)
 
 ```
  蜜罐(诱捕) ────────┐
@@ -19,6 +19,38 @@
 
 **适合**:有公网或内网暴露面的 Linux/Windows 服务器与工作站;想要"蜜罐诱捕 + 自动处置 + 可审计"而不想装全家桶的运维;研究蜜罐与 AI 处置联动的个人。
 **不适合**:期望企业多租户管控、完整 NGFW/IPS、EDR 级内存/进程防护的团队(见[威胁模型](docs/THREAT_MODEL.md)的非目标清单)。
+
+## 0.8 亮点(0.7-0.8 周期,全量见 [CHANGELOG](CHANGELOG.md) 与 [ROADMAP-0.7](docs/ROADMAP-0.7.md))
+
+- **IPv6 攻击面全覆盖**:蜜罐监听器双栈(v6+v4-mapped 归一化)、XDP 增 v6 封禁镜像
+  (BLOCKLIST_V6,保护段 v6 照旧硬过滤)、`builtin.sctp_uaf` 检测器(单包捆绑
+  [ERROR(Stale Cookie)]+[DATA] = CVE-2026-98548 同类内核 UAF 的利用特征,自动进累进阶梯)
+- **检测漏斗收口**:检测/建议/镜像计数按 kind 与来源全量入库可查;防火墙封禁累进
+  升级阶梯(1h→24h→7d→31d→6month→1year,误报反馈清零计数);AI 自动封禁口径拆分
+  (快路径/AI 分列计数)
+- **全链安全审计加固**:六阶段深度审计 + 45 评委启发式交叉验证,18+ 项真实发现修复
+  (事件哈希链补齐 5 列证据、建议入库列失配修复、SNI 默认值换冷门真实站、
+  面板仅回环强化、访问日志与 limitIp=3、后量子签名 ML-DSA-65 可选启用、
+  口令证据口径裁定等)
+- **三通道部署架构**(实战检验):ws-CDN 隧道线(源站 IP 对 DNS 隐形)/ hy2 UDP 快线 /
+  reality 直连观察位——任一通道被封,切换成本趋近于零
+
+## 一键部署(0.8 新增)
+
+**新机从零到运行**(Ubuntu 22.04+/x86_64,root;下载 CI 预构建二进制,目标机零编译):
+
+```bash
+bash <(curl -fsSL https://gitee.com/coolinger2019-wq/AI-SafeGuard/raw/main/scripts/install.sh)
+```
+
+**已有节点升级**(仓库根目录;VPS 侧直连 GitHub Releases 下载+校验+换装+健康检查):
+
+```bash
+bash scripts/deploy.sh
+```
+
+二进制由 CI(Actions)在 tag 推送时构建并附 SHA-256;eBPF 对象从源码可复现构建
+(llvm-19 + nightly + bpf-linker),产物入库带哈希伴生。
 
 ## 5 分钟上手
 
@@ -147,7 +179,7 @@ aisafeguard fed audit <out.json>                   # 审计导出
 
 ## 路线图
 
-0.3 / 0.4 全部完成(检测平台 + AI 深度介入 + 事件外发 + 组织协同 mTLS + XDP;工程与安全收口)。**0.5 = NGFW 感知层(已完成)**:0.5.0 L7 复用(HttpHint/JA3/JA4)+ Suricata/ET 风格规则子集引擎 + Windows 能力对等(纯用户态,零 eBPF 依赖);0.5.1 Linux eBPF 流表 + XDP map 联动(Batch G);0.5.2 stretch 收官(AF_XDP 设计 / WFP callout POC 计划 / eBPF-for-windows 实验轨 / JA4 差异表)。**0.5.4-0.5.6 = 单机地基版(已完成,见上文「单机地基能力」)**;0.6 = 多机协同完全体。总览:[docs/ROADMAP.md](docs/ROADMAP.md)。
+0.3 / 0.4 全部完成(检测平台 + AI 深度介入 + 事件外发 + 组织协同 mTLS + XDP;工程与安全收口)。**0.5 = NGFW 感知层(已完成)**:0.5.0 L7 复用(HttpHint/JA3/JA4)+ Suricata/ET 风格规则子集引擎 + Windows 能力对等(纯用户态,零 eBPF 依赖);0.5.1 Linux eBPF 流表 + XDP map 联动(Batch G);0.5.2 stretch 收官(AF_XDP 设计 / WFP callout POC 计划 / eBPF-for-windows 实验轨 / JA4 差异表)。**0.5.4-0.5.6 = 单机地基版(已完成,见上文「单机地基能力」)**;0.6 = 多机协同完全体。**0.7-0.8 = 攻击面深捕与自审闭环(已完成)**:粘性缓冲区规则语义、MCP 蜜罐深化、AI 协议模板、检测漏斗收口、累进阶梯、全链安全审计加固、IPv6 三连(F806/F807/F808)、三通道部署架构。总览:[docs/ROADMAP.md](docs/ROADMAP.md)。
 
 ## 安全披露
 

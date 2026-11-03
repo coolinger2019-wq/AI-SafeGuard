@@ -1,0 +1,61 @@
+name: build
+# push 到 main → 构建产物（workflow artifact，验证可复现性）
+# push v* 标签 → 构建 + 发布 GitHub Release（install.sh/deploy.sh 的下载源）
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 LLVM-19（eBPF 重编所需）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-19-dev clang-19
+
+      - name: 安装 nightly + rust-src（eBPF 构建目标）
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: 安装 bpf-linker
+        run: cargo install bpf-linker --version '~0.9'
+
+      - name: 重编 eBPF 对象（F807：源码→.o 可复现构建，替代仓库内置产物）
+        working-directory: crates/aisafeguard-xdp/ebpf
+        env:
+          LLVM_SYS_191_PREFIX: /usr/lib/llvm-19
+        run: bash build.sh
+
+      - name: 编译 release 主程序
+        run: cargo build --release --bin aisafeguard
+
+      - name: 校验和
+        run: |
+          sha256sum target/release/aisafeguard | tee aisafeguard.sha256
+          sha256sum crates/aisafeguard-xdp/objects/aisafeguard_xdp.o | tee aisafeguard_xdp.o.sha256
+
+      - name: 上传构建产物（每次 push 保留 90 天）
+        uses: actions/upload-artifact@v4
+        with:
+          name: aisafeguard-linux-x64
+          path: |
+            target/release/aisafeguard
+            aisafeguard.sha256
+            crates/aisafeguard-xdp/objects/aisafeguard_xdp.o
+            aisafeguard_xdp.o.sha256
+
+      - name: 打 v* 标签时发布 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/release/aisafeguard
+            aisafeguard.sha256
