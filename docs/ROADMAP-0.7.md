@@ -312,6 +312,30 @@
   告警事件提示人工复核（长期封禁是重决策，保留人工可见性）。
 - **验收**：单测覆盖阶梯判定；连续犯源的封禁 TTL 按级递增有事件留痕。
 
+### F806 蜜罐双栈监听 + F807 XDP 双栈 + F808 SCTP UAF 检测 — 三连交付（2026-11-01，IPv6 面扩展）
+
+- **背景**：VPS 获得 IPv6（HostDare 隧道附挂 2a14:640:2:a80e::1）后，安全栈的 v6
+  覆盖面盘点发现：蜜罐/防火墙管线均为 v4-only——v6 地址上只有真服务（SSH/hy2），
+  攻击面与实验数据面双双缺位。三连补齐：
+- **F806 蜜罐双栈**：监听器改 socket2 显式 v6only=false 的 [::] 绑定（v6+v4-mapped
+  一并收；Windows 默认 v6only=1 的坑显式堵死），无 v6 栈自动回退 0.0.0.0；对端地址
+  v4-mapped 归一化（防 ::ffff: 污染事件/封禁/阶梯管线）。部署后 11 端口 [::] 双栈实锤。
+- **F807 XDP 双栈**：eBPF 增 BLOCKLIST_V6（u128 大端整键）+ 0x86DD 帧解析；用户态
+  mirrorable 返回 IpAddr（v6 同资格，保护段 v6 照旧硬过滤）+ block_v6/unblock_v6/
+  reconcile 双栈化。VPS 上常驻 eBPF 工具链（llvm-19-dev + nightly + bpf-linker 0.9.15，
+  ebpf 重编 47 秒）。**技术教训**：①bpf-linker 0.9.15 会把自定义结构键的 map 静态
+  常量折叠进 rodata（符号从 maps 段蒸发）——u128 原语键+逐字节加载绕开；②build.sh
+  曾以 CRLF 提交（dash 咬 pipefail）——转 LF + .gitattributes 防复发。
+- **F808 SCTP UAF 检测**（CVE-2026-98548 同源洞的主动防御）：capture 管线增
+  builtin.sctp_uaf 检测器——单包捆绑 [ERROR(Stale Cookie)]+[DATA] 即利用特征
+  （RFC 4960 cause 11），Linux full 模式生效；engine 定级 high；sctp_uaf 自动封禁
+  走 F805 阶梯。**边界**：Windows 侧 WinDivert 过滤语言所限不放行 SCTP（Linux-only）；
+  控制模式不可用（需 full）；检验靠单测（VPS 工具链实测过），真实互联网 SCTP 流量
+  稀缺、live-fire 验证以内核计数器+单测替代。
+- **验收**：全部本地测试通过（311+ 增量）；部署实测（v6 监听 [::] 实锤、v6 测试
+  规则镜像 33→34→33 闭环、sctp_uaf 单测在 VPS 工具链复跑通过、哈希链 93549 完整）。
+  提交 a832228（F806）/ 6179c35（F807）/ 031c90a（F808）。
+
 ---
 ---
 
