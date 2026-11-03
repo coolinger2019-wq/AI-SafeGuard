@@ -12,7 +12,7 @@ echo "[1/5] 下载最新 CI 预构建二进制（VPS 侧直连 GitHub，不过 G
 ssh "$VPS" "curl -fsSL --max-time 120 -o /tmp/aisafeguard.new '$GH/aisafeguard' && curl -fsSL --max-time 30 -o /tmp/aisafeguard.sha256 '$GH/aisafeguard.sha256'"
 
 echo "[2/5] sha256 校验..."
-ssh "$VPS" "cd /tmp && echo '\$(cat aisafeguard.sha256)' | sha256sum -c - >/dev/null && grep aisafeguard\$ aisafeguard.sha256"
+ssh "$VPS" "cd /tmp && printf '%s  %s\n' \"\$(cut -d' ' -f1 aisafeguard.sha256)\" aisafeguard.new | sha256sum -c -"
 
 echo "[3/5] 换装 + 重启..."
 ssh "$VPS" "systemctl stop aisafeguard && install -m755 /tmp/aisafeguard.new /usr/local/bin/aisafeguard && rm -f /tmp/aisafeguard.new /tmp/aisafeguard.sha256 && systemctl start aisafeguard && sleep 5 && systemctl is-active aisafeguard"
