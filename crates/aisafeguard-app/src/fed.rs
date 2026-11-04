@@ -1272,8 +1272,8 @@ pub fn load_revocations(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
         Err(e) => return Err(format!("读取失败: {e}")),
     };
-    let list: Vec<serde_json::Value> = serde_json::from_slice(&raw)
-        .map_err(|e| format!("revoked.json 解析失败: {e}"))?;
+    let list: Vec<serde_json::Value> =
+        serde_json::from_slice(&raw).map_err(|e| format!("revoked.json 解析失败: {e}"))?;
     Ok(list
         .iter()
         .filter_map(|e| e["fp"].as_str().map(str::to_string))
@@ -1304,7 +1304,9 @@ pub fn do_revoke(data_dir: &Path, target: &str, reason: &str) -> anyhow::Result<
     let path = revocations_path(data_dir);
     let mut list: Vec<serde_json::Value> = match std::fs::read(&path) {
         Ok(b) => serde_json::from_str(&String::from_utf8_lossy(&b)).map_err(|e| {
-            anyhow::anyhow!("revoked.json 损坏（{e}）——拒不覆盖现有吊销列表，请手工修复该文件后重试")
+            anyhow::anyhow!(
+                "revoked.json 损坏（{e}）——拒不覆盖现有吊销列表，请手工修复该文件后重试"
+            )
         })?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(e) => return Err(e.into()),

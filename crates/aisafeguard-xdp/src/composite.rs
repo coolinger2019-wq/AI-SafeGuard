@@ -180,16 +180,13 @@ impl XdpFastPath {
     pub fn unblock(&mut self, ip: IpAddr) -> std::result::Result<(), String> {
         // 不在镜像集里的 key 直接判成功（幂等，与底层 remove 语义一致）
         match ip {
-            IpAddr::V4(v4) => self
-                .blocklist
-                .remove(&u32::from(v4))
-                .map_err(|e| {
-                    if self.mirror.contains(&ip) {
-                        format!("XDP map 删除 {ip} 失败: {e}")
-                    } else {
-                        String::new()
-                    }
-                })?,
+            IpAddr::V4(v4) => self.blocklist.remove(&u32::from(v4)).map_err(|e| {
+                if self.mirror.contains(&ip) {
+                    format!("XDP map 删除 {ip} 失败: {e}")
+                } else {
+                    String::new()
+                }
+            })?,
             IpAddr::V6(v6) => self
                 .blocklist_v6
                 .remove(&u128::from_be_bytes(v6.octets()))

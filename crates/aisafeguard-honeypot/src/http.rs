@@ -403,7 +403,10 @@ pub(crate) async fn http_session(
         h.tags = tags.clone();
         h
     });
-    let text = sanitize(redact_credential_carriers(&head_text).as_bytes(), MAX_PAYLOAD);
+    let text = sanitize(
+        redact_credential_carriers(&head_text).as_bytes(),
+        MAX_PAYLOAD,
+    );
     let summary = format!(
         "{}{}",
         l7::request_summary(&text, "空 HTTP 请求"),
@@ -620,7 +623,10 @@ mod tests {
         assert!(out.contains("Authorization: ***"), "实际: {out}");
         assert!(out.contains("X-Registry-Auth: ***"), "实际: {out}");
         assert!(out.contains("Proxy-Authorization: ***"), "实际: {out}");
-        assert!(!out.contains("dXNlcjpwYXNz") && !out.contains("abc123"), "实际: {out}");
+        assert!(
+            !out.contains("dXNlcjpwYXNz") && !out.contains("abc123"),
+            "实际: {out}"
+        );
         // body 口令类值按裁定保留明文（证据口径）；普通头不受影响
         let req = "POST /login HTTP/1.1\r\nHost: x\r\n\r\nusername=admin&password=s3cret!&x=1";
         let out = redact_credential_carriers(req);
@@ -781,7 +787,10 @@ mod tests {
                 assert!(summary.contains("login:post"), "实际: {summary}");
                 // 口令证据口径（2026-10-20）：body 值明文保留；头部载体仍 ***
                 assert!(payload.contains("password=Tr0ub4dor"), "实际: {payload}");
-                assert!(!payload.contains("Host: ***") && payload.contains("Host: x"), "实际: {payload}");
+                assert!(
+                    !payload.contains("Host: ***") && payload.contains("Host: x"),
+                    "实际: {payload}"
+                );
                 let hint = http_hint.expect("http 蜜罐事件必须带 HttpHint");
                 assert!(hint.tags.contains(&"login:post".to_string()));
             }

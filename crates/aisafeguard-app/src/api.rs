@@ -118,7 +118,10 @@ async fn auth(
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| {
-            ct_eq(v.as_bytes(), format!("Bearer {}", state.engine.token).as_bytes())
+            ct_eq(
+                v.as_bytes(),
+                format!("Bearer {}", state.engine.token).as_bytes(),
+            )
         });
     if ok {
         next.run(req).await

@@ -468,7 +468,10 @@ impl Handler for SshShellHandler {
         // 到期强断，不因输入内容差异产生例外路径
         if self.shared.started.elapsed() > SHELL_MAX_SESSION {
             let _ = session
-                .data(channel, b"\r\n*** session limit reached, closing ***\r\n".to_vec())
+                .data(
+                    channel,
+                    b"\r\n*** session limit reached, closing ***\r\n".to_vec(),
+                )
                 .map_err(|e: russh::Error| e);
             let _ = session.eof(channel);
             return Err(russh::Error::Disconnect);

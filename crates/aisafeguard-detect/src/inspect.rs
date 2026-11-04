@@ -262,77 +262,78 @@ impl CapturePipeline {
         })
     }
 
-/// F808 检测（CVE-2026-98548）：同一 SCTP 包内捆绑 [ERROR(Stale Cookie)] 与
-/// [DATA] 块——内核 stale-cookie 重试路径删除"包正在用的 transport"、兄弟 DATA
-/// 块又将其重新登记，构成悬垂指针（use-after-free）。合法协议行为不可能在
-/// 单包内出现此组合（Stale Cookie ERROR 意味着握手重启，DATA 不再有效），
-/// 出现即利用特征。冷却与 scan/flood 同一机制。
-fn check_sctp_uaf(
-    &mut self,
-    ts: i64,
-    src: IpAddr,
-    dst: IpAddr,
-    pdu: &[u8],
-    cfg: &CaptureConfig,
-) -> Option<FlowDetection> {
-    if pdu.len() < 16 {
-        return None; // 公共头 12 + 至少一个块头 4
-    }
-    let sport = u16::from_be_bytes([pdu[0], pdu[1]]);
-    let dport = u16::from_be_bytes([pdu[2], pdu[3]]);
-    let mut off = 12usize;
-    let mut seen_data = false;
-    let mut seen_stale_cookie = false;
-    while off + 4 <= pdu.len() {
-        let ctype = pdu[off];
-        let clen = u16::from_be_bytes([pdu[off + 2], pdu[off + 3]]) as usize;
-        if clen < 4 {
-            break; // 长度非法，停止解析（宁缺毋滥）
+    /// F808 检测（CVE-2026-98548）：同一 SCTP 包内捆绑 [ERROR(Stale Cookie)] 与
+    /// [DATA] 块——内核 stale-cookie 重试路径删除"包正在用的 transport"、兄弟 DATA
+    /// 块又将其重新登记，构成悬垂指针（use-after-free）。合法协议行为不可能在
+    /// 单包内出现此组合（Stale Cookie ERROR 意味着握手重启，DATA 不再有效），
+    /// 出现即利用特征。冷却与 scan/flood 同一机制。
+    fn check_sctp_uaf(
+        &mut self,
+        ts: i64,
+        src: IpAddr,
+        dst: IpAddr,
+        pdu: &[u8],
+        cfg: &CaptureConfig,
+    ) -> Option<FlowDetection> {
+        if pdu.len() < 16 {
+            return None; // 公共头 12 + 至少一个块头 4
         }
-        let cend = (off + clen).min(pdu.len());
-        match ctype {
-            0 => seen_data = true, // DATA 块
-            9 => {
-                // ERROR 块：值区 = [cause_code(2)][cause_len(2)][...]，
-                // Stale Cookie Error 的 cause code = 11（0x000B，RFC 4960 §3.3.10.9）
-                if off + 6 <= cend && u16::from_be_bytes([pdu[off + 4], pdu[off + 5]]) == 0x000B {
-                    seen_stale_cookie = true;
-                }
+        let sport = u16::from_be_bytes([pdu[0], pdu[1]]);
+        let dport = u16::from_be_bytes([pdu[2], pdu[3]]);
+        let mut off = 12usize;
+        let mut seen_data = false;
+        let mut seen_stale_cookie = false;
+        while off + 4 <= pdu.len() {
+            let ctype = pdu[off];
+            let clen = u16::from_be_bytes([pdu[off + 2], pdu[off + 3]]) as usize;
+            if clen < 4 {
+                break; // 长度非法，停止解析（宁缺毋滥）
             }
-            _ => {}
+            let cend = (off + clen).min(pdu.len());
+            match ctype {
+                0 => seen_data = true, // DATA 块
+                9 => {
+                    // ERROR 块：值区 = [cause_code(2)][cause_len(2)][...]，
+                    // Stale Cookie Error 的 cause code = 11（0x000B，RFC 4960 §3.3.10.9）
+                    if off + 6 <= cend && u16::from_be_bytes([pdu[off + 4], pdu[off + 5]]) == 0x000B
+                    {
+                        seen_stale_cookie = true;
+                    }
+                }
+                _ => {}
+            }
+            off = cend;
+            if seen_data && seen_stale_cookie {
+                break;
+            }
         }
-        off = cend;
-        if seen_data && seen_stale_cookie {
-            break;
+        if !(seen_data && seen_stale_cookie) {
+            return None;
         }
-    }
-    if !(seen_data && seen_stale_cookie) {
-        return None;
-    }
-    if !should_fire(
-        &mut self.fired_at,
-        "sctp_uaf",
-        &src.to_string(),
-        ts,
-        cfg.window_secs,
-    ) {
-        return None;
-    }
-    Some(FlowDetection {
-        kind: "sctp_uaf",
-        src,
-        key: FlowKey {
+        if !should_fire(
+            &mut self.fired_at,
+            "sctp_uaf",
+            &src.to_string(),
+            ts,
+            cfg.window_secs,
+        ) {
+            return None;
+        }
+        Some(FlowDetection {
+            kind: "sctp_uaf",
             src,
-            dst,
-            src_port: sport,
-            dst_port: dport,
-        },
-        evidence: format!(
-            "SCTP 单包捆绑 [ERROR(Stale Cookie)]+[DATA]（CVE-2026-98548 利用特征，采样捕获；源口 {sport} → 目的口 {dport}）"
-        ),
-        rule_id: "builtin.sctp_uaf",
-    })
-}
+            key: FlowKey {
+                src,
+                dst,
+                src_port: sport,
+                dst_port: dport,
+            },
+            evidence: format!(
+                "SCTP 单包捆绑 [ERROR(Stale Cookie)]+[DATA]（CVE-2026-98548 利用特征，采样捕获；源口 {sport} → 目的口 {dport}）"
+            ),
+            rule_id: "builtin.sctp_uaf",
+        })
+    }
 }
 
 /// 帧解析：IP(v4/v6) + TCP，非 TCP 帧返回 None。
@@ -375,8 +376,6 @@ fn parse_sctp(data: &[u8]) -> Option<(IpAddr, IpAddr, &[u8])> {
     let dst = IpAddr::from([data[16], data[17], data[18], data[19]]);
     Some((src, dst, &data[ihl..end]))
 }
-
-
 
 /// 载荷摘要清洗：控制字符归空格、截断——与蜜罐回显同一纪律，进证据的都当不可信输入。
 fn sanitize_snippet(bytes: &[u8]) -> String {
@@ -556,7 +555,6 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].kind, "sctp_uaf");
     }
-
 
     fn cfg() -> CaptureConfig {
         CaptureConfig {

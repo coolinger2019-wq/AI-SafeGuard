@@ -288,7 +288,10 @@ mod tests {
 
         // 凭据喷洒：同 (ip, user) 5 次 → cred_spray；不同用户不混计
         for i in 0..CRED_HITS - 1 {
-            assert!(eng.observe_credential(2000 + i as i64, ip, "root").is_empty());
+            assert!(
+                eng.observe_credential(2000 + i as i64, ip, "root")
+                    .is_empty()
+            );
         }
         let out = eng.observe_credential(2000 + CRED_HITS as i64 - 1, ip, "root");
         assert_eq!(out.len(), 1);

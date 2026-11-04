@@ -757,7 +757,9 @@ impl EngineHandle {
         // 审计 run-1 F2：认领后任何失败路径必须回退 pending——否则该建议永久
         // 卡死在 applying（apply/dismiss/confirm/回扫全部只认 pending）
         let rollback = |id: i64| {
-            let _ = self.store.set_proposal_status_if(id, "applying", "pending", None);
+            let _ = self
+                .store
+                .set_proposal_status_if(id, "applying", "pending", None);
         };
         match p.action.as_str() {
             "promote_rule" => {
@@ -1434,9 +1436,7 @@ fn handle_detection(
         protocol: Protocol::Any,
         remote_ip: Some(ip),
         local_port: None,
-        note: format!(
-            "检测器自动封禁（TTL {ttl}s，第 {ban_count} 犯）: {evidence}"
-        ),
+        note: format!("检测器自动封禁（TTL {ttl}s，第 {ban_count} 犯）: {evidence}"),
         tag: "检测器".into(),
     };
     // 同源去重（审计 run-1 A）：已有未到期同类封禁就不再叠加重复规则
@@ -2059,7 +2059,11 @@ pub fn spawn_capture_task(eng: &Arc<EngineHandle>) {
                                 L7Evidence::default()
                             };
                             // F808：SCTP UAF 利用特征定级 high（内核 UAF 类，优先于一般扫描）
-                            let sev = if d.kind == "sctp_uaf" { "high" } else { "medium" };
+                            let sev = if d.kind == "sctp_uaf" {
+                                "high"
+                            } else {
+                                "medium"
+                            };
                             handle_detection(
                                 &DetectionSink {
                                     fw: &*eng.firewall,

@@ -405,7 +405,21 @@ CREATE TABLE IF NOT EXISTS source_recidivism (
 /// interaction 全部证据列——旧 v1 只链 7 列，未被链住的证据列可被原地改写
 /// 而 verify-log 照样报完整。升级由 ensure_chain_v2 一次性全量重链。
 /// prune 级联重链的行元组（id + canonical_event 所需 12 字段）
-type PruneRow = (i64, i64, String, String, String, i64, String, String, String, String, String, String, String);
+type PruneRow = (
+    i64,
+    i64,
+    String,
+    String,
+    String,
+    i64,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+);
 
 #[allow(clippy::too_many_arguments)] // 12 字段并列比拆结构体直白（链规范读得懂）
 fn canonical_event(
@@ -457,7 +471,21 @@ pub struct Store {
 
 /// 迁移/重链的行数据 (id, ts, kind, listener, remote_ip, remote_port, summary,
 /// payload, http_hint, tls_fp, tls_ja4, rule_id, interaction)
-type ChainSeedRow = (i64, i64, String, String, String, i64, String, String, String, String, String, String, String);
+type ChainSeedRow = (
+    i64,
+    i64,
+    String,
+    String,
+    String,
+    i64,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+);
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
@@ -535,7 +563,9 @@ impl Store {
     fn ensure_chain_v2(&self) -> Result<()> {
         let conn = self.lock()?;
         let ver: Option<String> = conn
-            .query_row("SELECT value FROM meta WHERE key = 'chain_ver'", [], |r| r.get(0))
+            .query_row("SELECT value FROM meta WHERE key = 'chain_ver'", [], |r| {
+                r.get(0)
+            })
             .ok();
         if ver.as_deref() == Some("2") {
             return Ok(());
@@ -879,7 +909,9 @@ impl Store {
             )
             .map_err(|e| Error::Store(e.to_string()))?;
         let top_listeners = stmt
-            .query_map(params![since], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .query_map(params![since], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })
             .map_err(|e| Error::Store(e.to_string()))?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| Error::Store(e.to_string()))?;
@@ -2667,12 +2699,12 @@ mod tests {
         hit(&store, "203.0.113.7", "SSH probe");
         assert!(store.verify_chain().unwrap().ok);
         // 另开连接原地改一列（模拟持库写权限者篡改证据）
-        let dir = std::env::temp_dir().join(format!(
-            "aisafeguard-test-chainv2-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("aisafeguard-test-chainv2-{}", std::process::id()));
         let tamper = rusqlite::Connection::open(dir.join("t.db")).unwrap();
-        tamper.execute("UPDATE events SET interaction = '伪转录'", []).unwrap();
+        tamper
+            .execute("UPDATE events SET interaction = '伪转录'", [])
+            .unwrap();
         let report = store.verify_chain().unwrap();
         assert!(!report.ok, "v2 必须检出行改写: {report:?}");
     }
@@ -2680,7 +2712,8 @@ mod tests {
     #[test]
     fn f80x_lifecycle_methods() {
         // F802/F804/F805 store 层：累进计数/误报重置/超期归档/随机抽样/漏斗
-        let dir = std::env::temp_dir().join(format!("aisafeguard-test-f80x-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("aisafeguard-test-f80x-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let store = Store::open(&dir.join("t.db")).unwrap();
@@ -2705,19 +2738,44 @@ mod tests {
         // F804 归档：7 天前创建的 pending → dismissed；applied 不受影响
         let old = store
             .insert_proposal(
-                "ai", "block", "high", "in", "tcp", "203.0.113.7", None, None, "r", "a", "", "",
+                "ai",
+                "block",
+                "high",
+                "in",
+                "tcp",
+                "203.0.113.7",
+                None,
+                None,
+                "r",
+                "a",
+                "",
+                "",
                 "",
             )
             .unwrap();
         let keep = store
             .insert_proposal(
-                "ai", "block", "high", "in", "tcp", "203.0.113.8", None, None, "r", "a", "", "",
+                "ai",
+                "block",
+                "high",
+                "in",
+                "tcp",
+                "203.0.113.8",
+                None,
+                None,
+                "r",
+                "a",
+                "",
+                "",
                 "",
             )
             .unwrap();
         let tamper = rusqlite::Connection::open(dir.join("t.db")).unwrap();
         tamper
-            .execute("UPDATE proposals SET created_ts = 1000 WHERE id = ?1", [old])
+            .execute(
+                "UPDATE proposals SET created_ts = 1000 WHERE id = ?1",
+                [old],
+            )
             .unwrap();
         assert_eq!(store.sweep_expired_pending(7 * 86400).unwrap(), 1);
         let statuses: Vec<String> = store
@@ -2758,7 +2816,18 @@ mod tests {
         let store = tmp_store("sweep");
         let id = store
             .insert_proposal(
-                "ai", "block", "high", "in", "tcp", "203.0.113.9", None, None, "r", "a", "", "",
+                "ai",
+                "block",
+                "high",
+                "in",
+                "tcp",
+                "203.0.113.9",
+                None,
+                None,
+                "r",
+                "a",
+                "",
+                "",
                 "",
             )
             .unwrap();
