@@ -2058,6 +2058,8 @@ pub fn spawn_capture_task(eng: &Arc<EngineHandle>) {
                             } else {
                                 L7Evidence::default()
                             };
+                            // F808：SCTP UAF 利用特征定级 high（内核 UAF 类，优先于一般扫描）
+                            let sev = if d.kind == "sctp_uaf" { "high" } else { "medium" };
                             handle_detection(
                                 &DetectionSink {
                                     fw: &*eng.firewall,
@@ -2073,7 +2075,7 @@ pub fn spawn_capture_task(eng: &Arc<EngineHandle>) {
                                 // 审计 run-1 A：采集≠执法——抓包溯源的自动封禁
                                 // 还需 [detect.capture].enforce 显式开启
                                 dcfg.auto_block && dcfg.capture.enforce,
-                                "medium",
+                                sev,
                                 l7ev,
                             );
                         }

@@ -1625,7 +1625,7 @@ impl Store {
         let n = self
             .lock()?
             .execute(
-                "INSERT OR IGNORE INTO suggestions(created_ts, day, fingerprint, category, priority, title, evidence, action, model) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT OR IGNORE INTO suggestions(created_ts, day, fingerprint, category, priority, title, evidence, action, model, impl_path) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![aisafeguard_core::now_ts(), day, fingerprint, category, priority, title, evidence, action, model, impl_path],
             )
             .map_err(|e| Error::Store(e.to_string()))?;
