@@ -69,7 +69,7 @@ socket2 = { version = "0.6", default-features = false }
 rustix = { version = "1.1", features = ["net", "time"] }
 axum = "0.8"
 eframe = "0.36"
-egui = "0.36"
+egui = "0.37"
 egui_extras = "0.36"
 uuid = { version = "1", features = ["v4"] }
 anyhow = "1"
