@@ -4,7 +4,7 @@
 
 > **这不是 LLM 内容审核/Guardrail 产品**。AI 在这里只做一件事:把蜜罐与真实流量观测到的攻击证据读给 LLM,产出**严格校验的封禁建议**(默认人工确认)。检测与处置不依赖 AI——关掉 AI,快路径全功能照常。
 >
-> 当前版本 **0.8.0**。架构与设计:[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · 路线图:[docs/ROADMAP.md](docs/ROADMAP.md) + [ROADMAP-0.5.md](docs/ROADMAP-0.5.md) + [ROADMAP-0.5.3.md](docs/ROADMAP-0.5.3.md) + [ROADMAP-0.6.md](docs/ROADMAP-0.6.md) + [ROADMAP-0.7.md](docs/ROADMAP-0.7.md) · 威胁模型:[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) · ISO 27001 对照:[docs/COMPLIANCE.md](docs/COMPLIANCE.md) · NGFW/协同演进:[docs/NGFW_EVOLUTION.md](docs/NGFW_EVOLUTION.md)
+> 当前版本 **0.8.1**。架构与设计:[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · 路线图:[docs/ROADMAP.md](docs/ROADMAP.md) + [ROADMAP-0.5.md](docs/ROADMAP-0.5.md) + [ROADMAP-0.5.3.md](docs/ROADMAP-0.5.3.md) + [ROADMAP-0.6.md](docs/ROADMAP-0.6.md) + [ROADMAP-0.7.md](docs/ROADMAP-0.7.md) · 威胁模型:[docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) · ISO 27001 对照:[docs/COMPLIANCE.md](docs/COMPLIANCE.md) · NGFW/协同演进:[docs/NGFW_EVOLUTION.md](docs/NGFW_EVOLUTION.md)
 
 ```
  蜜罐(诱捕) ────────┐
@@ -169,6 +169,20 @@ Windows 服务(`service install`,LocalSystem)与普通 GUI 进程的**凭据存�
 | AI Key | **环境变量 `AISAFEGUARD_AI_KEY`**(服务账户读不到用户存的 Key) | 凭据管理器 `AISafeGuard/ai-key`,或环境变量 |
 
 **服务模式下请用系统环境变量配置 AI Key**。Linux 服务同理(unit `Environment=`)。
+
+### 升级(Windows 服务)
+
+GUI 是普通权限进程:检测到已安装的 `aisafeguard` 服务时会自动进入**远程控制台模式**连接它
+(控制台窗口里的"远程控制台模式:已连接 AI-SafeGuard 服务")。因此只替换 exe 不够——服务
+进程还跑着旧二进制。升级步骤(管理员):
+
+```bat
+aisafeguard service stop
+:: 用新版 aisafeguard.exe 覆盖原路径；若换目录则先 service uninstall 再在新目录 service install
+aisafeguard service start
+```
+
+客户端与服务端版本不一致时,侧栏会显示「版本不一致」并提示此流程。
 
 ### 组织协同运维(协调者侧)
 

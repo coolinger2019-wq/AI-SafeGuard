@@ -2,6 +2,19 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.8.1] - 2026-11-04
+
+### 修复
+
+- **蜜罐页崩溃**：协议表扩到 11 种（mcp/smb/rdp/docker/elasticsearch）后，建议端口表
+  `KIND_DEFAULT_PORT` 仍是 6 项；蜜罐页渲染"未配置"协议行时索引越界 panic，进程直接退出。
+  端口表补齐并把长度改为编译期绑定 `[u16; LISTENER_KINDS.len()]`——以后扩协议必须同时
+  给端口，否则编译失败
+- **GUI 崩溃日志**：panic 写入 `%LOCALAPPDATA%\aisafeguard\gui-panic.log`
+  （Linux `~/.local/share/aisafeguard/gui-panic.log`），不再只有控制台一闪而过
+- **版本不一致提示**：远程控制台连到旧版服务时，侧栏显示「版本不一致」并提示升级命令；
+  版本徽章改用 2s 缓存，不再每帧请求一次 `/api/status`
+
 ## [0.8.0] - 2026-11-01
 
 > 0.7-0.8 周期主线：**IPv6 攻击面全覆盖 + 检测漏斗收口 + 全链安全审计加固 + 三通道部署架构**。

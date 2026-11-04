@@ -185,9 +185,14 @@ pub struct AisafeApp {
     language: String,
     // 上一帧已应用的主题+缩放（变化才重新 apply，避免每帧重建样式）
     applied_ui: Option<(ThemeId, f32)>,
+    // 服务端版本（随 cache.status 刷新；远程控制台模式下不逐帧打 HTTP）
+    srv_version: String,
 }
 
 pub fn run(console: Arc<dyn Console>) -> anyhow::Result<()> {
+    // GUI 里的 panic 曾经只闪一下控制台就退出：落一份崩溃日志，
+    // 下次"点某页就没了"至少能定位。
+    install_panic_log();
     let rx = console.live_events();
     // 主题与字号来自持久化配置（读不到时用默认值，界面照常可打开）
     let (theme_id, font_scale, language) = console
@@ -297,6 +302,7 @@ impl AisafeApp {
             ui_prefs,
             applied_ui: Some(ui_prefs),
             language,
+            srv_version: String::new(),
         }
     }
 
@@ -314,6 +320,10 @@ impl AisafeApp {
     fn refresh_cache(&mut self) {
         self.cache_at = Instant::now();
         self.cache.status = self.eng.status().ok();
+        // 服务端版本随状态缓存刷新；远程模式下避免每帧一次 HTTP
+        if let Some(st) = &self.cache.status {
+            self.srv_version = st.version.clone();
+        }
         self.cache.stats = self.eng.stats_24h().unwrap_or_default();
         let filter = self.event_filter.trim().to_string();
         self.cache.events = self
@@ -375,11 +385,25 @@ impl AisafeApp {
                     ui.add_space(space::M);
                     ui.label(title("AI-SafeGuard").color(accent()));
                 });
-                // 版本徽章：随时可见、一眼区分版本
+                // 版本徽章：随时可见、一眼区分版本（取缓存，不逐帧请求服务）
                 ui.horizontal(|ui| {
                     ui.add_space(space::M);
-                    version_badge(ui, &self.eng.version());
+                    let srv_ver = if self.srv_version.is_empty() {
+                        "?".to_string()
+                    } else {
+                        self.srv_version.clone()
+                    };
+                    version_badge(ui, &srv_ver);
                     ui.label(caption("安全中心").color(text_dim()));
+                    // 远程控制台下客户端与服务端可能不同版本：旧服务缺少新接口
+                    // 会让新界面行为异常，明确提示升级而不是让人猜。
+                    let client_ver = env!("CARGO_PKG_VERSION");
+                    if srv_ver != "?" && srv_ver != client_ver {
+                        ui.label(caption("版本不一致").color(danger())).on_hover_text(t(
+                            "客户端与服务端版本不一致：旧服务可能缺少新接口。请升级服务（管理员：aisafeguard service stop → 替换 exe → service install → service start）。",
+                            "Client and server versions differ; the old service may lack new APIs. Upgrade it (admin: aisafeguard service stop → replace exe → service install → service start).",
+                        ));
+                    }
                 });
                 ui.add_space(space::L);
 
@@ -530,6 +554,27 @@ impl eframe::App for AisafeApp {
 // ---------- 共用小组件 ----------
 
 /// 版本徽章：主色底 + 反色字，侧栏常驻，一眼区分版本。
+/// GUI panic 落盘：%LOCALAPPDATA%/aisafeguard/gui-panic.log（Linux 为
+/// ~/.local/share/aisafeguard/gui-panic.log）。默认 hook（stderr）照常执行；
+/// 文件写失败不影响退出路径。用于"点某页就没了"这类无窗口崩溃的定位。
+fn install_panic_log() {
+    let Some(base) = dirs::data_local_dir() else {
+        return;
+    };
+    let dir = base.join("aisafeguard");
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = std::fs::create_dir_all(&dir);
+        let text = format!(
+            "[{}] v{}\n{info}\n",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            env!("CARGO_PKG_VERSION")
+        );
+        let _ = std::fs::write(dir.join("gui-panic.log"), text);
+        prev(info);
+    }));
+}
+
 fn version_badge(ui: &mut egui::Ui, version: &str) {
     Frame::new()
         .fill(accent())

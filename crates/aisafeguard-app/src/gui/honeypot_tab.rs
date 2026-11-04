@@ -31,8 +31,14 @@ enum ListenerAction {
     Add(usize),
 }
 
-/// 各协议新增监听器时的默认端口（避开常见真实服务端口）
-const KIND_DEFAULT_PORT: [u16; 6] = [2222, 8081, 2323, 1337, 3307, 6379];
+/// 各协议新增监听器时的建议端口（避开常见真实服务端口）。
+/// 数组长度在编译期绑定 LISTENER_KINDS.len()：以后扩协议必须同时给端口，
+/// 否则类型不匹配直接编译失败（0.8.0 蜜罐页越界崩溃的根因：协议表扩到 11、
+/// 端口表仍是 6 项，未配置的 mcp 行索引 [6] 直接 panic）。
+const KIND_DEFAULT_PORT: [u16; LISTENER_KINDS.len()] = [
+    2222, 8081, 2323, 1337, 3307, 6379, // ssh / http / telnet / generic / mysql / redis
+    8008, 4450, 3390, 2376, 9201, // mcp / smb / rdp / docker / elasticsearch
+];
 
 impl AisafeApp {
     pub(crate) fn honeypot_ui(&mut self, ui: &mut egui::Ui) {
