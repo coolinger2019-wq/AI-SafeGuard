@@ -30,6 +30,16 @@
   入库失败）、SNI 默认值换冷门真实站、后量子签名（ML-DSA-65）可选启用、面板
   仅回环强化、访问日志/limitIp=3/UUID 轮换纪律等（详见 ROADMAP-0.7.md 审计批次节）
 
+### 修复（发布工程与依赖安全）
+
+- **双平台 Release**：Windows 构建并入 build.yml（旧 release.yml 的 `cargo auditable build`
+  从未安装 cargo-auditable，Linux/Windows 两腿必挂在同一 step——v0.8.0 Release 缺
+  Windows 产物的根因，该文件已删除）；产物先汇总到扁平 `dist/` 再上传（修首次双平台
+  发布漏 `aisafeguard_xdp.o` 的路径层级问题）；Release 缺件即失败
+- **依赖安全补丁**（RustSec 2026-0346/0347/0348/0349/0381/0382/0385/0387）：
+  rustls 0.23.46、rustls-webpki 0.103.16、webpki-roots 1.0.11、ctutils 0.4.8、
+  crypto-bigint 0.7.10
+
 ## [未发布]
 
 ### 新增

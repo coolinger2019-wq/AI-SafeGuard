@@ -43,6 +43,9 @@
 bash <(curl -fsSL https://gitee.com/coolinger2019-wq/AI-SafeGuard/raw/main/scripts/install.sh)
 ```
 
+**Windows**:从 [Releases](https://github.com/coolinger2019-wq/AI-SafeGuard/releases/latest) 下载
+`aisafeguard-windows-x64.zip`,用同名 `.sha256` 校验后解压,管理员运行 `aisafeguard.exe`(或 `service install` 注册服务;采样捕获需 [WinDivert64.sys](docs/WINDOWS-CAPTURE-TESTING.md))。
+
 **已有节点升级**(仓库根目录;VPS 侧直连 GitHub Releases 下载+校验+换装+健康检查):
 
 ```bash
