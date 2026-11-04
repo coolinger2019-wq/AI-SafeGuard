@@ -187,6 +187,29 @@ pub struct AisafeApp {
     applied_ui: Option<(ThemeId, f32)>,
     // 服务端版本（随 cache.status 刷新；远程控制台模式下不逐帧打 HTTP）
     srv_version: String,
+    // 应用内自更新（0.8.2，仅 Windows 有升级按钮；状态机在 About 页驱动）
+    #[cfg(windows)]
+    update_state: UpdateUi,
+}
+
+/// 应用内自更新的界面状态机：检查/下载在后台线程，结果经 channel/atomic 回来，
+/// 由每帧的 poll 落位；Ready 之后等用户点"以管理员身份升级"（UAC）。
+#[cfg(windows)]
+pub(crate) enum UpdateUi {
+    Idle,
+    Checking(std::sync::mpsc::Receiver<Result<Option<crate::update::Release>, String>>),
+    UpToDate,
+    Available(crate::update::Release),
+    Downloading {
+        rx: std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>,
+        percent: Arc<std::sync::atomic::AtomicU8>,
+        ver: String,
+    },
+    Ready {
+        workdir: std::path::PathBuf,
+        ver: String,
+    },
+    Failed(String),
 }
 
 pub fn run(console: Arc<dyn Console>) -> anyhow::Result<()> {
@@ -303,6 +326,8 @@ impl AisafeApp {
             applied_ui: Some(ui_prefs),
             language,
             srv_version: String::new(),
+            #[cfg(windows)]
+            update_state: UpdateUi::Idle,
         }
     }
 
@@ -506,6 +531,32 @@ impl eframe::App for AisafeApp {
             while self.live.len() > 200 {
                 self.live.pop_back();
             }
+        }
+        // 自更新状态机推进（检查/下载线程的结果在这里落位）
+        #[cfg(windows)]
+        {
+            self.update_state = match std::mem::replace(&mut self.update_state, UpdateUi::Idle) {
+                UpdateUi::Checking(rx) => match rx.try_recv() {
+                    Ok(Ok(Some(rel))) => UpdateUi::Available(rel),
+                    Ok(Ok(None)) => UpdateUi::UpToDate,
+                    Ok(Err(e)) => UpdateUi::Failed(e),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => UpdateUi::Checking(rx),
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        UpdateUi::Failed("检查线程意外退出".into())
+                    }
+                },
+                UpdateUi::Downloading { rx, percent, ver } => match rx.try_recv() {
+                    Ok(Ok(workdir)) => UpdateUi::Ready { workdir, ver },
+                    Ok(Err(e)) => UpdateUi::Failed(e),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        UpdateUi::Downloading { rx, percent, ver }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        UpdateUi::Failed("下载线程意外退出".into())
+                    }
+                },
+                other => other,
+            };
         }
         if self.cache_at.elapsed() >= Duration::from_secs(2) {
             self.refresh_cache();

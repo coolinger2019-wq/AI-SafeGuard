@@ -2981,10 +2981,6 @@ fn analysis_failed(eng: &EngineHandle, model: &str, msg: &str) {
 pub struct EmbeddedConsole(pub Arc<EngineHandle>);
 
 impl Console for EmbeddedConsole {
-    fn version(&self) -> String {
-        self.0.version.to_string()
-    }
-
     fn refresh_intel(&self) -> anyhow::Result<()> {
         let eng = Arc::clone(&self.0);
         self.0.rt.spawn(async move {

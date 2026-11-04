@@ -24,7 +24,6 @@ pub struct LiveEvent {
 }
 
 pub trait Console: Send + Sync {
-    fn version(&self) -> String;
     /// (配置文件路径, 数据目录) —— 仅内嵌模式有真实值，远程模式显示服务侧说明
     fn config_paths(&self) -> (String, String);
     fn config(&self) -> anyhow::Result<AppConfig>;

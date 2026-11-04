@@ -2,6 +2,19 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.8.2] - 2026-11-05
+
+### 新增
+
+- **应用内一键升级（Windows）**：设置 → 关于 → 更新。「检查更新」（Gitee 优先、GitHub
+  兜底）→「下载并升级」（SHA-256 校验）→ 一次 UAC 确认后自动完成
+  停服务 → 备份旧 exe → 替换服务二进制 → 重启服务，界面经 explorer 以普通权限自动重开；
+  服务端比界面旧时（如旧服务 + 新 GUI）直接提供「一键升级服务到当前版本」，无需下载。
+  实现要点：替换动作由下载好的新版 exe 自己执行（`--apply-update`，运行中的映像不可覆盖
+  但可改名腾位）；CLI 等价 `aisafeguard self-update [--check]`
+- `Console::version()` 移除（版本统一由 StatusReport.version 缓存承载，顺带消灭 About 页
+  每帧一次的 `/api/status` 请求）
+
 ## [0.8.1] - 2026-11-04
 
 ### 修复

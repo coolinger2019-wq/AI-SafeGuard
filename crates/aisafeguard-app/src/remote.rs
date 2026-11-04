@@ -119,12 +119,6 @@ impl RemoteConsole {
 }
 
 impl Console for RemoteConsole {
-    fn version(&self) -> String {
-        self.status()
-            .map(|s| s.version)
-            .unwrap_or_else(|_| "?".into())
-    }
-
     fn config_paths(&self) -> (String, String) {
         let dir = service_data_dir()
             .map(|d| d.display().to_string())

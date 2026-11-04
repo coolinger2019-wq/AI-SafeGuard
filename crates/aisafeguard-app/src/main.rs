@@ -11,6 +11,8 @@ mod review;
 #[cfg(windows)]
 mod service;
 mod stix;
+#[cfg(windows)]
+mod update;
 #[cfg(not(windows))]
 mod service {
     pub fn service_data_dir() -> Option<std::path::PathBuf> {
@@ -114,6 +116,10 @@ fn main() -> anyhow::Result<()> {
     let mut remote_url: Option<String> = None;
     let mut remote_token: Option<String> = None;
     let mut remote_token_file: Option<PathBuf> = None;
+    // 自更新：--apply-update 由 UAC 拉起的新版 exe 使用；GUI 发起时附带 --gui-path
+    let mut apply_update_dir: Option<PathBuf> = None;
+    let mut apply_gui_path: Option<PathBuf> = None;
+    let mut apply_relaunch_gui = false;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -332,6 +338,38 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
             }
+            "--apply-update" => {
+                i += 1;
+                match args.get(i) {
+                    Some(d) => apply_update_dir = Some(PathBuf::from(d)),
+                    None => {
+                        eprintln!("--apply-update 需要一个目录（内含新版 aisafeguard.exe）");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--gui-path" => {
+                i += 1;
+                match args.get(i) {
+                    Some(p) => apply_gui_path = Some(PathBuf::from(p)),
+                    None => {
+                        eprintln!("--gui-path 需要一个路径");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            "--relaunch-gui" => apply_relaunch_gui = true,
+            "self-update" => {
+                if matches!(
+                    args.get(i + 1).map(String::as_str),
+                    Some("--check" | "check")
+                ) {
+                    i += 1;
+                    command = Some(("self-update".into(), Some("check".into())));
+                } else {
+                    command = Some(("self-update".into(), None));
+                }
+            }
             "service" => {
                 i += 1;
                 match args.get(i).map(|s| s.as_str()) {
@@ -358,6 +396,9 @@ fn main() -> anyhow::Result<()> {
                 eprintln!("      aisafeguard canary-decode <token>                (蜜饵水印溯源)");
                 eprintln!("      aisafeguard service install|uninstall|start|stop   (需管理员)");
                 eprintln!(
+                    "      aisafeguard self-update [--check]                 (检查/一键升级，Windows)"
+                );
+                eprintln!(
                     "      aisafeguard --service                              (由服务管理器调用)"
                 );
                 std::process::exit(2);
@@ -366,12 +407,36 @@ fn main() -> anyhow::Result<()> {
         i += 1;
     }
 
+    // 自更新提权替换体：GUI/CLI 下载好新版后，由 UAC 拉起的新版 exe 走这条路径
+    if let Some(dir) = apply_update_dir {
+        #[cfg(windows)]
+        {
+            return update::cmd_apply(&dir, apply_gui_path.as_deref(), apply_relaunch_gui);
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (&dir, &apply_gui_path, apply_relaunch_gui);
+            anyhow::bail!("--apply-update 仅支持 Windows");
+        }
+    }
+
     // 子命令
     if let Some((cmd, arg)) = command {
         match cmd.as_str() {
             "verify-log" => return cmd_verify_log(resolve_cfg(cfg_path, data_dir)?),
             "canary-decode" => return cmd_canary_decode(resolve_cfg(cfg_path, data_dir)?, arg),
             "export-events" => return cmd_export_events(resolve_cfg(cfg_path, data_dir)?, arg),
+            "self-update" => {
+                #[cfg(windows)]
+                {
+                    return update::cmd_self_update(arg.as_deref() == Some("check"));
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = arg;
+                    anyhow::bail!("self-update 仅支持 Windows（Linux 用 install.sh / deploy.sh）");
+                }
+            }
             "service-install"
             | "service-uninstall"
             | "service-start"

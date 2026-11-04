@@ -90,6 +90,37 @@ pub fn stop() -> Result<()> {
     Ok(())
 }
 
+/// 服务注册的二进制路径（自更新用它定位要替换的文件）。
+/// QUERY_CONFIG 对普通用户通常可读，因此 GUI 未提权也能探测。
+pub fn binary_path() -> Result<std::path::PathBuf> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .map_err(service_err)?;
+    let service = manager
+        .open_service(SERVICE_NAME, ServiceAccess::QUERY_CONFIG)
+        .map_err(service_err)?;
+    Ok(service.query_config().map_err(service_err)?.executable_path)
+}
+
+/// 轮询等待服务进入目标状态（自更新的停/起都异步，必须等到位再动文件）。
+pub fn wait_state(target: ServiceState, secs: u64) -> Result<()> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .map_err(service_err)?;
+    let service = manager
+        .open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS)
+        .map_err(service_err)?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        let state = service.query_status().map_err(service_err)?.current_state;
+        if state == target {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(anyhow!("等待服务进入 {target:?} 超时（{secs}s）"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
 fn service_err(e: windows_service::Error) -> anyhow::Error {
     anyhow!("服务操作失败: {e}（需要管理员权限）")
 }

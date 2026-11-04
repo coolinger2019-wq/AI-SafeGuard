@@ -866,6 +866,12 @@ impl AisafeApp {
 
     fn settings_about_page(&mut self, ui: &mut egui::Ui) {
         section(ui, t("版本", "Version"));
+        // 版本取缓存（srv_version），远程模式下不逐帧打 /api/status
+        let about_ver = if self.srv_version.is_empty() {
+            "?".to_string()
+        } else {
+            self.srv_version.clone()
+        };
         Frame::new()
             .fill(bg_card())
             .corner_radius(CornerRadius::same(10))
@@ -873,7 +879,7 @@ impl AisafeApp {
             .stroke(Stroke::new(1.0, border()))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(display(format!("v{}", self.eng.version())).color(accent()));
+                    ui.label(display(format!("v{about_ver}")).color(accent()));
                     ui.label(
                         RichText::new(t("AI-SafeGuard 安全中心", "AI-SafeGuard Security Center"))
                             .size(type_scale::BODY)
@@ -881,6 +887,21 @@ impl AisafeApp {
                     );
                 });
             });
+
+        // 应用内自更新（0.8.2）：检查更新 / 下载 / 一键升级（仅 Windows）
+        #[cfg(windows)]
+        {
+            ui.add_space(space::M);
+            section(ui, t("更新", "Update"));
+            Frame::new()
+                .fill(bg_card())
+                .corner_radius(CornerRadius::same(10))
+                .inner_margin(Margin::same(16))
+                .stroke(Stroke::new(1.0, border()))
+                .show(ui, |ui| {
+                    self.update_section(ui);
+                });
+        }
         ui.add_space(space::S);
         if let Some(st) = &self.cache.status {
             egui::Grid::new("about-info")
@@ -941,6 +962,182 @@ impl AisafeApp {
                 .size(type_scale::CAPTION)
                 .color(text_dim()),
         );
+    }
+
+    // ---------- 更新（0.8.2，应用内自更新，仅 Windows） ----------
+
+    #[cfg(windows)]
+    fn update_section(&mut self, ui: &mut egui::Ui) {
+        let gui_ver = env!("CARGO_PKG_VERSION");
+        let srv_disp = if self.srv_version.is_empty() {
+            "?".to_string()
+        } else {
+            self.srv_version.clone()
+        };
+        ui.label(body_text(format!(
+            "{} v{gui_ver} · {} v{srv_disp}",
+            t("界面", "UI"),
+            t("服务端", "Service"),
+        )));
+        ui.add_space(space::XS);
+
+        // 服务端落后于界面（含"界面 0.8.2 / 服务 0.6.0"这种跨版本场景）：一键升级
+        let svc_older = crate::update::parse_version(&self.srv_version)
+            .zip(crate::update::parse_version(gui_ver))
+            .is_some_and(|(s, c)| s < c);
+
+        match &self.update_state {
+            UpdateUi::Idle => {
+                ui.horizontal(|ui| {
+                    if ui.button(t("检查更新", "Check for Updates")).clicked() {
+                        self.start_update_check();
+                    }
+                    if svc_older
+                        && ui
+                            .button(t(
+                                "一键升级服务到当前版本",
+                                "Upgrade service to this version",
+                            ))
+                            .clicked()
+                    {
+                        self.start_service_upgrade();
+                    }
+                });
+                if svc_older {
+                    ui.label(
+                        RichText::new(t(
+                            "服务端版本比界面旧：旧引擎缺少新接口，建议升级服务（数据与配置不动）。",
+                            "The service is older than the UI; upgrade it (data/config untouched).",
+                        ))
+                        .size(type_scale::CAPTION)
+                        .color(warn()),
+                    );
+                }
+            }
+            UpdateUi::Checking(_) => {
+                ui.label(caption(t(
+                    "正在检查更新（Gitee → GitHub）…",
+                    "Checking for updates…",
+                )));
+            }
+            UpdateUi::UpToDate => {
+                ui.label(body_text(t("已是最新版本。", "Already up to date.")));
+                if ui.button(t("重新检查", "Re-check")).clicked() {
+                    self.start_update_check();
+                }
+            }
+            UpdateUi::Available(rel) => {
+                ui.label(body_text(t(
+                    "发现新版本，可一键升级（服务与界面一起更新，数据不动）。",
+                    "A new version is available; upgrade service and UI together.",
+                )));
+                ui.label(mono_text(format!("v{} → v{}", gui_ver, rel.version)));
+                ui.add_space(space::XS);
+                let rel2 = rel.clone();
+                ui.horizontal(|ui| {
+                    if ui.button(t("下载并升级", "Download && Upgrade")).clicked() {
+                        self.start_update_download(rel2);
+                    }
+                    if ui.button(t("暂不", "Later")).clicked() {
+                        self.update_state = UpdateUi::Idle;
+                    }
+                });
+            }
+            UpdateUi::Downloading { percent, .. } => {
+                let p = percent.load(std::sync::atomic::Ordering::Relaxed);
+                ui.add(egui::widgets::ProgressBar::new(f32::from(p) / 100.0).show_percentage());
+                ui.label(caption(t(
+                    "下载中…（完成后需在 UAC 确认一次提权）",
+                    "Downloading… (one UAC prompt after download)",
+                )));
+            }
+            UpdateUi::Ready { ver, workdir } => {
+                let ver = ver.clone();
+                let workdir = workdir.clone();
+                ui.label(body_text(t(
+                    "新版已就绪。点击后弹出 UAC，确认后自动完成：停服务 → 备份 → 替换 → 重启，界面会自动重新打开。",
+                    "Ready. Confirm the UAC prompt: stop service → backup → replace → restart; the UI reopens automatically.",
+                )));
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(t(
+                            "以管理员身份升级（UAC）",
+                            "Upgrade as Administrator (UAC)",
+                        ))
+                        .clicked()
+                    {
+                        self.apply_ready_update(&workdir, &ver);
+                    }
+                    if ui.button(t("取消", "Cancel")).clicked() {
+                        self.update_state = UpdateUi::Idle;
+                    }
+                });
+            }
+            UpdateUi::Failed(e) => {
+                ui.label(
+                    RichText::new(format!("✗ {e}"))
+                        .color(danger())
+                        .size(type_scale::CAPTION),
+                );
+                if ui.button(t("重试", "Retry")).clicked() {
+                    self.update_state = UpdateUi::Idle;
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn start_update_check(&mut self) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.update_state = UpdateUi::Checking(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::update::check_latest().map_err(|e| e.to_string()));
+        });
+    }
+
+    #[cfg(windows)]
+    fn start_update_download(&mut self, rel: crate::update::Release) {
+        let ver = rel.version.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let percent = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let p2 = percent.clone();
+        self.update_state = UpdateUi::Downloading { rx, percent, ver };
+        std::thread::spawn(move || {
+            let workdir = crate::update::update_workdir();
+            let res = crate::update::download_and_prepare(&rel, &workdir, &|p| {
+                p2.store(p, std::sync::atomic::Ordering::Relaxed);
+            })
+            .map(|_| workdir)
+            .map_err(|e| e.to_string());
+            let _ = tx.send(res);
+        });
+    }
+
+    /// 服务端落后于界面：把当前界面程序复制为"新版"来源，走同一条提权替换路径（无需下载）。
+    #[cfg(windows)]
+    fn start_service_upgrade(&mut self) {
+        let ver = env!("CARGO_PKG_VERSION").to_string();
+        let workdir = crate::update::update_workdir();
+        let res = std::fs::create_dir_all(&workdir).and_then(|_| {
+            let src = std::env::current_exe()?;
+            std::fs::copy(src, workdir.join("aisafeguard.exe"))
+        });
+        self.update_state = match res {
+            Ok(_) => UpdateUi::Ready { workdir, ver },
+            Err(e) => UpdateUi::Failed(format!("准备升级目录失败: {e}")),
+        };
+    }
+
+    /// Ready → UAC 拉起新版 exe 执行替换；UAC 通过后本界面退出让位（升级体重开界面）。
+    #[cfg(windows)]
+    fn apply_ready_update(&mut self, workdir: &std::path::Path, ver: &str) {
+        let new_exe = workdir.join("aisafeguard.exe");
+        match crate::update::spawn_elevated_apply(&new_exe, workdir, true) {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                self.update_state = UpdateUi::Failed(format!("升级未执行（v{ver}）：{e}"));
+            }
+        }
     }
 
     // ---------- 公共页脚 ----------
