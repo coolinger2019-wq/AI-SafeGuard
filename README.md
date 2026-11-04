@@ -40,8 +40,11 @@
 **新机从零到运行**(Ubuntu 22.04+/x86_64,root;下载 CI 预构建二进制,目标机零编译):
 
 ```bash
-bash <(curl -fsSL https://gitee.com/coolinger2019-wq/AI-SafeGuard/raw/main/scripts/install.sh)
+bash <(curl -fsSL https://gitee.com/coolinger/ai-safe-guard/raw/main/scripts/install.sh)
 ```
+
+下载双源:Gitee Release 优先(国内直连稳),GitHub Releases 兜底;两源由
+`scripts/gitee-release.sh` 保持同步(需 `GITEE_TOKEN`,见脚本头注释)。
 
 **Windows**:从 [Releases](https://github.com/coolinger2019-wq/AI-SafeGuard/releases/latest) 下载
 `aisafeguard-windows-x64.zip`,用同名 `.sha256` 校验后解压,管理员运行 `aisafeguard.exe`(或 `service install` 注册服务;采样捕获需 [WinDivert64.sys](docs/WINDOWS-CAPTURE-TESTING.md))。

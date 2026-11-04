@@ -39,6 +39,11 @@
 - **依赖安全补丁**（RustSec 2026-0346/0347/0348/0349/0381/0382/0385/0387）：
   rustls 0.23.46、rustls-webpki 0.103.16、webpki-roots 1.0.11、ctutils 0.4.8、
   crypto-bigint 0.7.10
+- **一键安装双源修正**：install.sh 的 Gitee 地址改为真实仓库 `coolinger/ai-safe-guard`
+  （原 `coolinger2019-wq/AI-SafeGuard` 在 Gitee 不存在，Gitee 主源从未生效）；Gitee
+  无 `/releases/latest/download/` 别名，改为经 API 解析最新 tag；二进制与 sha256
+  同源下载（避免混源假哈希失败）；校验改用下载件名。新增 `scripts/gitee-release.sh`：
+  把 GitHub Release 产物镜像到 Gitee（`GITEE_TOKEN`，幂等，同名附件先删后传）
 
 ## [未发布]
 
