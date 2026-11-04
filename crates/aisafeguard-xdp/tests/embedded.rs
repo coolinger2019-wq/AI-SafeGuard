@@ -10,6 +10,14 @@ fn embedded_object_parses() {
     let res = aya::Ebpf::load(bytes.to_vec().as_slice());
     match &res {
         Ok(_) => println!("LOAD OK"),
+        // 非特权环境（CI runner / 普通用户）创建 map 必然 EPERM。
+        // 本测试只验证嵌入对象可解析：权限不足时跳过，不判失败。
+        Err(aya::EbpfError::MapError(aya::maps::MapError::CreateError { io_error, .. }))
+            if io_error.kind() == std::io::ErrorKind::PermissionDenied =>
+        {
+            println!("LOAD SKIP: 无 CAP_BPF/root 权限，跳过 map 创建");
+            return;
+        }
         Err(e) => println!("LOAD ERR: {e:#?}"),
     }
     assert!(res.is_ok(), "嵌入的 eBPF 对象必须可解析");
@@ -35,7 +43,8 @@ fn xdp_attach_smoke() {
     };
     // 镜像一个公网测试地址（TEST-NET-3，不产生真实流量影响）
     let test_ip = std::net::Ipv4Addr::new(203, 0, 113, 250);
-    fast.block(test_ip).expect("写入 BLOCKLIST");
+    fast.block(std::net::IpAddr::V4(test_ip))
+        .expect("写入 BLOCKLIST");
     let stats = fast.stats().expect("读统计");
     assert_eq!(stats.mirrored, 1);
     fast.clear().expect("清空 map");

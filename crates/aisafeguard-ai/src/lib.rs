@@ -779,7 +779,7 @@ mod tests {
         // promote/retire：aisafeguard- 前缀硬校验
         let good = serde_json::json!({"action":"promote_rule","rule_name":"aisafeguard-blk-abc","reason":"30 天无再犯"});
         assert!(validate_fed_proposal(&good).is_none(), "fed 通道不带治理类");
-        let (a, ps) = parse_proposals(&format!(
+        let (_, ps) = parse_proposals(&format!(
             "{{\"analysis\":\"x\",\"proposals\":[{}]}}",
             serde_json::to_string(&good).unwrap()
         ))

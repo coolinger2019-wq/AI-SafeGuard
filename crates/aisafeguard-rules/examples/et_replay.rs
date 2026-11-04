@@ -102,12 +102,9 @@ fn main() {
         let ip: IpAddr = grab("ip").parse().expect("ip");
         let port: u16 = grab("port").parse().unwrap_or(0);
         let hex_str = grab("hex");
-        let window = {
-            let bytes = (0..hex_str.len() / 2)
-                .map(|i| u8::from_str_radix(&hex_str[i * 2..i * 2 + 2], 16).unwrap_or(0))
-                .collect::<Vec<u8>>();
-            bytes
-        };
+        let window = (0..hex_str.len() / 2)
+            .map(|i| u8::from_str_radix(&hex_str[i * 2..i * 2 + 2], 16).unwrap_or(0))
+            .collect::<Vec<u8>>();
         if window.is_empty() {
             empty_windows += 1;
             continue;
@@ -154,7 +151,7 @@ fn main() {
             "sid={} ×{} 源[{}] {}",
             sid,
             count,
-            srcs.into_iter().cloned().collect::<Vec<_>>().join(","),
+            srcs.iter().cloned().collect::<Vec<_>>().join(","),
             msg
         );
     }

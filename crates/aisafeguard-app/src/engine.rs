@@ -2240,16 +2240,16 @@ pub fn spawn_expiry_janitor(eng: &Arc<EngineHandle>) {
             // 该 IP 再犯会重新产出建议，无需复活旧提案。dismissed 统计因此
             // 真正生效）。评审 #39：积压不收敛的根因是没有超时语义。
             let today = (now_ts() / 86400).to_string();
-            if eng.store.get_meta("pending_sweep_day").ok().flatten().as_deref() != Some(&today) {
-                if let Ok(n) = eng.store.sweep_expired_pending(7 * 86400) {
-                    if n > 0 {
-                        eng.bus.publish(SecurityEvent::engine(
-                            "info",
-                            format!("提案超时归档：{n} 条 pending 超 7 天自动转 dismissed"),
-                        ));
-                    }
-                    let _ = eng.store.set_meta("pending_sweep_day", &today);
+            if eng.store.get_meta("pending_sweep_day").ok().flatten().as_deref() != Some(&today)
+                && let Ok(n) = eng.store.sweep_expired_pending(7 * 86400)
+            {
+                if n > 0 {
+                    eng.bus.publish(SecurityEvent::engine(
+                        "info",
+                        format!("提案超时归档：{n} 条 pending 超 7 天自动转 dismissed"),
+                    ));
                 }
+                let _ = eng.store.set_meta("pending_sweep_day", &today);
             }
             #[cfg(target_os = "linux")]
             {
@@ -2280,7 +2280,7 @@ pub fn spawn_expiry_janitor(eng: &Arc<EngineHandle>) {
                     Err(e) => {
                         ipopts_fail_streak += 1;
                         // 首次 + 之后每 30 轮提醒一次（无提权环境长驻失败防日志风暴）
-                        if ipopts_fail_streak == 1 || ipopts_fail_streak % 30 == 0 {
+                        if ipopts_fail_streak == 1 || ipopts_fail_streak.is_multiple_of(30) {
                             tracing::warn!(
                                 "IP 选项观察轮询失败（连续 {} 次）: {e}",
                                 ipopts_fail_streak
@@ -2355,7 +2355,7 @@ pub fn spawn_expiry_janitor(eng: &Arc<EngineHandle>) {
                     Err(e) => {
                         expiry_fail_streak += 1;
                         tracing::warn!("解封规则 {name} 失败（保留记账下轮重试）: {e}");
-                        if expiry_fail_streak == 1 || expiry_fail_streak % 10 == 0 {
+                        if expiry_fail_streak == 1 || expiry_fail_streak.is_multiple_of(10) {
                             eng.bus.publish(SecurityEvent::engine(
                                 "error",
                                 format!(
@@ -2853,7 +2853,7 @@ fn auto_apply_policy_ok(
     // 产出等人工，自动应用直接拒绝。口径④ 实证：3/40 抽样错误全属此类
     if remote_ip
         .parse::<IpAddr>()
-        .map(|ip| aisafeguard_core::scanner_nets::is_known_scanner(ip))
+        .map(aisafeguard_core::scanner_nets::is_known_scanner)
         .unwrap_or(false)
     {
         return false;

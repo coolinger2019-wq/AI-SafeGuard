@@ -1638,10 +1638,11 @@ impl Store {
             )
             .map_err(|e| Error::Store(e.to_string()))
     }
-    /// ---------- F760-B 系统自审建议（评审工单）----------
+    // ---------- F760-B 系统自审建议（评审工单）----------
 
     /// 入库一条自审建议；fingerprint 去重（同主题重复评审不重复建行）。
     /// 返回是否新建（false = 已存在）。
+    #[allow(clippy::too_many_arguments)] // 与 canonical_event 同款：字段并列比拆结构体直白
     pub fn insert_suggestion(
         &self,
         day: &str,

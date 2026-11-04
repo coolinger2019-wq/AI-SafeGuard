@@ -292,13 +292,12 @@ impl CapturePipeline {
             let cend = (off + clen).min(pdu.len());
             match ctype {
                 0 => seen_data = true, // DATA 块
-                9 => {
-                    // ERROR 块：值区 = [cause_code(2)][cause_len(2)][...]，
-                    // Stale Cookie Error 的 cause code = 11（0x000B，RFC 4960 §3.3.10.9）
-                    if off + 6 <= cend && u16::from_be_bytes([pdu[off + 4], pdu[off + 5]]) == 0x000B
-                    {
-                        seen_stale_cookie = true;
-                    }
+                // ERROR 块：值区 = [cause_code(2)][cause_len(2)][...]，
+                // Stale Cookie Error 的 cause code = 11（0x000B，RFC 4960 §3.3.10.9）
+                9 if off + 6 <= cend
+                    && u16::from_be_bytes([pdu[off + 4], pdu[off + 5]]) == 0x000B =>
+                {
+                    seen_stale_cookie = true;
                 }
                 _ => {}
             }

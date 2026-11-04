@@ -249,14 +249,11 @@ impl AisafeApp {
                                             })
                                             .unwrap_or_default();
                                         self.set_toast(format!(
-                                            "{} {} {}",
+                                            "{} {} {} {}",
                                             t("规则 #", "Rule #"),
                                             rid,
-                                            format!(
-                                                "{} {}",
-                                                t("已转正（封禁至 ", "promoted (banned until "),
-                                                until
-                                            )
+                                            t("已转正（封禁至 ", "promoted (banned until "),
+                                            until
                                         ));
                                     }
                                     Err(e) => self.set_toast(format!(

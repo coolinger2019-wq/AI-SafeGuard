@@ -84,7 +84,8 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           Compress-Archive -Path target/release/aisafeguard.exe -DestinationPath dist/aisafeguard-windows-x64.zip
           $h = (Get-FileHash dist/aisafeguard-windows-x64.zip -Algorithm SHA256).Hash.ToLower()
-          "$h  aisafeguard-windows-x64.zip" | Out-File -Encoding ascii dist/aisafeguard-windows-x64.zip.sha256
+          # 必须 LF：Out-File 默认 CRLF，用户侧 sha256sum -c 会因文件名带 \r 失败
+          [IO.File]::WriteAllText("$PWD/dist/aisafeguard-windows-x64.zip.sha256", "$h  aisafeguard-windows-x64.zip`n")
 
       - name: 上传构建产物（每次 push 保留 90 天）
         uses: actions/upload-artifact@v4

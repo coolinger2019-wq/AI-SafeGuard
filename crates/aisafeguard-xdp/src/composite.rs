@@ -12,7 +12,7 @@
 
 #[cfg(target_os = "linux")]
 use std::collections::HashSet;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use aisafeguard_core::error::Result;
@@ -231,8 +231,7 @@ impl XdpFastPath {
                 .map_err(|e| format!("读 DROP_TOTAL 失败: {e}"))?,
             flows: 0,
         };
-        let mut keys = self.flows.keys();
-        while let Some(k) = keys.next() {
+        for k in self.flows.keys() {
             k.map_err(|e| format!("遍历 FLOWS 失败: {e}"))?;
             stats.flows += 1;
         }
@@ -342,13 +341,12 @@ impl Firewall for CompositeFirewall {
         // 兜底层先执行（权威）：失败即整体失败，不写加速层
         self.base.add_block(name, spec)?;
         #[cfg(target_os = "linux")]
-        if let Some(ip) = mirrorable(spec) {
-            if let Some(fast) = self.fast.lock().expect("XDP 状态锁中毒").as_mut() {
-                // 加速层失败只留 warn：兜底层已封住，语义不缩水
-                if let Err(e) = fast.block(ip) {
-                    tracing::warn!("XDP 镜像 {ip} 失败（nftables 已兜底）: {e}");
-                }
-            }
+        if let Some(ip) = mirrorable(spec)
+            && let Some(fast) = self.fast.lock().expect("XDP 状态锁中毒").as_mut()
+            && let Err(e) = fast.block(ip)
+        {
+            // 加速层失败只留 warn：兜底层已封住，语义不缩水
+            tracing::warn!("XDP 镜像 {ip} 失败（nftables 已兜底）: {e}");
         }
         Ok(())
     }
@@ -360,12 +358,11 @@ impl Firewall for CompositeFirewall {
         #[cfg(target_os = "linux")]
         // 镜像资格与 add 对称（mirrorable：In+Any+无端口+非保护 IP）——
         // 旧实现只查 In+无端口，会给从未镜像的细粒度/保护 IP 规则调 unblock
-        if let Some(ip) = mirrorable(spec) {
-            if let Some(fast) = self.fast.lock().expect("XDP 状态锁中毒").as_mut() {
-                if let Err(e) = fast.unblock(ip) {
-                    tracing::warn!("XDP 解封 {ip} 失败: {e}");
-                }
-            }
+        if let Some(ip) = mirrorable(spec)
+            && let Some(fast) = self.fast.lock().expect("XDP 状态锁中毒").as_mut()
+            && let Err(e) = fast.unblock(ip)
+        {
+            tracing::warn!("XDP 解封 {ip} 失败: {e}");
         }
         base_result
     }
@@ -376,7 +373,7 @@ impl Firewall for CompositeFirewall {
         {
             // 对账期望与 add 的镜像资格同口径（mirrorable）：细粒度/保护 IP
             // 规则不得经重启对账进入 XDP map（G2 红线：内网永不进高速丢弃表）
-            let desired: Vec<IpAddr> = specs.iter().filter_map(|s| mirrorable(s)).collect();
+            let desired: Vec<IpAddr> = specs.iter().filter_map(mirrorable).collect();
             if let Some(fast) = self.fast.lock().expect("XDP 状态锁中毒").as_mut() {
                 fast.reconcile(&desired)
                     .map_err(aisafeguard_core::error::Error::Firewall)?;

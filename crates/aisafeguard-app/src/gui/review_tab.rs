@@ -74,7 +74,7 @@ impl AisafeApp {
                     "ops" => t("人工操作", "manual ops"),
                     _ => t("需改码（进 ROADMAP）", "needs code (ROADMAP)"),
                 };
-                ui.label(caption(&format!(
+                ui.label(caption(format!(
                     "{} · {} · {} · {}",
                     row.category, row.priority, row.day, path_label
                 )));
@@ -115,7 +115,7 @@ impl AisafeApp {
                         .interactive(editable),
                 );
                 if !row.note.is_empty() {
-                    ui.label(caption(&format!("{}：{}", t("决策备注", "Note"), row.note)));
+                    ui.label(caption(format!("{}：{}", t("决策备注", "Note"), row.note)));
                 }
                 ui.horizontal_wrapped(|ui| {
                     let note = self.review.note.clone();

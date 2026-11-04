@@ -605,7 +605,7 @@ mod tests {
         b"POST /admin/login HTTP/1.1\r\nHost: honeypot\r\nUser-Agent: sqlmap/1.8\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nuser=admin&passwd=secret".to_vec()
     }
 
-    fn sg_session(window: &[u8]) -> Session<'static> {
+    fn sg_session() -> Session<'static> {
         Session {
             client_ip: "203.0.113.9".parse().unwrap(),
             client_port: 40000,
@@ -622,7 +622,7 @@ mod tests {
     #[test]
     fn sticky_and_modifier_forms_equivalent() {
         let w = http_window();
-        let sess = sg_session(&w);
+        let sess = sg_session();
         // sticky 前置形态
         let sticky = parse_rule(
             "alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:\"m\"; http_uri; content:\"/admin\"; sid:1; rev:1;)",
@@ -642,7 +642,7 @@ mod tests {
     #[test]
     fn buffer_scoping_is_precise() {
         let w = http_window();
-        let sess = sg_session(&w);
+        let sess = sg_session();
         // passwd 只在 body：命中
         let body_rule = parse_rule(
             "alert tcp any any -> any any (msg:\"b\"; http_client_body; content:\"passwd\"; sid:3; rev:1;)",
@@ -684,7 +684,7 @@ mod tests {
     fn non_http_window_unreachable_for_buffered_rules() {
         // 二进制窗口（非 HTTP）——带缓冲区规则不可达；Raw 规则照旧可达
         let bin: Vec<u8> = [0x16, 0x03, 0x01, 0x00, 0xA0, 0x01, 0x00, 0x9C].to_vec();
-        let sess = sg_session(&bin);
+        let sess = sg_session();
         let buf_rule = parse_rule(
             "alert tcp any any -> any any (msg:\"x\"; http_uri; content:\"admin\"; sid:9; rev:1;)",
         )
@@ -700,7 +700,7 @@ mod tests {
     #[test]
     fn mixed_groups_are_independent_ands() {
         let w = http_window();
-        let sess = sg_session(&w);
+        let sess = sg_session();
         // Raw 组 + Uri 组同时成立才命中
         //（modifier 语义：http_uri 紧邻认领 c1；c0 无缓冲区标注 = Raw 整窗）
         let both = parse_rule(

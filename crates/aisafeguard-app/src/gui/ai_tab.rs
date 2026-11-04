@@ -223,9 +223,10 @@ impl AisafeApp {
                             )
                         } else {
                             format!(
-                                "{} {} {}",
+                                "{} {} {} {}",
                                 t("封禁", "Block"),
-                                format!("{} {}", dir_cn(&p.direction), proto_up(&p.protocol)),
+                                dir_cn(&p.direction),
+                                proto_up(&p.protocol),
                                 target_desc(&p.remote_ip, p.local_port)
                             )
                         };

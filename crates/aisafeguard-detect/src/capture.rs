@@ -231,10 +231,10 @@ pub fn passes_mode_filter(ip: &[u8], full: bool) -> bool {
         return false;
     };
     // F808：full 模式放行 SCTP over IPv4（协议 132）
-    if let Some(etherparse::NetSlice::Ipv4(v4)) = &sp.net {
-        if v4.header().protocol() == etherparse::IpNumber::SCTP {
-            return full;
-        }
+    if let Some(etherparse::NetSlice::Ipv4(v4)) = &sp.net
+        && v4.header().protocol() == etherparse::IpNumber::SCTP
+    {
+        return full;
     }
     match sp.transport {
         Some(etherparse::TransportSlice::Tcp(t)) => full || (t.syn() && !t.ack()),

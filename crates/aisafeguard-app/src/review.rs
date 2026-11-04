@@ -176,37 +176,34 @@ fn config_reference(
         text: &mut String,
         paths: &mut std::collections::HashSet<String>,
     ) {
-        match v {
-            toml::Value::Table(t) => {
-                if depth == 0 {
-                    // 顶层段名
-                    for (sec, sub) in t {
-                        walk(sec, sub, depth + 1, text, paths);
-                    }
-                    return;
+        if let toml::Value::Table(t) = v {
+            if depth == 0 {
+                // 顶层段名
+                for (sec, sub) in t {
+                    walk(sec, sub, depth + 1, text, paths);
                 }
-                for (k, sub) in t {
-                    let path = format!("{prefix}.{k}");
-                    match sub {
-                        toml::Value::Table(_) if depth < 3 => {
-                            walk(&path, sub, depth + 1, text, paths);
-                        }
-                        other => {
-                            paths.insert(path.clone());
-                            let tag = if needs_restart(&path) {
-                                "需重启"
-                            } else {
-                                "热更"
-                            };
-                            text.push_str(&format!(
-                                "{path} = {other} [{tag}]
+                return;
+            }
+            for (k, sub) in t {
+                let path = format!("{prefix}.{k}");
+                match sub {
+                    toml::Value::Table(_) if depth < 3 => {
+                        walk(&path, sub, depth + 1, text, paths);
+                    }
+                    other => {
+                        paths.insert(path.clone());
+                        let tag = if needs_restart(&path) {
+                            "需重启"
+                        } else {
+                            "热更"
+                        };
+                        text.push_str(&format!(
+                            "{path} = {other} [{tag}]
 "
-                            ));
-                        }
+                        ));
                     }
                 }
             }
-            _ => {}
         }
     }
     let mut text = String::from(

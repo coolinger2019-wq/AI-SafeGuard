@@ -334,7 +334,7 @@ pub mod nft {
         ]
     }
 
-    /// ---------- F798 m1：入站 IP 选项异常观察（观察型，不参与封禁） ----------
+    // ---------- F798 m1：入站 IP 选项异常观察（观察型，不参与封禁） ----------
 
     /// 集合带元素 1h 超时：伪造源刷集合会自动退场（有界），持续源每小时
     /// 重新进城 = 天然的再告警节奏。双端 spike 已验证（WSL 内核 6.6 + 节点
@@ -774,6 +774,12 @@ pub mod ipopts {
     pub struct IpOptsMonitor {
         setup: OnceLock<()>,
         last_sources: HashSet<IpAddr>,
+    }
+
+    impl Default for IpOptsMonitor {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
     impl IpOptsMonitor {
