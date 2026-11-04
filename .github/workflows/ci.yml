@@ -58,7 +58,7 @@ jobs:
           tool: cargo-auditable
       - name: 构建嵌入依赖清单的二进制（SBOM）
         run: cargo auditable build --release
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: aisafeguard-sbom-bin
           path: target/release/aisafeguard.exe
