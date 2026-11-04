@@ -173,16 +173,33 @@ Windows 服务(`service install`,LocalSystem)与普通 GUI 进程的**凭据存�
 ### 升级(Windows 服务)
 
 GUI 是普通权限进程:检测到已安装的 `aisafeguard` 服务时会自动进入**远程控制台模式**连接它
-(控制台窗口里的"远程控制台模式:已连接 AI-SafeGuard 服务")。因此只替换 exe 不够——服务
-进程还跑着旧二进制。升级步骤(管理员):
+(控制台窗口里的"远程控制台模式:已连接 AI-SafeGuard 服务")。所以只替换 exe 不够——服务
+进程还跑着旧二进制。用升级脚本(管理员 PowerShell)最省事:
 
-```bat
-aisafeguard service stop
-:: 用新版 aisafeguard.exe 覆盖原路径；若换目录则先 service uninstall 再在新目录 service install
-aisafeguard service start
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\upgrade-windows.ps1 `
+    -Package .\aisafeguard-windows-x64.zip -BackupData
 ```
 
-客户端与服务端版本不一致时,侧栏会显示「版本不一致」并提示此流程。
+脚本会:校验 zip 的 SHA-256 → 停旧服务 → 备份旧 exe(可选连 `%ProgramData%\aisafeguard` 数据
+一起备份)→ 安装到 `%ProgramFiles%\AISafeGuard` → 重建服务 → 启动并等待运行态;任一步失败
+自动回滚旧二进制。`-DryRun` 可先看计划(无需管理员)。脚本单独下载:
+`https://gitee.com/coolinger/ai-safe-guard/raw/main/scripts/upgrade-windows.ps1`。
+
+手动步骤(等价):
+
+```bat
+sc stop aisafeguard
+sc delete aisafeguard
+copy /Y aisafeguard.exe "C:\Program Files\AISafeGuard\aisafeguard.exe"
+cd /d "C:\Program Files\AISafeGuard"
+aisafeguard.exe service install
+aisafeguard.exe service start
+```
+
+数据/配置在 `C:\ProgramData\aisafeguard`,升级不动;首次启动自动迁移数据库(0.6→0.8.1 实测
+哈希链 56/56 校验通过)。服务与 GUI 版本不一致时,侧栏显示「版本不一致」并提示升级流程。
+Linux 升级直接重跑 `install.sh`(同路径覆盖二进制并重启服务),VPS 用 `scripts/deploy.sh`。
 
 ### 组织协同运维(协调者侧)
 
