@@ -43,10 +43,15 @@ PY=$(pick_python) || { echo "需要可用的 python3（解析 API JSON）" >&2; 
 CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/aisafeguard-gitee/$TAG"
 mkdir -p "$CACHE"
 
-fetch_cached() { # fetch_cached <文件名>：已完整则跳过，否则 -C - 续传
-    local dst="$CACHE/$1" url="$GH/$1" want got
+fetch_cached() { # fetch_cached <文件名>：本地校验通过则复用；否则 -C - 续传
+    local dst="$CACHE/$1" sha="$CACHE/$1.sha256" url="$GH/$1" want got
+    # 同目录有 .sha256 且校验通过 → 直接用（离线/慢链路友好；sha 文件自身跳过）
+    if [ -s "$dst" ] && [ -s "$sha" ] \
+        && (cd "$CACHE" && sha256sum -c "$1.sha256" >/dev/null 2>&1); then
+        return 0
+    fi
     if [ -s "$dst" ]; then
-        want=$(curl -fsSI --max-time 30 "$url" \
+        want=$(curl -fsSIL --max-time 30 "$url" \
             | awk 'tolower($1)=="content-length:"{print $2}' | tr -d '\r')
         got=$(wc -c < "$dst")
         if [ -n "$want" ] && [ "$want" = "$got" ]; then
@@ -100,6 +105,9 @@ fi
 
 echo "[3/4] 同步附件（同名先删后传）..."
 while read -r aid aname; do
+    # Windows 的 python 会把 \n 翻成 \r\n，read 后要去掉行尾 \r
+    aid=${aid%$'\r'}
+    aname=${aname%$'\r'}
     [ -n "$aid" ] || continue
     for f in "${FILES[@]}"; do
         if [ "$aname" = "$f" ]; then
@@ -107,9 +115,11 @@ while read -r aid aname; do
             echo "  - 删除旧附件 $aname"
         fi
     done
-done < <(curl -fsSL "$API/releases/$rel_id?$TOKEN_Q" | "$PY" -c '
+done < <(curl -fsSL "$API/releases/$rel_id/attach_files?$TOKEN_Q" | "$PY" -c '
 import json, sys
-for a in json.load(sys.stdin).get("assets") or []:
+# 注意：release 详情里的 assets 只有 name/url，没有 id；附件 id 只能从
+# /releases/{id}/attach_files 取（Gitee API 与 GitHub 的差异）
+for a in json.load(sys.stdin):
     print(a["id"], a["name"])
 ')
 
@@ -120,11 +130,9 @@ for f in "${FILES[@]}"; do
 done
 
 echo "[4/4] Gitee Release 现状："
-curl -fsSL "$API/releases/$rel_id?$TOKEN_Q" | "$PY" -c '
+curl -fsSL "$API/releases/$rel_id/attach_files?$TOKEN_Q" | "$PY" -c '
 import json, sys
-d = json.load(sys.stdin)
-print("  tag:", d.get("tag_name"))
-for a in d.get("assets") or []:
+for a in json.load(sys.stdin):
     print("  -", a.get("name"), a.get("size"), "bytes")
 '
 echo "完成: https://gitee.com/$OWNER/$REPO/releases/tag/$TAG"
