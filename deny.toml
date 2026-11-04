@@ -9,6 +9,13 @@ ignore = [
     # 无安全升级路径（egui 升级换 skrifa 时移除本条）。0.5.9 H101 首次在
     # cargo-deny 0.20 下跑绿门禁时评估收录。
     "RUSTSEC-2026-0192",
+    # zbus 5.x 生态（rfd 0.15 文件对话框 / accesskit 无障碍 → zbus → zvariant）：
+    # 上游宣布 zbus_names/zvariant/zvariant_derive 停止维护（2026-10 公告），
+    # rfd/accesskit 尚未迁到 zbus 6。纯 UI 侧本地 IPC（文件选择/无障碍总线），
+    # 不在检测、封禁与外发路径上；依赖树升级到 zbus 6 时移除这三条。
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
 ]
 
 [licenses]
