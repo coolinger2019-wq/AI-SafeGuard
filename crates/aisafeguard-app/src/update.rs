@@ -29,6 +29,8 @@ pub struct Release {
     pub version: String,
     pub zip_url: String,
     pub sha_url: Option<String>,
+    /// 该源是否经环境代理取到（下载沿用同一网络路径）
+    pub prefer_proxy: bool,
 }
 
 #[derive(Deserialize)]
@@ -87,25 +89,36 @@ fn release_from_json(raw: &str) -> Result<Release> {
         version,
         zip_url: zip,
         sha_url: sha,
+        prefer_proxy: false,
     })
 }
 
-fn http() -> Result<reqwest::blocking::Client> {
-    reqwest::blocking::Client::builder()
+fn http(prefer_proxy: bool) -> Result<reqwest::blocking::Client> {
+    // 环境代理可能是失效的（本机曾长期挂着死 7890 变量）：Gitee 一律先直连，
+    // GitHub 先走环境代理（国内常需要），各留一条兜底路径。谁成功用谁下载。
+    let mut b = reqwest::blocking::Client::builder()
         .user_agent("aisafeguard-self-update")
         .connect_timeout(std::time::Duration::from_secs(30))
         // 慢链路下载 14MB 可能要几分钟，总超时放宽；连接失败快速暴露
-        .timeout(std::time::Duration::from_secs(600))
-        .build()
-        .context("HTTP 客户端构建失败")
+        .timeout(std::time::Duration::from_secs(600));
+    if !prefer_proxy {
+        b = b.no_proxy();
+    }
+    b.build().context("HTTP 客户端构建失败")
 }
 
-/// 检查最新版本。返回 Ok(Some(release)) = 有更新；Ok(None) = 已是最新。
-pub fn check_latest() -> Result<Option<Release>> {
-    let cli = http()?;
+/// 取最新 release 信息（不与本地版本比较）。供 check_latest 与网络 E2E 测试共用。
+fn fetch_latest_release() -> Result<Release> {
+    let attempts = [
+        (SOURCES[0], false),
+        (SOURCES[0], true),
+        (SOURCES[1], true),
+        (SOURCES[1], false),
+    ];
     let mut last_err = None;
     let mut rel = None;
-    for url in SOURCES {
+    for (url, prefer_proxy) in attempts {
+        let cli = http(prefer_proxy)?;
         match cli
             .get(url)
             .send()
@@ -113,7 +126,8 @@ pub fn check_latest() -> Result<Option<Release>> {
             .and_then(|r| r.text())
         {
             Ok(text) => match release_from_json(&text) {
-                Ok(r) => {
+                Ok(mut r) => {
+                    r.prefer_proxy = prefer_proxy;
                     rel = Some(r);
                     break;
                 }
@@ -122,10 +136,15 @@ pub fn check_latest() -> Result<Option<Release>> {
             Err(e) => last_err = Some(anyhow!("{url}: {e}")),
         }
     }
-    let rel = match rel {
-        Some(r) => r,
-        None => return Err(last_err.unwrap_or_else(|| anyhow!("所有更新源都不可用"))),
-    };
+    match rel {
+        Some(r) => Ok(r),
+        None => Err(last_err.unwrap_or_else(|| anyhow!("所有更新源都不可用"))),
+    }
+}
+
+/// 检查最新版本。返回 Ok(Some(release)) = 有更新；Ok(None) = 已是最新。
+pub fn check_latest() -> Result<Option<Release>> {
+    let rel = fetch_latest_release()?;
     let cur = parse_version(current_version()).ok_or_else(|| anyhow!("本地版本号异常"))?;
     let new = parse_version(&rel.version).expect("release_from_json 已校验");
     Ok(if new > cur { Some(rel) } else { None })
@@ -144,11 +163,12 @@ pub fn download_and_prepare(
     }
     std::fs::create_dir_all(workdir).context("创建更新工作目录失败")?;
     let zip_path = workdir.join(ZIP_NAME);
-    download_to(&rel.zip_url, &zip_path, progress)?;
+    let cli = http(rel.prefer_proxy)?;
+    download_to(&cli, &rel.zip_url, &zip_path, progress)?;
 
     // sha256 校验（.sha256 内容形如 "<hex>  <文件名>"，与 GitHub/Gitee 发布物一致）
     if let Some(sha_url) = &rel.sha_url {
-        let sha_text = http()?
+        let sha_text = cli
             .get(sha_url)
             .send()
             .and_then(|r| r.error_for_status())
@@ -166,8 +186,9 @@ pub fn download_and_prepare(
     }
 
     let dest = workdir.join("extracted");
+    // ps_quote 自带单引号（并做 ' → '' 转义），这里不要再包一层
     let script = format!(
-        "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
+        "Expand-Archive -LiteralPath {} -DestinationPath {} -Force",
         ps_quote(&zip_path),
         ps_quote(&dest)
     );
@@ -197,8 +218,13 @@ pub fn download_and_prepare(
     Ok(exe)
 }
 
-fn download_to(url: &str, dest: &std::path::Path, progress: &dyn Fn(u8)) -> Result<()> {
-    let mut resp = http()?
+fn download_to(
+    cli: &reqwest::blocking::Client,
+    url: &str,
+    dest: &std::path::Path,
+    progress: &dyn Fn(u8),
+) -> Result<()> {
+    let mut resp = cli
         .get(url)
         .send()
         .and_then(|r| r.error_for_status())
@@ -447,5 +473,29 @@ mod tests {
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 下载 → sha256 校验 → 解压 → 解出的 exe 能跑 --version 的全链路。
+    /// 网络测试：`cargo test --bin aisafeguard download_e2e -- --ignored`
+    #[test]
+    #[ignore = "网络 E2E（真实访问 Gitee/GitHub 与 14MB 下载）"]
+    fn download_e2e() {
+        let rel = fetch_latest_release().expect("取最新 release");
+        let workdir = update_workdir();
+        let last = std::cell::Cell::new(0u8);
+        let exe = download_and_prepare(&rel, &workdir, &|p| last.set(p)).expect("下载+解压");
+        assert!(exe.exists(), "解出的 aisafeguard.exe 应存在");
+        assert_eq!(last.get(), 100, "进度应到达 100%");
+        let out = std::process::Command::new(&exe)
+            .arg("--version")
+            .output()
+            .expect("运行解出的 exe");
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.contains(&format!("aisafeguard {}", rel.version)),
+            "解出的应是 v{}，实际输出: {text}",
+            rel.version
+        );
+        let _ = std::fs::remove_dir_all(&workdir);
     }
 }
