@@ -39,15 +39,30 @@ pick_python() { # Windows 的 python3 可能只是商店占位符，逐个试跑
 }
 PY=$(pick_python) || { echo "需要可用的 python3（解析 API JSON）" >&2; exit 1; }
 
-tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+# 缓存目录：慢链路下断点续传（53MB 产物在 100KB/s 线路上要 ~10 分钟）
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/aisafeguard-gitee/$TAG"
+mkdir -p "$CACHE"
+
+fetch_cached() { # fetch_cached <文件名>：已完整则跳过，否则 -C - 续传
+    local dst="$CACHE/$1" url="$GH/$1" want got
+    if [ -s "$dst" ]; then
+        want=$(curl -fsSI --max-time 30 "$url" \
+            | awk 'tolower($1)=="content-length:"{print $2}' | tr -d '\r')
+        got=$(wc -c < "$dst")
+        if [ -n "$want" ] && [ "$want" = "$got" ]; then
+            return 0
+        fi
+    fi
+    curl -fsSL --max-time 1800 -C - -o "$dst" "$url" \
+        || { rm -f "$dst"; curl -fsSL --max-time 1800 -o "$dst" "$url"; }
+}
 
 echo "[1/4] 从 GitHub 下载 $TAG 产物..."
 for f in "${FILES[@]}"; do
-    curl -fsSL --max-time 300 -o "$tmp/$f" "$GH/$f"
+    fetch_cached "$f"
     echo "  ✓ $f"
 done
-(cd "$tmp" \
+(cd "$CACHE" \
     && sha256sum -c aisafeguard.sha256 aisafeguard_xdp.o.sha256 aisafeguard-windows-x64.zip.sha256 >/dev/null \
     && echo "  校验和 OK")
 
@@ -99,8 +114,8 @@ for a in json.load(sys.stdin).get("assets") or []:
 ')
 
 for f in "${FILES[@]}"; do
-    curl -fsSL --max-time 600 -X POST "$API/releases/$rel_id/attach_files?$TOKEN_Q" \
-        -F "file=@$tmp/$f" >/dev/null
+    curl -fsSL --max-time 1800 -X POST "$API/releases/$rel_id/attach_files?$TOKEN_Q" \
+        -F "file=@$CACHE/$f" >/dev/null
     echo "  ✓ $f"
 done
 
