@@ -43,23 +43,43 @@ PY=$(pick_python) || { echo "需要可用的 python3（解析 API JSON）" >&2; 
 CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/aisafeguard-gitee/$TAG"
 mkdir -p "$CACHE"
 
-fetch_cached() { # fetch_cached <文件名>：本地校验通过则复用；否则 -C - 续传
-    local dst="$CACHE/$1" sha="$CACHE/$1.sha256" url="$GH/$1" want got
-    # 同目录有 .sha256 且校验通过 → 直接用（离线/慢链路友好；sha 文件自身跳过）
-    if [ -s "$dst" ] && [ -s "$sha" ] \
-        && (cd "$CACHE" && sha256sum -c "$1.sha256" >/dev/null 2>&1); then
+verified() { # <文件名>：本地缓存是否已可用（payload 由其 .sha256 校验）
+    local f="$1" p
+    case "$f" in
+        *.sha256)
+            # sha 文件自身：它校验的 payload 通过即说明 sha 文件可信
+            p="${f%.sha256}"
+            [ -s "$CACHE/$f" ] && [ -s "$CACHE/$p" ] \
+                && (cd "$CACHE" && sha256sum -c "$f" >/dev/null 2>&1)
+            ;;
+        *)
+            [ -s "$CACHE/$f" ] && [ -s "$CACHE/$f.sha256" ] \
+                && (cd "$CACHE" && sha256sum -c "$f.sha256" >/dev/null 2>&1)
+            ;;
+    esac
+}
+
+fetch_cached() { # 本地校验通过则复用；否则续传到 .part，校验完整后才替换，绝不动已有文件
+    local dst="$CACHE/$1" part="$CACHE/$1.part" url="$GH/$1" want got
+    if verified "$1"; then
         return 0
     fi
-    if [ -s "$dst" ]; then
-        want=$(curl -fsSIL --max-time 30 "$url" \
-            | awk 'tolower($1)=="content-length:"{print $2}' | tr -d '\r')
-        got=$(wc -c < "$dst")
-        if [ -n "$want" ] && [ "$want" = "$got" ]; then
-            return 0
-        fi
+    # 远端大小：代理 TLS 抖动时不能中断脚本（set -e + pipefail），失败置空继续
+    want=$(curl -fsSIL --max-time 30 "$url" 2>/dev/null \
+        | awk 'tolower($1)=="content-length:"{print $2}' | tr -d '\r' || true)
+    # 无 sha 伴随的文件（sha 文件自身）只能按大小判断完整性
+    if [ -s "$dst" ] && [ ! -e "$CACHE/$1.sha256" ] && [ -n "$want" ] \
+        && [ "$want" = "$(wc -c < "$dst")" ]; then
+        return 0
     fi
-    curl -fsSL --max-time 1800 -C - -o "$dst" "$url" \
-        || { rm -f "$dst"; curl -fsSL --max-time 1800 -o "$dst" "$url"; }
+    curl -fsSL --max-time 1800 -C - -o "$part" "$url" 2>/dev/null || true
+    got=$(wc -c < "$part" 2>/dev/null || echo 0)
+    if [ -n "$want" ] && [ "$want" != "$got" ]; then
+        echo "  下载未完成: $1 ($got/$want bytes)，缓存保留，可重跑续传" >&2
+        return 1
+    fi
+    [ -s "$part" ] || { echo "  下载失败: $1" >&2; return 1; }
+    mv -f "$part" "$dst"
 }
 
 echo "[1/4] 从 GitHub 下载 $TAG 产物..."
