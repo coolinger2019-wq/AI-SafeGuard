@@ -70,7 +70,7 @@ rustix = { version = "1.1", features = ["net", "time"] }
 axum = "0.8"
 eframe = "0.36"
 egui = "0.36"
-egui_extras = "0.36"
+egui_extras = "0.37"
 uuid = { version = "1", features = ["v4"] }
 anyhow = "1"
 # H101：russh SSH 服务端（蜜罐中交互）。默认特性是 aws-lc-rs——Windows 构建要
