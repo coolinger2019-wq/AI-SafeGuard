@@ -271,3 +271,17 @@
 ## VPS sshd 加固被云镜像覆盖（2026-10-03）
 
 - **sshd 配置是"先到先得"（first match wins），不是后者覆盖**：同一配置项第一次出现即生效——`sshd_config.d/` 里按文件名字母序处理，云镜像自带的 `50-cloud-init.conf`（`PasswordAuthentication yes`）排在自写的 `99-asg-hardening.conf` 之前，加固的 `no` 被静默忽略，`sshd -T` 才能看出来（当时只核对了文件存在，没核对生效值）。**自写 drop-in 一律用 `00-` 前缀 + 改完必须 `sshd -T` 验生效值**，别只看文件写没写。Ubuntu 24.04 服务名是 `ssh` 不是 `sshd`（reload sshd 会报 unit not found）。
+
+
+## 2026-11-15 v0.8.3 发布事故：runner glibc 前向不兼容让防护直接下线
+
+- 现象：GitHub 把 ubuntu-latest runner 迁到 26.04（glibc 2.43）后，CI 构建的 Linux
+  二进制动态链接 glibc 2.43，Ubuntu 24.04 部署机（glibc 2.39）启动即崩
+  （GLIBC_2.43 not found），服务 auto-restart 循环、蜜罐全部下线
+- 根因：gnu 目标产物依赖构建机 glibc ≥ 目标机——正是 musl 讨论里预言的地雷
+- 修复：build.yml 固定 runs-on: ubuntu-24.04（构建环境 = 部署环境基线，llvm-19
+  在 24.04 可直装）；deploy.sh 增加「备份旧二进制 + 等待 active + 失败自动回滚」
+- 教训：①发版流程必须有"新二进制在目标机 --version 先验证再换装"或等价守门；
+  ②runner 漂移是供应链，构建环境要么钉版本要么静态链接（musl 目标是终极解，
+  需要时再做）；③deploy 脚本在 systemctl restart 后必须轮询等待而不是 sleep 5
+  ——"activating"阶段的 is-active 是非零退出，set -e 会静默中断脚本

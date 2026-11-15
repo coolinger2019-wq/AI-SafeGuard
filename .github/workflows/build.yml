@@ -11,7 +11,10 @@ permissions:
 
 jobs:
   build-linux:
-    runs-on: ubuntu-latest
+    # 固定 24.04：产物动态链接构建机的 glibc，runner 升到 26.04（glibc 2.43）
+    # 会让 24.04 部署机直接起不来（v0.8.3 首次发布事故）。24.04 的 glibc 2.39
+    # 与目标机一致；llvm-19-dev 在 24.04 可直装（0.8.2 即此环境构建）。
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
