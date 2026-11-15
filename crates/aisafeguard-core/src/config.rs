@@ -395,6 +395,12 @@ pub struct DetectConfig {
     /// 暴力探测判定：同一 (来源, 监听器) window_secs 内 ≥ bruteforce_hits 次。
     pub bruteforce_hits: u32,
     pub window_secs: i64,
+    /// F809 慢速持续扫描判定：同一 (来源, 监听器) slow_scan_window_secs 内
+    /// ≥ slow_scan_hits 次。快窗（window_secs）只抓快暴破；机群扫描器以
+    /// ~1.5 次/分钟的速度全天打蜜罐（实测 RDP 面 24h 1.2 万次），快窗阈值
+    /// 永远够不着——本判定按长窗口累计抓「慢但持续」的来犯者。
+    pub slow_scan_hits: u32,
+    pub slow_scan_window_secs: i64,
     /// 自动封禁 TTL（秒），到期自动解封。
     pub ttl_secs: i64,
     /// 采样捕获（检测平台 MVP，0.3 第二批）：真实流量观测。
@@ -417,6 +423,8 @@ impl Default for DetectConfig {
             scan_distinct_ports: 5,
             bruteforce_hits: 10,
             window_secs: 60,
+            slow_scan_hits: 30,
+            slow_scan_window_secs: 1800,
             ttl_secs: 1800,
             capture: CaptureConfig::default(),
             exempt_ips: Vec::new(),

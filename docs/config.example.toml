@@ -388,6 +388,13 @@ scan_distinct_ports = 5
 # Brute-force verdict: >= N hits on the same (source, listener) within window_secs.
 # 暴力探测判定：同一 (来源, 监听器) window_secs 内 ≥ N 次。
 bruteforce_hits = 10
+# F809 slow sustained scan verdict: >= N hits on the same (source, listener)
+# within slow_scan_window_secs (default 1800). Catches botnet scanners that
+# probe slowly but all day (~1.5 hits/min never trips the fast window).
+# F809 慢速持续扫描判定：同一 (来源, 监听器) slow_scan_window_secs 内 ≥ N 次
+#（机群扫描器每分钟一两次全天不停，快窗阈值永远够不着，本判定专抓它们）。
+#slow_scan_hits = 30
+#slow_scan_window_secs = 1800
 # Verdict window (s).
 # 判定窗口（秒）。
 window_secs = 60

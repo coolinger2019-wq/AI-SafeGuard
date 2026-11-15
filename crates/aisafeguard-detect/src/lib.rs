@@ -22,7 +22,7 @@ use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Detection {
-    /// scan | bruteforce
+    /// scan | bruteforce | slow_scan
     pub kind: &'static str,
     pub evidence: String,
 }
@@ -49,6 +49,8 @@ struct Inner {
     scan: HashMap<IpAddr, VecDeque<(i64, u16)>>,
     /// 每 (来源, 监听器) 的命中序列
     bruteforce: HashMap<(IpAddr, String), VecDeque<i64>>,
+    /// F809：每 (来源, 监听器) 的慢窗命中序列（慢速持续扫描聚合）
+    slow: HashMap<(IpAddr, String), VecDeque<i64>>,
     /// F802：每来源的跨监听器命中序列（重复犯聚合）
     repeat: HashMap<IpAddr, VecDeque<i64>>,
     /// F802：每 (来源, 用户名) 的口令尝试序列（凭据喷洒聚合）
@@ -85,12 +87,14 @@ impl FreqEngine {
         // 键数上界：溢出清空全表（长跑内存有界；见 DETECTOR_MAP_CAP 注释）
         if inner.scan.len() > DETECTOR_MAP_CAP
             || inner.bruteforce.len() > DETECTOR_MAP_CAP
+            || inner.slow.len() > DETECTOR_MAP_CAP
             || inner.repeat.len() > DETECTOR_MAP_CAP
             || inner.creds.len() > DETECTOR_MAP_CAP
             || inner.fired_at.len() > DETECTOR_MAP_CAP * 2
         {
             inner.scan.clear();
             inner.bruteforce.clear();
+            inner.slow.clear();
             inner.repeat.clear();
             inner.creds.clear();
             inner.fired_at.clear();
@@ -160,6 +164,40 @@ impl FreqEngine {
                     w = cfg.window_secs,
                     l = listener,
                     n = bf_len,
+                ),
+            });
+        }
+
+        // ---- F809 慢速持续扫描：同 (来源, 监听器) 慢窗口内 ≥ slow_scan_hits ----
+        // 快窗（window_secs=60）只抓快暴破；机群扫描器以 ~1.5 次/分钟的速度
+        // 全天打蜜罐（实测 RDP 面 24h 1.2 万次、无一进检测），快窗阈值永远够
+        // 不着——本判定按长窗口累计抓「慢但持续」的来犯者，进自动封禁阶梯。
+        let ss_key = (src, listener.to_string());
+        let ss_len = {
+            let ss_entry = inner.slow.entry(ss_key).or_default();
+            ss_entry.push_back(ts);
+            let ss_cutoff = ts - cfg.slow_scan_window_secs;
+            while ss_entry.front().map(|t| *t < ss_cutoff).unwrap_or(false) {
+                ss_entry.pop_front();
+            }
+            ss_entry.len() as u32
+        };
+        if ss_len >= cfg.slow_scan_hits
+            && should_fire(
+                &mut inner.fired_at,
+                "slow_scan",
+                &format!("{src}/{listener}"),
+                ts,
+                cfg.slow_scan_window_secs,
+            )
+        {
+            out.push(Detection {
+                kind: "slow_scan",
+                evidence: format!(
+                    "{w} 秒内对蜜罐 [{l}] 持续探测 {n} 次（慢速扫描机群）",
+                    w = cfg.slow_scan_window_secs,
+                    l = listener,
+                    n = ss_len,
                 ),
             });
         }
@@ -260,12 +298,48 @@ mod tests {
             scan_distinct_ports: 3,
             bruteforce_hits: 4,
             window_secs: 60,
+            slow_scan_hits: 30,
+            slow_scan_window_secs: 1800,
             ttl_secs: 1800,
             capture: Default::default(),
             exempt_ips: Vec::new(),
             l7: Default::default(),
             rules: Default::default(),
         }
+    }
+
+    #[test]
+    fn f809_slow_scan_detection() {
+        // F809：同 (来源, 监听器) 慢窗口内累计 ≥ slow_scan_hits → slow_scan 判定
+        //（快窗 bruteforce 不触发的慢速机群扫描器：每 60s 一次、持续半小时）
+        let eng = FreqEngine::new();
+        let ip: std::net::IpAddr = "203.0.113.9".parse().unwrap();
+        let cfg = cfg();
+        for i in 0..29 {
+            let out = eng.observe(1000 + i * 60, ip, "rdp", 3389, &cfg);
+            assert!(
+                out.iter().all(|d| d.kind != "slow_scan"),
+                "前 29 次不得触发 slow_scan"
+            );
+        }
+        let out = eng.observe(1000 + 29 * 60, ip, "rdp", 3389, &cfg);
+        let hit = out
+            .iter()
+            .find(|d| d.kind == "slow_scan")
+            .expect("第 30 次触发");
+        assert!(hit.evidence.contains("rdp"));
+        // 冷却：慢窗口内同源不再重复触发（哪怕继续命中）
+        let out = eng.observe(1000 + 30 * 60, ip, "rdp", 3389, &cfg);
+        assert!(!out.iter().any(|d| d.kind == "slow_scan"), "窗口内冷却");
+        // 冷却过期后，新窗口重新积累满 30 次 → 再次触发（持续扫描被持续判定）
+        let mut refire = false;
+        for i in 0..30 {
+            let out = eng.observe(4600 + i * 60, ip, "rdp", 3389, &cfg);
+            if out.iter().any(|d| d.kind == "slow_scan") {
+                refire = true;
+            }
+        }
+        assert!(refire, "冷却过期后新窗口积累满应再次触发");
     }
 
     #[test]

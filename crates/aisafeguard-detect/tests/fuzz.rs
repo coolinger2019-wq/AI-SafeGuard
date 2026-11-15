@@ -30,6 +30,8 @@ fn fuzz_freq_engine_never_panics_and_bounds_output() {
             scan_distinct_ports: 1 + (xorshift(&mut state) % 8) as u32,
             bruteforce_hits: 1 + (xorshift(&mut state) % 12) as u32,
             window_secs: 1 + (xorshift(&mut state) % 600) as i64,
+            slow_scan_hits: 1 + (xorshift(&mut state) % 60) as u32,
+            slow_scan_window_secs: 1 + (xorshift(&mut state) % 3600) as i64,
             ttl_secs: 60,
             capture: Default::default(),
             exempt_ips: Vec::new(),
@@ -55,15 +57,18 @@ fn fuzz_freq_engine_never_panics_and_bounds_output() {
 
         let dets = eng.observe(ts, ip, listener, port, &cfg);
         assert!(
-            dets.len() <= 3,
-            "round {round}: 一次 observe 最多产出 3 条判定（scan/bruteforce/repeat），得到 {}",
+            dets.len() <= 4,
+            "round {round}: 一次 observe 最多产出 4 条判定（scan/bruteforce/slow_scan/repeat），得到 {}",
             dets.len()
         );
         for d in &dets {
             assert!(!d.evidence.is_empty());
             // F802 起聚合判定新增 repeat；凭据喷洒走 observe_credential 不在此面
             assert!(
-                d.kind == "scan" || d.kind == "bruteforce" || d.kind == "repeat",
+                d.kind == "scan"
+                    || d.kind == "bruteforce"
+                    || d.kind == "slow_scan"
+                    || d.kind == "repeat",
                 "round {round}: 未知判定 kind {}",
                 d.kind
             );
