@@ -14,8 +14,8 @@
   可被当前客户端验签的发布物，只能换 keypair 并重走一次性配置。
 - 公钥：非压缩点 hex（65 字节，`04||X||Y`），嵌入
   `crates/aisafeguard-app/src/update.rs` 的 `SIGNING_PUBKEY_HEX`，随二进制分发。
-- 公钥指纹：公钥点字节的 SHA-256（`gen-signing-key` 会打印），发布页公示，
-  供人工核对公钥未被调包。
+  当前启用 keypair 的公钥指纹（2026-11-21 生成，发布页公示，供人工核对公钥未被调包）：
+  `fc62496cb7385b7c857d52f4c9811082025cc6830d88dd325e3ab005ad6b8ace`
 - 已知限制：私钥 hex 以 `String` 存在于 `sign-manifest`/`gen-signing-key` 进程
   内存直至退出，无法 zeroize（ring 不提供擦除接口，hex 载入即成堆上明文）。
   两个命令都是离线维护者工具、进程秒级退出，不常驻内存、不落盘，可接受；

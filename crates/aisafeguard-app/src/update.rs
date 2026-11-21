@@ -164,7 +164,7 @@ pub fn check_latest() -> Result<Option<Release>> {
 /// 随二进制分发（流程见 docs/RELEASE.md）。当前是占位（64 个 '0'，不是合法
 /// P-256 点）：占位时自更新跳过验签并告警，CI/本地测试不受影响；
 /// 正式发布前必须替换为真实公钥。
-const SIGNING_PUBKEY_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+const SIGNING_PUBKEY_HEX: &str = "049251dd540b62a828fc720403da48fee715c4e44e5e8ac57709d49aefd8b40612596d3ffd71157bf8e99fba24d6d578c374070088b72253e5af98e8e44a3f7658";
 
 /// 公钥是否可用（合法非压缩点）。占位/损坏 = false → 验签流程跳过并告警。
 fn pubkey_configured(pub_point_hex: &str) -> bool {
