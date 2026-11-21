@@ -137,11 +137,13 @@ jobs:
             if [ -n "$KEY" ]; then
               for f in dist/aisafeguard.sha256 dist/aisafeguard_xdp.o.sha256 dist/aisafeguard-windows-x64.zip.sha256; do
                 ./dist/aisafeguard sign-manifest "$f" --key "$KEY" > "$f.sig"
-                echo "已签名 $f.sig"
+                # 进度消息必须走 stderr：整块重定向进 GITHUB_ENV，stdout 混入会变成
+                # RELEASE_FILES 的文件模式（v0.8.4 首发即栽在"已签名 ..."被当 unmatched）
+                echo "已签名 $f.sig" >&2
                 echo "$f.sig"
               done
             else
-              echo "::warning::AISAFEGUARD_SIGNING_KEY 未配置，跳过发布签名（配置见 docs/RELEASE.md）"
+              echo "::warning::AISAFEGUARD_SIGNING_KEY 未配置，跳过发布签名（配置见 docs/RELEASE.md）" >&2
             fi
             echo "EOF"
           } >> "$GITHUB_ENV"
