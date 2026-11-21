@@ -11,6 +11,8 @@ path = "src/main.rs"
 [dependencies]
 aisafeguard-core.workspace = true
 aisafeguard-store.workspace = true
+# P1-7 backup/restore：VACUUM INTO 在线快照（bundled SQLite，与 store 同源）
+rusqlite.workspace = true
 aisafeguard-firewall.workspace = true
 aisafeguard-honeypot.workspace = true
 aisafeguard-ai.workspace = true

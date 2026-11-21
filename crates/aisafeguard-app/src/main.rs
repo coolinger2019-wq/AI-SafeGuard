@@ -1,4 +1,5 @@
 mod api;
+mod backup;
 mod console;
 mod corroboration;
 mod engine;
@@ -160,6 +161,19 @@ fn main() -> anyhow::Result<()> {
                     Some(p) => command = Some(("export-events".into(), Some(p.clone()))),
                     None => {
                         eprintln!("用法: aisafeguard export-events <输出.jsonl>");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            // P1-7：backup <输出目录> / restore <备份目录>（A.8.13）
+            w @ ("backup" | "restore") => {
+                i += 1;
+                match args.get(i) {
+                    Some(p) => command = Some((w.to_string(), Some(p.clone()))),
+                    None => {
+                        eprintln!(
+                            "用法: aisafeguard {w} <目录>（backup=输出目录，restore=备份目录）"
+                        );
                         std::process::exit(2);
                     }
                 }
@@ -393,6 +407,9 @@ fn main() -> anyhow::Result<()> {
                 eprintln!(
                     "      aisafeguard verify-log | export-events <out.jsonl> | --print-token | --version"
                 );
+                eprintln!(
+                    "      aisafeguard backup <输出目录> | restore <备份目录>   (A.8.13 备份/恢复)"
+                );
                 eprintln!("      aisafeguard canary-decode <token>                (蜜饵水印溯源)");
                 eprintln!("      aisafeguard service install|uninstall|start|stop   (需管理员)");
                 eprintln!(
@@ -426,6 +443,22 @@ fn main() -> anyhow::Result<()> {
             "verify-log" => return cmd_verify_log(resolve_cfg(cfg_path, data_dir)?),
             "canary-decode" => return cmd_canary_decode(resolve_cfg(cfg_path, data_dir)?, arg),
             "export-events" => return cmd_export_events(resolve_cfg(cfg_path, data_dir)?, arg),
+            "backup" => {
+                let Some(out) = arg else {
+                    eprintln!("用法: aisafeguard backup <输出目录>");
+                    std::process::exit(2);
+                };
+                let (cfg, cfg_path) = resolve_cfg(cfg_path, data_dir)?;
+                return backup::cmd_backup(&cfg.data_dir(), &cfg_path, Path::new(&out));
+            }
+            "restore" => {
+                let Some(dir) = arg else {
+                    eprintln!("用法: aisafeguard restore <备份目录>");
+                    std::process::exit(2);
+                };
+                let (cfg, cfg_path) = resolve_cfg(cfg_path, data_dir)?;
+                return backup::cmd_restore(Path::new(&dir), &cfg.data_dir(), &cfg_path);
+            }
             "self-update" => {
                 #[cfg(windows)]
                 {
