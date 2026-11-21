@@ -28,6 +28,7 @@ pub async fn serve(engine: Arc<EngineHandle>) {
     // 登录在页面内完成，数据请求全部带 Bearer。仍只听回环，跨机只能走 SSH 隧道。
     let api = Router::new()
         .route("/api/status", get(status))
+        .route("/api/metrics", get(metrics))
         .route("/api/events", get(events))
         .route("/api/rules", get(list_rules).post(add_rule))
         .route("/api/rules/{id}", delete(remove_rule))
@@ -155,6 +156,64 @@ mod auth_tests {
     }
 }
 
+#[cfg(test)]
+mod metrics_tests {
+    use super::render_metrics;
+    use crate::engine::MetricsSnapshot;
+
+    /// P1-6：metrics 文本格式——关键指标行齐全、数值为非负整数、逐监听器带 label。
+    #[test]
+    fn metrics_text_has_key_lines_and_non_negative_numbers() {
+        let snap = MetricsSnapshot {
+            events_total: 42,
+            detections_total: 7,
+            honeypot_hit_total: 30,
+            credential_observed_total: 5,
+            auto_block_total: 3,
+            proposals_pending: 2,
+            suggestions_pending: 1,
+            bus_lag_total: 4,
+            uptime_secs: 3600,
+            version: "test".into(),
+            listener_up_total: 1,
+            listeners: vec![("rdp".into(), true), ("ssh".into(), false)],
+            db_size_bytes: 2048,
+            xdp_attached: false,
+        };
+        let text = render_metrics(&snap);
+        let want = [
+            "events_total 42",
+            "detections_total 7",
+            "honeypot_hit_total 30",
+            "credential_observed_total 5",
+            "auto_block_total 3",
+            "proposals_pending 2",
+            "suggestions_pending 1",
+            "bus_lag_total 4",
+            "uptime_secs 3600",
+            "db_size_bytes 2048",
+            "xdp_attached 0",
+            "listener_up_total 1",
+            "listener_up{name=\"rdp\"} 1",
+            "listener_up{name=\"ssh\"} 0",
+        ];
+        for w in want {
+            assert!(
+                text.lines().any(|l| l == w),
+                "缺少指标行 {w}\n实际输出:\n{text}"
+            );
+        }
+        assert!(text.contains("# version test"), "版本走注释行:\n{text}");
+        // 每条指标行都是 `name 非负整数`（负数/nan/缺值都无法通过 u64 解析）
+        for line in text.lines().filter(|l| !l.starts_with('#')) {
+            let value = line.rsplit(' ').next().unwrap_or_default();
+            value
+                .parse::<u64>()
+                .unwrap_or_else(|_| panic!("指标行数值必须是非负整数: {line}"));
+        }
+    }
+}
+
 fn err_resp(e: aisafeguard_core::error::Error) -> Response {
     (
         StatusCode::BAD_REQUEST,
@@ -165,6 +224,53 @@ fn err_resp(e: aisafeguard_core::error::Error) -> Response {
 
 async fn status(State(s): State<AppState>) -> Json<crate::engine::StatusReport> {
     Json(s.engine.status())
+}
+
+/// GET /api/metrics（P1-6 可观测）：Prometheus 风格指标，text/plain 每行
+/// `name value`、# 注释行。刻意不引 prometheus 依赖——deploy.sh 健康检查与
+/// 外部脚本按行解析足够。0.8.3 事故形态是「防护静默下线无人知」，本端点让
+/// 防护活性（hits/detections/auto_block/监听器）成为可轮询的数字。
+/// 与 /api/* 同一 Bearer 认证口径（注册在受保护路由组内，只听回环）。
+async fn metrics(State(s): State<AppState>) -> Response {
+    let snap = s.engine.metrics_snapshot();
+    (
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        render_metrics(&snap),
+    )
+        .into_response()
+}
+
+/// 指标文本渲染（纯函数，单测直接断言行与数值）。
+fn render_metrics(m: &crate::engine::MetricsSnapshot) -> String {
+    let mut out = String::with_capacity(512);
+    out.push_str("# AI-SafeGuard metrics\n");
+    // version 是字符串，走注释行（数值行只放数字，保持脚本解析简单）
+    out.push_str("# version ");
+    out.push_str(&m.version);
+    out.push('\n');
+    for (name, value) in [
+        ("events_total", m.events_total),
+        ("detections_total", m.detections_total),
+        ("honeypot_hit_total", m.honeypot_hit_total),
+        ("credential_observed_total", m.credential_observed_total),
+        ("auto_block_total", m.auto_block_total),
+        ("proposals_pending", m.proposals_pending),
+        ("suggestions_pending", m.suggestions_pending),
+    ] {
+        out.push_str(&format!("{name} {value}\n"));
+    }
+    out.push_str(&format!("bus_lag_total {}\n", m.bus_lag_total));
+    out.push_str(&format!("uptime_secs {}\n", m.uptime_secs));
+    out.push_str(&format!("db_size_bytes {}\n", m.db_size_bytes));
+    out.push_str(&format!("xdp_attached {}\n", u64::from(m.xdp_attached)));
+    out.push_str(&format!("listener_up_total {}\n", m.listener_up_total));
+    for (name, up) in &m.listeners {
+        out.push_str(&format!(
+            "listener_up{{name=\"{name}\"}} {}\n",
+            u64::from(*up)
+        ));
+    }
+    out
 }
 
 #[derive(Deserialize)]

@@ -283,6 +283,32 @@ pub struct IntelStatus {
     pub last_fetch_dropped: i64,
 }
 
+/// /api/metrics 取数快照（P1-6 可观测）：全量口径（无时间窗），文本渲染在 api 层。
+/// 0.8.3 事故形态是「防护静默下线无人知」——本快照让健康检查能看到防护是否在做事。
+#[derive(Debug, Clone, Default)]
+pub struct MetricsSnapshot {
+    /// 部署至今事件总数（任意 kind，remote_ip 非空）——与 status().total_events 同口径
+    pub events_total: i64,
+    pub detections_total: i64,
+    pub honeypot_hit_total: i64,
+    pub credential_observed_total: i64,
+    /// 防火墙规则中来源=检测引擎（origin=engine）的条数
+    pub auto_block_total: i64,
+    pub proposals_pending: i64,
+    pub suggestions_pending: i64,
+    /// 事件总线累计丢失事件数（证据空窗；重启清零）
+    pub bus_lag_total: u64,
+    pub uptime_secs: u64,
+    pub version: String,
+    pub listener_up_total: usize,
+    /// 逐监听器运行状态（name, running）
+    pub listeners: Vec<(String, bool)>,
+    /// 数据目录 db 文件大小（文件不存在 = 0）
+    pub db_size_bytes: u64,
+    /// XDP 快速层已附加
+    pub xdp_attached: bool,
+}
+
 /// F500 组织面板数据（只读 + 现有隔离通路；不新增跨节点命令通道）。
 /// members/stats 仅协调者角色有数据；org_events 两类角色都有（本节点账本）。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -498,6 +524,72 @@ impl EngineHandle {
         match &self.xdp {
             Some(c) => c.fast_clear().map_err(Error::Firewall),
             None => Ok(()),
+        }
+    }
+
+    /// /api/metrics 取数（P1-6）：全量计数（since=0，无时间窗）+ 运行态原子量。
+    /// store 不可达时按 0 计而非返回 500——指标行始终存在，脚本逐行取值不会因 500 一行都拿不到
+    /// （deploy.sh 健康检查按行取值）。
+    pub fn metrics_snapshot(&self) -> MetricsSnapshot {
+        let cfg = self.config();
+        // 事件总量与 status().total_events 同一全量口径（totals_all：任意 kind、
+        // remote_ip 非空）；分 kind 计数用 count_events_kind_since（since=0 = 全量）
+        let (events_total, _) = self.store.totals_all().unwrap_or((0, 0));
+        let listeners = self.honeypot.listeners();
+        MetricsSnapshot {
+            events_total,
+            detections_total: self
+                .store
+                .count_events_kind_since("detection", 0)
+                .unwrap_or(0),
+            honeypot_hit_total: self
+                .store
+                .count_events_kind_since("honeypot_hit", 0)
+                .unwrap_or(0),
+            credential_observed_total: self
+                .store
+                .count_events_kind_since("credential_observed", 0)
+                .unwrap_or(0),
+            // 自动封禁：防火墙规则 origin=engine（检测器快路径）——与 /api/rules 的
+            // origin 字段同源；ai/intel/org 是独立来源，不并入「检测引擎」口径
+            auto_block_total: self
+                .store
+                .list_rules()
+                .unwrap_or_default()
+                .iter()
+                .filter(|r| r.origin == "engine")
+                .count() as i64,
+            proposals_pending: self.store.count_proposals("pending").unwrap_or(0),
+            // 与评审页同一 list_suggestions(200) 口径（自审按日去重，pending 不会堆积到上限）
+            suggestions_pending: self
+                .store
+                .list_suggestions(200)
+                .unwrap_or_default()
+                .iter()
+                .filter(|s| s.status == "pending")
+                .count() as i64,
+            bus_lag_total: self.bus_lag_total.load(Ordering::Relaxed),
+            uptime_secs: self.started.elapsed().as_secs(),
+            version: self.version.to_string(),
+            listener_up_total: listeners
+                .iter()
+                .filter(|l| l.running.load(std::sync::atomic::Ordering::Relaxed))
+                .count(),
+            listeners: listeners
+                .iter()
+                .map(|l| {
+                    (
+                        l.name.clone(),
+                        l.running.load(std::sync::atomic::Ordering::Relaxed),
+                    )
+                })
+                .collect(),
+            // db 文件尺寸：fs::metadata 直取（store 侧无尺寸接口）；不存在 = 0
+            db_size_bytes: std::fs::metadata(cfg.db_path())
+                .map(|m| m.len())
+                .unwrap_or(0),
+            // XDP 快速层附加状态（与 xdp_status().active 同口径；未启用/非 Linux = false）
+            xdp_attached: self.xdp.as_ref().is_some_and(|c| c.fast_active()),
         }
     }
 
@@ -3523,6 +3615,173 @@ mod tests {
         assert!(!same_element(&t, &rule("1.2.3.4", "in", "tcp", Some(8082))));
         // 空 IP 的规则不构成覆盖
         assert!(!same_element(&rule("", "in", "any", None), &a));
+    }
+
+    /// P1-6：metrics 快照取数——分 kind 全量计数（since=0）、auto_block 只算
+    /// origin=engine、pending 计数、bus_lag 原子量读取、db 尺寸。临时引擎构造
+    /// 与 bus_lag 测试同款（蜜罐禁用，不真绑端口）。
+    #[test]
+    fn metrics_snapshot_counts_full_range_and_auto_blocks() {
+        let dir = std::env::temp_dir().join(format!("asg-metrics-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("临时目录");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("测试 runtime");
+        rt.block_on(async {
+            let bus = EventBus::new(16);
+            let eng = Arc::new(EngineHandle {
+                cfg: RwLock::new(AppConfig::default()),
+                cfg_path: PathBuf::new(),
+                store: Arc::new(Store::open(&dir.join("aisafeguard.db")).expect("临时库")),
+                bus: bus.clone(),
+                firewall: aisafeguard_firewall::create_backend(),
+                detect: Arc::new(aisafeguard_detect::FreqEngine::new()),
+                capture: Arc::new(CaptureState::default()),
+                rules: Arc::new(RulesState::default()),
+                xdp: None,
+                rt: tokio::runtime::Handle::current(),
+                started: Instant::now(),
+                ai_running: Arc::new(AtomicBool::new(false)),
+                bus_lag_total: AtomicU64::new(0),
+                honeypot: aisafeguard_honeypot::start(
+                    &aisafeguard_core::config::HoneypotConfig {
+                        enabled: false,
+                        listeners: Vec::new(),
+                        ..Default::default()
+                    },
+                    bus.clone(),
+                    &dir,
+                ),
+                local_accounts: Arc::new(RwLock::new(std::collections::HashSet::new())),
+                credentials: Arc::new(
+                    CredentialStore::open(&dir.join("creds.db")).expect("凭证库"),
+                ),
+                corroboration: Arc::new(Mutex::new(
+                    crate::corroboration::CorroborationEngine::default(),
+                )),
+                fed_stats: Some(Arc::new(crate::fed::FedStats::default())),
+                token: String::new(),
+                version: "test",
+            });
+            // db 尺寸断言走真实文件：cfg.data_dir 指向临时目录，store 就开在 db_path()
+            eng.cfg.write().expect("配置锁").general.data_dir = dir.clone();
+
+            eng.store
+                .insert_event(&SecurityEvent::HoneypotHit {
+                    ts: now_ts(),
+                    listener: "ssh".into(),
+                    kind: "ssh".into(),
+                    port: 2222,
+                    remote_ip: "9.9.9.9".into(),
+                    remote_port: 5555,
+                    summary: "hit".into(),
+                    payload: String::new(),
+                    http_hint: None,
+                    interaction: None,
+                })
+                .unwrap();
+            eng.store
+                .insert_event(&SecurityEvent::HoneypotHit {
+                    ts: now_ts(),
+                    listener: "rdp".into(),
+                    kind: "rdp".into(),
+                    port: 3389,
+                    remote_ip: "8.8.8.8".into(),
+                    remote_port: 5556,
+                    summary: "hit".into(),
+                    payload: String::new(),
+                    http_hint: None,
+                    interaction: None,
+                })
+                .unwrap();
+            eng.store
+                .insert_event(&SecurityEvent::Detection {
+                    ts: now_ts(),
+                    kind: "scan".into(),
+                    src_ip: "7.7.7.7".into(),
+                    confidence: "medium".into(),
+                    severity: "medium".into(),
+                    evidence: "e".into(),
+                    rule_id: None,
+                    http_hint: None,
+                    tls_fingerprint: None,
+                    tls_ja4: None,
+                })
+                .unwrap();
+            eng.store
+                .insert_event(&SecurityEvent::CredentialObserved {
+                    ts: now_ts(),
+                    listener: "ssh".into(),
+                    kind: "ssh".into(),
+                    port: 2222,
+                    remote_ip: "6.6.6.6".into(),
+                    remote_port: 5557,
+                    username: "root".into(),
+                    pass_hash: None,
+                })
+                .unwrap();
+            eng.store
+                .insert_rule(
+                    "asg-metrics-engine",
+                    "in",
+                    "any",
+                    "9.9.9.9",
+                    None,
+                    "engine",
+                    "检测器自动封禁",
+                    "检测器",
+                    Some(now_ts() + 60),
+                )
+                .unwrap();
+            eng.store
+                .insert_rule(
+                    "asg-metrics-manual",
+                    "in",
+                    "any",
+                    "8.8.8.8",
+                    None,
+                    "manual",
+                    "API 手动添加",
+                    "",
+                    None,
+                )
+                .unwrap();
+            eng.store
+                .insert_suggestion(
+                    "2026-01-01",
+                    "fp-metrics-test",
+                    "category",
+                    "P2",
+                    "标题",
+                    "证据",
+                    "动作",
+                    "model",
+                    "path",
+                )
+                .unwrap();
+            eng.bus_lag_total.store(7, Ordering::Relaxed);
+
+            let m = eng.metrics_snapshot();
+            assert_eq!(m.honeypot_hit_total, 2, "分 kind 全量计数（since=0）");
+            assert_eq!(m.detections_total, 1);
+            assert_eq!(m.credential_observed_total, 1);
+            assert_eq!(
+                m.events_total, 4,
+                "totals_all 口径：任意 kind、remote_ip 非空"
+            );
+            assert_eq!(m.auto_block_total, 1, "只算 origin=engine，manual 不并入");
+            assert_eq!(m.proposals_pending, 0);
+            assert_eq!(m.suggestions_pending, 1);
+            assert_eq!(m.bus_lag_total, 7);
+            assert_eq!(m.version, "test");
+            assert_eq!(m.listener_up_total, 0, "蜜罐禁用：无监听行");
+            assert!(m.listeners.is_empty());
+            assert!(!m.xdp_attached, "测试引擎未启用 XDP");
+            assert!(m.db_size_bytes > 0, "db 文件已建库应有尺寸");
+        });
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// P0-2：总线 lag 可观测——计数器累计丢失条数，且空窗事件以 engine error
