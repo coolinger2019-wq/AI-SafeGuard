@@ -154,7 +154,7 @@
         </div>
       </section>
       <section>
-        <h2><span data-i18n="top.title">Top 来源（24h）</span><span class="hint" style="font-weight:400;font-size:12px">　点「详情」查归属（第三方 ip-api.com，仅查询攻击者 IP）</span></h2>
+        <h2><span data-i18n="top.title">Top 来源（24h）</span><span class="hint" style="font-weight:400;font-size:12px">　点「详情」展开；归属地默认不查，点「查询归属地」才向第三方发起（仅攻击者 IP）</span></h2>
         <table class="toplist" id="topips"></table>
       </section>
     </div>
@@ -288,7 +288,7 @@ const EN = {
   '仪表盘': 'Dashboard', '事件': 'Events', '建议': 'Proposals', '防火墙': 'Firewall', '配置': 'Config',
   '引擎状态': 'Engine Status', '蜜罐监听': 'Honeypot Listeners', '快捷操作': 'Quick Actions',
   'Top 来源（24h）': 'Top Sources (24h)',
-  '点「详情」查归属（第三方 ip-api.com，仅查询攻击者 IP）': ' Click "Detail" for geo lookup (third-party ip-api.com, attacker IPs only)',
+  '点「详情」展开；归属地默认不查，点「查询归属地」才向第三方发起（仅攻击者 IP）': ' Click "Detail" to expand; geo lookup is opt-in — click "Geo lookup" to send the third-party query (attacker IPs only)',
   '防火墙当前生效的封禁规则（含 AI 灰度/自动封禁/手动/组织来源），每 3 秒自动刷新。': 'Active firewall block rules (AI trial / auto / manual / org origins), auto-refresh every 3s.',
   '暂停刷新': 'Pause refresh',
   '每 3 秒自动刷新，点击行展开载荷。': 'Auto-refresh every 3s. Click a row to expand payload.',
@@ -335,7 +335,10 @@ const EN = {
   '应用（灰度封禁生效）': 'applied (grey ban active)',
   '建议 #': 'Proposal #', '已': ' ', '操作失败：': 'Action failed: ',
   '（无详情）': '(no detail)', '分钟': ' min',
-  '查询中…（第三方 ip-api.com）': 'Looking up… (ip-api.com)', '查询中…（第三方 ipwho.is）': 'Looking up… (ipwho.is)',
+  '查询中…（第三方 ipwho.is）': 'Looking up… (ipwho.is)',
+  '未查询（点击「查询归属地」向第三方发起）': 'Not looked up — click "Geo lookup" to send the third-party query',
+  '查询归属地': 'Geo lookup',
+  '第三方查询，仅在你点击时发起': 'Third-party lookup, sent only when you click',
   '查询失败': 'Lookup failed', '查询失败：': 'Lookup failed: ', '（可稍后再点一次）': ' (retry later)',
   '未知': 'Unknown', 'ISP 未知': 'ISP unknown',
   '放弃未保存的修改？': 'Discard unsaved changes?',
@@ -498,13 +501,19 @@ function toast(msg) {
   clearTimeout(toastIv);
   toastIv = setTimeout(() => { t.style.display = 'none'; }, 3000);
 }
-/* IP 归属查询（第三方 ip-api.com，备用 ipwho.is；仅查询攻击者来源 IP，结果缓存本机） */
+/* IP 归属地查询（第三方 https://ipwho.is，免费档 1000 次/天，仅查询攻击者来源 IP，结果缓存本机）。
+   显式开关：展开「详情」不发起任何请求，只有点「查询归属地」按钮才发——避免浏览控制台
+   就向第三方泄露运营者的查询行为。曾用 ip-api.com，但其免费端点只支持明文 http
+   （https 需付费 key，实测 403 "SSL unavailable"），明文可被链路篡改，已移除。
+   输出一律经 textContent（不经 innerHTML），第三方返回内容不构成注入面。 */
 let geoCache = {};
 try { geoCache = JSON.parse(localStorage.getItem('asg_geo') || '{}'); } catch (_) { geoCache = {}; }
 let geoFailUntil = 0;
+const geoPending = new Set();
 function geoText(ip) {
+  if (geoPending.has(ip)) return t('查询中…（第三方 ipwho.is）');
   const g = geoCache[ip];
-  if (!g) return t('查询中…（第三方 ip-api.com）');
+  if (!g) return t('未查询（点击「查询归属地」向第三方发起）');
   if (g.error) return t('查询失败：') + g.error + t('（可稍后再点一次）');
   return '🌍 ' + (g.country || t('未知')) + (g.city ? ' · ' + g.city : '') +
     '　' + (g.isp || t('ISP 未知')) + (g.asn ? '（AS' + g.asn + '）' : '');
@@ -514,37 +523,29 @@ async function geoLookup(ip) {
   if (c && (!c.error || Date.now() < geoFailUntil)) return c; // 失败结果缓存 60s 防连轰
   let v;
   try {
-    const r = await fetch('http://ip-api.com/json/' + encodeURIComponent(ip) + '?fields=status,message,country,city,isp,as&lang=zh-CN');
+    const r = await fetch('https://ipwho.is/' + encodeURIComponent(ip));
     const j = await r.json();
-    if (j.status !== 'success') throw new Error(j.message || '查询失败');
-    v = { country: j.country || '', city: j.city || '', isp: j.isp || '', asn: (j.as || '').replace(/^AS/, '') };
-  } catch (e1) {
-    try {
-      const r = await fetch('https://ipwho.is/' + encodeURIComponent(ip));
-      const j = await r.json();
-      if (!j || j.success === false) throw new Error((j && j.message) || '查询失败');
-      v = { country: j.country || '', city: j.city || '', isp: (j.connection && (j.connection.org || j.connection.isp)) || '', asn: (j.connection && j.connection.asn) || '' };
-    } catch (e2) {
-      v = { error: (e1 && e1.message) || (e2 && e2.message) || '查询失败' };
-      geoFailUntil = Date.now() + 60000;
-    }
+    if (!j || j.success === false) throw new Error((j && j.message) || '查询失败');
+    v = { country: j.country || '', city: j.city || '', isp: (j.connection && (j.connection.org || j.connection.isp)) || '', asn: (j.connection && j.connection.asn) || '' };
+  } catch (e) {
+    v = { error: (e && e.message) || '查询失败' };
+    geoFailUntil = Date.now() + 60000;
   }
   geoCache[ip] = v;
   try { localStorage.setItem('asg_geo', JSON.stringify(geoCache)); } catch (_) {}
   return v;
 }
-function fillGeo(ip) {
+function paintGeo(ip) {
   const pay = document.querySelector('tr[data-geopay="' + CSS.escape(ip) + '"] pre');
-  if (!pay) return;
-  if (geoCache[ip]) { pay.textContent = geoText(ip); return; }
-  pay.textContent = t('查询中…（第三方 ipwho.is）');
-  geoLookup(ip).then(() => {
-    const p = document.querySelector('tr[data-geopay="' + CSS.escape(ip) + '"] pre');
-    if (p) p.textContent = geoText(ip);
-  }).catch((err) => {
-    const p = document.querySelector('tr[data-geopay="' + CSS.escape(ip) + '"] pre');
-    if (p) p.textContent = t('查询失败：') + err.message;
-  });
+  if (pay) pay.textContent = geoText(ip);
+}
+async function geoQuery(ip) {
+  if (geoPending.has(ip)) return;
+  geoPending.add(ip);
+  paintGeo(ip);
+  await geoLookup(ip); // 内部已捕获全部错误并缓存，不会 reject
+  geoPending.delete(ip);
+  paintGeo(ip);
 }
 
 /* ---------- 登录 ---------- */
@@ -626,27 +627,27 @@ async function refreshDash() {
 
   $('ver').textContent = 'v' + st.version;
   $('stats').innerHTML =
-    statCard(t('24h 命中'), st.hits_24h) +
-    statCard(t('24h 攻击者'), st.attackers_24h) +
-    statCard(t('事件总数'), st.total_events) +
-    statCard(t('独立来源'), st.unique_sources) +
-    statCard(t('待处理建议'), st.pending_proposals) +
-    statCard(t('生效规则'), st.rule_count);
+    statCard(t('24h 命中'), esc(st.hits_24h)) +
+    statCard(t('24h 攻击者'), esc(st.attackers_24h)) +
+    statCard(t('事件总数'), esc(st.total_events)) +
+    statCard(t('独立来源'), esc(st.unique_sources)) +
+    statCard(t('待处理建议'), esc(st.pending_proposals)) +
+    statCard(t('生效规则'), esc(st.rule_count));
 
   // F802 转化漏斗（7 天窗）：hit→detection→proposal→applied + 命中 Top 监听器
   const fu = st.funnel_7d || { hits: 0, detections: 0, proposed: 0, applied: 0, top_listeners: [] };
   const rate = fu.hits > 0 ? (fu.detections / fu.hits * 100).toFixed(1) : '0';
-  const top = (fu.top_listeners || []).slice(0, 5)
-    .map(([l, n]) => esc(l) + ' ' + n).join(' · ');
+  const topL = (fu.top_listeners || []).slice(0, 5)
+    .map(([l, n]) => esc(l) + ' ' + esc(n)).join(' · ');
   const eng2 = [
-    [t('转化漏斗(7d)'), t('命中') + ' ' + fu.hits + ' → ' + t('检测') + ' ' + fu.detections +
-      ' (' + rate + '%) → ' + t('建议') + ' ' + fu.proposed + ' → ' + t('应用') + ' ' + fu.applied],
+    [t('转化漏斗(7d)'), t('命中') + ' ' + esc(fu.hits) + ' → ' + t('检测') + ' ' + esc(fu.detections) +
+      ' (' + esc(rate) + '%) → ' + t('建议') + ' ' + esc(fu.proposed) + ' → ' + t('应用') + ' ' + esc(fu.applied)],
   ];
-  if (top) eng2.push([t('命中 Top(7d)'), top]);
+  if (topL) eng2.push([t('命中 Top(7d)'), topL]);
   // F803 口径拆分：快路径 / AI 自动封禁分列（曾合计导致「配额超限」错觉）
   const m7 = st.metrics_7d || {};
-  eng2.push([t('自动封禁(7d)'), (m7.auto_blocks || 0) + '（' + t('快路径') + ' ' + (m7.auto_blocks_engine || 0) +
-    ' / AI ' + (m7.auto_blocks_ai || 0) + '）']);
+  eng2.push([t('自动封禁(7d)'), esc(m7.auto_blocks || 0) + '（' + t('快路径') + ' ' + esc(m7.auto_blocks_engine || 0) +
+    ' / AI ' + esc(m7.auto_blocks_ai || 0) + '）']);
   // 复用同一容器（轮询刷新不重复插块）
   let fuBox = document.getElementById('funnel');
   if (!fuBox) {
@@ -665,7 +666,7 @@ async function refreshDash() {
     [t('防火墙后端'), esc(st.backend) + (st.elevated ? '' : t('（未提权）'))],
     [t('检测快路径'), st.detect_enabled ? '<span class="badge ok">' + t('开') + '</span>' : '<span class="badge warn">' + t('关') + '</span>'],
     [t('XDP 快速层'), st.xdp.active
-      ? '<span class="badge ok">' + t('开') + '</span> <span class="mono hint">' + esc(st.xdp.iface) + ' · ' + t('镜像') + ' ' + st.xdp.mirrored + '</span>'
+      ? '<span class="badge ok">' + t('开') + '</span> <span class="mono hint">' + esc(st.xdp.iface) + ' · ' + t('镜像') + ' ' + esc(st.xdp.mirrored) + '</span>'
       : '<span class="badge warn">' + t('未启用') + '</span>'],
     [t('AI 慢路径'), ai.enabled
       ? '<span class="badge acc">' + esc(ai.model) + '</span> ' +
@@ -682,7 +683,7 @@ async function refreshDash() {
     const act = l.running
       ? '<button class="act ghost" style="padding:2px 10px;font-size:11.5px" data-ls="stop" data-name="' + esc(l.name) + '">' + t('停止') + '</button>'
       : '<button class="act" style="padding:2px 10px;font-size:11.5px" data-ls="start" data-name="' + esc(l.name) + '">' + t('启动') + '</button>';
-    return '<tr><td class="mono">' + esc(l.name) + '</td><td class="mono">' + l.port + '</td><td>' +
+    return '<tr><td class="mono">' + esc(l.name) + '</td><td class="mono">' + esc(l.port) + '</td><td>' +
       esc(l.kind) + '</td><td>' + esc(t(l.mode || '低交互')) + '</td><td>' +
       (l.running ? '<span class="badge ok">' + t('运行中') + '</span>' : '<span class="badge err">' + t('未运行') + '</span>') +
       '</td><td>' + act + '</td></tr>';
@@ -691,17 +692,19 @@ async function refreshDash() {
     '<tr><th>' + t('监听') + '</th><th>' + t('端口') + '</th><th>' + t('类型') + '</th><th>' + t('交互') + '</th><th>' + t('状态') + '</th><th>' + t('操作') + '</th></tr>' +
     (rows || '<tr><td colspan="6" class="hint">' + t('无监听') + '</td></tr>'));
 
-  const top = (stats.top_ips || []).slice(0, 8).map((t, i) => {
-    const open = expandedGeo.has(t.ip);
-    return '<tr><td class="mono">' + (i + 1) + '</td><td class="mono">' + esc(t.ip) +
-      blockBadge(t.ip) + '</td><td>' + t.hits + '</td>' +
-      '<td><button class="act ghost" style="padding:2px 10px;font-size:11.5px" data-geo="' + esc(t.ip) + '">详情</button></td></tr>' +
-      '<tr class="payload" data-geopay="' + esc(t.ip) + '"' + (open ? '' : ' hidden') + '><td colspan="4"><pre></pre></td></tr>';
+  const top = (stats.top_ips || []).slice(0, 8).map((r, i) => {
+    const open = expandedGeo.has(r.ip);
+    return '<tr><td class="mono">' + (i + 1) + '</td><td class="mono">' + esc(r.ip) +
+      blockBadge(r.ip) + '</td><td>' + esc(r.hits) + '</td>' +
+      '<td><button class="act ghost" style="padding:2px 10px;font-size:11.5px" data-geo="' + esc(r.ip) + '">详情</button></td></tr>' +
+      '<tr class="payload" data-geopay="' + esc(r.ip) + '"' + (open ? '' : ' hidden') + '><td colspan="4"><pre></pre>' +
+      '<button class="act ghost" style="padding:2px 10px;font-size:11.5px" data-geoq="' + esc(r.ip) + '">' + t('查询归属地') + '</button> ' +
+      '<span class="hint">' + t('第三方查询，仅在你点击时发起') + '</span></td></tr>';
   }).join('');
   setHtml('topips', $('topips'),
     '<tr><th>#</th><th>' + t('来源 IP') + '</th><th>' + t('命中') + '</th><th>' + t('归属') + '</th></tr>' +
     (top || '<tr><td colspan="4" class="hint">' + t('暂无数据') + '</td></tr>'));
-  expandedGeo.forEach(fillGeo);
+  expandedGeo.forEach(paintGeo); // 展开行只画占位/缓存结果，不发第三方请求
 }
 
 $('listeners').addEventListener('click', async (e) => {
@@ -717,6 +720,8 @@ $('listeners').addEventListener('click', async (e) => {
 });
 
 $('topips').addEventListener('click', (e) => {
+  const q = e.target.closest('button[data-geoq]');
+  if (q) { geoQuery(q.dataset.geoq); return; } // 显式开关：只有这个按钮才向第三方发请求
   const btn = e.target.closest('button[data-geo]');
   if (!btn) return;
   const ip = btn.dataset.geo;
@@ -725,7 +730,7 @@ $('topips').addEventListener('click', (e) => {
   if (expandedGeo.has(ip)) { expandedGeo.delete(ip); pay.hidden = true; return; }
   expandedGeo.add(ip);
   pay.hidden = false;
-  fillGeo(ip);
+  paintGeo(ip); // 展开本身不查询
 });
 
 document.querySelectorAll('button[data-op]').forEach((b) => {
@@ -773,14 +778,14 @@ async function refreshEvents() {
     const pay = (e.payload || '').slice(0, 2000);
     const rid = e.rule_id ? ' <span class="badge acc">' + esc(e.rule_id) + '</span>' : '';
     const open = expandedEv.has(e.id);
-    const main = '<tr data-id="' + e.id + '">' +
+    const main = '<tr data-id="' + esc(e.id) + '">' +
       '<td class="mono hint">' + fmtTs(e.ts) + '</td>' +
       '<td>' + esc(e.kind) + (e.listener ? ' <span class="hint">·' + esc(e.listener) + '</span>' : '') + rid + '</td>' +
-      '<td class="mono">' + esc(e.remote_ip) + (e.remote_port ? ':' + e.remote_port : '') +
+      '<td class="mono">' + esc(e.remote_ip) + (e.remote_port ? ':' + esc(e.remote_port) : '') +
       blockBadge(e.remote_ip) + '</td>' +
       '<td>' + esc(e.summary) + '</td></tr>';
     return pay
-      ? main + '<tr class="payload" data-for="' + e.id + '"' + (open ? '' : ' hidden') + '><td colspan="4"><pre>' + esc(pay) + '</pre></td></tr>'
+      ? main + '<tr class="payload" data-for="' + esc(e.id) + '"' + (open ? '' : ' hidden') + '><td colspan="4"><pre>' + esc(pay) + '</pre></td></tr>'
       : main;
   }).join('');
   setHtml('ev', $('ev'), '<tr><th>' + t('时间') + '</th><th>' + t('类型') + '</th><th>' + t('来源') + '</th><th>' + t('摘要') + '</th></tr>' +
@@ -816,16 +821,16 @@ async function refreshProp() {
     const sev = (p.severity === 'high' || p.severity === 'critical') ? 'err'
               : p.severity === 'medium' ? 'warn' : 'acc';
     const acts = p.status === 'pending'
-      ? '<button class="act" style="padding:2px 10px;font-size:11.5px" data-apply="' + p.id + '">' +
+      ? '<button class="act" style="padding:2px 10px;font-size:11.5px" data-apply="' + esc(p.id) + '">' +
         (p.action === 'credential_spray' ? t('确认封禁') : p.action === 'tune_detection' ? t('采纳') : t('应用')) + '</button> ' +
-        '<button class="act ghost" style="padding:2px 10px;font-size:11.5px" data-dismiss="' + p.id + '">' + t('驳回') + '</button>'
+        '<button class="act ghost" style="padding:2px 10px;font-size:11.5px" data-dismiss="' + esc(p.id) + '">' + t('驳回') + '</button>'
       : '';
-    const main = '<tr data-pid="' + p.id + '">' +
+    const main = '<tr data-pid="' + esc(p.id) + '">' +
       '<td class="mono hint">' + fmtTs(p.created_ts) + '</td>' +
       '<td><span class="badge ' + sev + '">' + esc(p.severity) + '</span></td>' +
       '<td>' + esc(p.action) + (p.action === 'tune_detection' && p.tune_param ? ' <span class="badge acc">' + esc(p.tune_param) + '=' + esc(p.tune_value) + '</span>' : '')
       + (p.rule_name ? ' <span class="badge acc">' + esc(p.rule_name) + '</span>' : '') + '</td>' +
-      '<td class="mono">' + esc(p.remote_ip) + (p.local_port ? ':' + p.local_port : '') + '</td>' +
+      '<td class="mono">' + esc(p.remote_ip) + (p.local_port ? ':' + esc(p.local_port) : '') + '</td>' +
       '<td>' + esc(p.reason) + '</td>' +
       '<td>' + propBadge(p.status) +
       (p.status === 'pending' ? blockBadge(p.remote_ip) : '') + '</td>' +
@@ -833,7 +838,7 @@ async function refreshProp() {
     const detail = (p.analysis || p.reason || t('（无详情）')) +
       (p.ttl_secs ? '\n' + t('灰度时长: ') + Math.round(p.ttl_secs / 60) + t('分钟') : '');
     const open = expandedProp.has(p.id);
-    return main + '<tr class="payload" data-for-p="' + p.id + '"' + (open ? '' : ' hidden') + '><td colspan="7"><pre>' + esc(detail) + '</pre></td></tr>';
+    return main + '<tr class="payload" data-for-p="' + esc(p.id) + '"' + (open ? '' : ' hidden') + '><td colspan="7"><pre>' + esc(detail) + '</pre></td></tr>';
   }).join('');
   setHtml('prop', $('prop'), '<tr><th>' + t('时间') + '</th><th>' + t('严重度') + '</th><th>' + t('动作') + '</th><th>' + t('目标') + '</th><th>' + t('理由') + '</th><th>' + t('状态') + '</th><th>' + t('操作') + '</th></tr>' +
     (body || '<tr><td colspan="7" class="hint">' + t('暂无建议') + '</td></tr>'));
@@ -891,7 +896,7 @@ async function refreshFw() {
   const badgeOf = { trial: 'warn', engine: 'acc', manual: 'ok', promoted: 'ok' };
   const body = rows.map((r) =>
     '<tr>' +
-    '<td class="mono">' + esc(r.remote_ip) + (r.local_port ? ':' + r.local_port : '') + '</td>' +
+    '<td class="mono">' + esc(r.remote_ip) + (r.local_port ? ':' + esc(r.local_port) : '') + '</td>' +
     '<td>' + esc(r.direction) + ' / ' + esc(r.protocol) + '</td>' +
     '<td>' + esc(r.source || '') + (r.tag ? ' <span class="badge acc">' + esc(r.tag) + '</span>' : '') + '</td>' +
     '<td><span class="badge ' + (badgeOf[r.ttl_state] || 'acc') + '">' + esc(r.ttl_state) + '</span> <span class="hint">' + esc(r.ttl_text) + '</span></td>' +
@@ -994,8 +999,8 @@ async function loadSuggestions() {
 }
 function sgDetail(x) {
   const f = (label, val) => '<div style="margin:3px 0"><span class="hint">' + label + '</span>' + esc(val || '—') + '</div>';
-  const note = `<label style="display:block;margin:6px 0"><span class="hint">${t('决策备注（去向/理由/完成记录）')}</span><input id="sg-note-${x.id}" style="width:95%" placeholder="${t('采纳填去向；拒绝填理由')}" value="${esc(x.note)}"></label>`;
-  const btn = (act, label) => ` <button class="act" data-act="${act}" data-id="${x.id}">${label}</button>`;
+  const note = `<label style="display:block;margin:6px 0"><span class="hint">${t('决策备注（去向/理由/完成记录）')}</span><input id="sg-note-${esc(x.id)}" style="width:95%" placeholder="${t('采纳填去向；拒绝填理由')}" value="${esc(x.note)}"></label>`;
+  const btn = (act, label) => ` <button class="act" data-act="${act}" data-id="${esc(x.id)}">${label}</button>`;
   let ops = '';
   if (x.status === 'pending') ops = btn('edit', t('✎ 修正')) + btn('adopted', t('✓ 采纳')) + btn('rejected', t('✕ 拒绝'));
   else if (x.status === 'adopted') ops = btn('edit', t('✎ 修正')) + btn('completed', t('✔ 完成'));
@@ -1008,8 +1013,8 @@ function renderSg() {
     const open = expandedSg.has(x.id);
     const pathBadge = { config: 'badge ok', code: 'badge warn', ops: 'badge' }[x.impl_path] || 'badge';
     const pathLabel = { config: '改配置', code: '需改码', ops: '人工操作' }[x.impl_path] || x.impl_path;
-    const main = `<tr data-id="${x.id}" style="cursor:pointer"><td>${x.day}</td><td>${x.category}</td><td>${x.priority}</td><td>${esc(x.title)}</td><td><span class="${cls}">${t(st)}</span> <span class="${pathBadge}">${t(pathLabel)}</span></td><td>${esc(x.note)}</td><td class="hint">${open ? '▲' : '▼'}</td></tr>`;
-    const detail = open ? `<tr class="payload" data-for="${x.id}">${sgDetail(x)}</tr>` : '';
+    const main = `<tr data-id="${esc(x.id)}" style="cursor:pointer"><td>${esc(x.day)}</td><td>${esc(x.category)}</td><td>${esc(x.priority)}</td><td>${esc(x.title)}</td><td><span class="${cls}">${esc(t(st))}</span> <span class="${pathBadge}">${esc(t(pathLabel))}</span></td><td>${esc(x.note)}</td><td class="hint">${open ? '▲' : '▼'}</td></tr>`;
+    const detail = open ? `<tr class="payload" data-for="${esc(x.id)}">${sgDetail(x)}</tr>` : '';
     return main + detail;
   }).join('');
   setHtml('sg', $('sg'), '<tr><th>日期</th><th>类别</th><th>优先</th><th>标题</th><th>状态</th><th>决策备注</th><th></th></tr>' + (body || '<tr><td colspan="7" class="hint">' + t('暂无自审建议——AI 每日生成一轮，或点「立即自审」') + '</td></tr>'));
