@@ -2,6 +2,56 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.8.4] - 2026-11-21
+
+> 0.9 主题（运维收口 + 发布信任链）按 plan.md 提前交付：**发布签名全链上线** +
+> **backup/restore** + **/api/metrics** + **升级流程双保险**，以及 web 控制台白屏修复。
+
+### 新增
+
+- **发布签名（P0-3）**：ECDSA P-256 全链——`gen-signing-key` / `sign-manifest` /
+  `verify-manifest` 三子命令；CI 打 tag 时自动给三个 `.sha256` 盖章（`.sha256.sig`
+  出现在 Release 页）；自更新客户端下载后用内嵌公钥验签，验不过拒装；
+  `aisafeguard.sha256` 资产缺失 + 签名已配置 = 硬失败（防删资产绕信任链）；
+  公钥指纹见 docs/RELEASE.md
+- **backup / restore 子命令（P1-7，A.8.13 收口）**：`aisafeguard backup <dir>` 在线
+  快照 DB+凭证库（VACUUM INTO 含 WAL 未 checkpoint 内容）+ config.toml + fed/ 证书树
+  + canary.key，manifest.json + 逐文件 sha256；`restore` 恢复前整体校验不做半恢复、
+  zip-slip 全形态拒绝（Windows 实测）、旧文件留痕、恢复后自动 verify-log
+- **GET /api/metrics（P1-6）**：text/plain 零依赖，events/detections/auto_block/
+  bus_lag/listener_up(逐监听器)/db_size/xdp_attached 等指标，Bearer 同口径受保护；
+  给 cron 心跳与外部监控提供了抓手
+- **总线 lag 证据空窗信号化（P0-2）**：`bus_lag_total` 计数器进 /api/status 与
+  /api/metrics；persist/detect/creds 三证据消费者 lag 统一走 error 留痕并回发
+  engine 事件入哈希链——空窗从"无人知晓"变为"可观测+可告警"
+- **upgrade-windows.ps1（0.8.3 后补发，一并入 0.8.4 产物）**：Windows 平滑升级脚本
+  （zip sha256 校验 → 停服务 → 备份 → 换装 → 重启，失败自动回滚）
+
+### 修复
+
+- **web 控制台白屏（致命）**：F802 引入的 `refreshDash` 双 `const top` 使整个
+  `<script>` 解析失败——node --check 复现后修复；innerHTML 动态插值 esc 补齐
+  （34→52 处）+ IP 归属地改 ipwho.is https 默认不查、按钮触发
+- **deploy.sh 升级双保险（P0-1）**：新二进制 `--version` 目标机预检拦 glibc 不兼容
+  于动服务前；升级前 DB+凭证库+配置快照（保留 5 份）；失败自动回滚=二进制+DB+
+  凭证库三恢复；verify-log 退出码不再被管道吞
+- **fedproto.hex_decode 多字节 panic**：联邦节点（已过 mTLS 认证）发送含多字节
+  UTF-8 的 sig 字段可使解析 panic——补 ASCII-hex 白名单（与 signing 同款防线）
+- gitee-release.sh HEAD 多跳重定向只取末跳 content-length（多行值使大小比对恒失败）
+
+### 变更
+
+- **store/lib.rs 按表域拆分（P1-4，纯机械零行为变化）**：3,377 行 → lib.rs 1,742 +
+  11 模块；pub 签名 100 条拆前后 diff 空、104 函数守恒、迁移一行未改
+- **发版构建钉版（P2-10）**：build-windows 钉 windows-2022（runner 镜像漂移=
+  供应链漂移）；gui feature gate 评估入 LESSONS（gui-only 103 包/24.7% 包数，
+  结论暂缓到 musl 落地）
+- **发布签名公钥启用**：`SIGNING_PUBKEY_HEX` 占位换真实公钥，指纹
+  `fc62496c…` 入 docs/RELEASE.md 公示；存量 release（无 .sig）兼容路径保留
+- **musl 静态链接 spike 数据入 RELEASE.md**：VPS 实测一次通过、static-pie 40.48MB
+  体积持平、运行验证 OK——0.9-B 正式落地时 Release 构建切 musl 的依据
+- plan.md：架构评估（Top10）+ 0.9 立项与交付记录
+
 ## [0.8.3] - 2026-11-15
 
 ### 新增
