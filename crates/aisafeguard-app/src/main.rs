@@ -219,7 +219,13 @@ mod signing {
     /// 手动核验下载物（流程见 docs/RELEASE.md）。失败退出码 1。
     pub fn cmd_verify_manifest(file: &Path, sig_hex: &str, pub_point_hex: &str) -> Result<()> {
         let data = std::fs::read(file).with_context(|| format!("读取 {} 失败", file.display()))?;
-        match verify_signature(pub_point_hex, &data, sig_hex) {
+        // --sig 既接受签名 hex 串，也接受 .sig 文件路径（存在即读内容）——
+        // 手动核验时传路径是最自然的姿势，别让用户掉进"传了路径报非 hex"的坑
+        let sig = match std::fs::read_to_string(sig_hex) {
+            Ok(content) => content.trim().to_string(),
+            Err(_) => sig_hex.trim().to_string(),
+        };
+        match verify_signature(pub_point_hex, &data, &sig) {
             Ok(()) => {
                 println!("✓ 发布签名验证通过（ECDSA P-256）");
                 Ok(())
