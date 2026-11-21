@@ -25,14 +25,14 @@ v0.8.3 发布事故（runner glibc 前向不兼容 → 防护静默下线）实�
 
 ### P0（安全 / 稳定性）
 
-- [ ] **P0-1 deploy.sh 升级流程补数据库快照 + 新二进制预检**
+- [x] **P0-1 deploy.sh 升级流程补数据库快照 + 新二进制预检** ✅ 2026-11-21（subagent 实现 + 独立审查两轮 PASS：credentials 路径/回滚顺序/systemctl 容错/verify-log 守门 7 项修复，VPS _selftest 实测）
   - 现状：deploy.sh 只备份二进制；DB 被 v0.8.3 的全量重链改写后回滚旧 exe
     会出现新旧口径混写 verify-log 的风险（store/lib.rs:563-579 rechain_all）
   - 方案：换装前 `sqlite3 .backup` 到带版本号目录；回滚分支同时恢复 DB；
     换装前先跑 `/tmp/aisafeguard.new --version` 冷启动验证
   - 工作量 0.5-1 天，风险低
 
-- [ ] **P0-2 事件总线 lag 从"日志"升级为"信号"**
+- [x] **P0-2 事件总线 lag 从"日志"升级为"信号"** ✅ 2026-11-21（第一步落地：bus_lag_total + handle_bus_lag + persist/detect/creds 三消费者统一 + StatusReport 暴露 + 订阅点前移；mpsc 迁移为后续步骤）
   - 现状：持久化与检测消费者 lag 只打 tracing warn（main.rs:924-926、
     engine.rs:1651-1653）——对哈希链审计产品意味着**证据空窗无告警**
   - 方案（两步）：先做 lag 计数器进 StatusReport + 超阈值发 Engine error 事件
