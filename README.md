@@ -229,6 +229,8 @@ aisafeguard fed audit <out.json>                   # 审计导出
 
 [SECURITY.md](SECURITY.md):披露渠道、响应时限、支持版本、发布完整性说明(SHA-256 清单见发布页)。MIT License,© 2026 coolinger · vibe coding。
 
+发布完整性:发布物逐文件附 SHA-256 清单 + ECDSA P-256 签名(逐文件 .sha256.sig,签名公钥指纹见发布页),Windows 自更新下载后自动验签——签名缺失跳过并提示(存量 release),签名不符硬失败中止升级。签发流程与手动验签见 [docs/RELEASE.md](docs/RELEASE.md)。
+
 ## 组织协同运维（0.6）
 
 多台机器组成一个防御组织：**多机印证**（同一攻击者被 ≥2 节点独立观测 → 组织级确信度）、

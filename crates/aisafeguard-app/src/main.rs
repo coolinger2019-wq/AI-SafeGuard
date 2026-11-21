@@ -87,6 +87,233 @@ WantedBy=multi-user.target
 }
 mod remote;
 
+/// P0-3 发布签名（ECDSA P-256）：`gen-signing-key` / `sign-manifest` /
+/// `verify-manifest` 子命令与自更新（update.rs）验签共用的原语。
+/// 内联在 main.rs 而非 update.rs：签名命令必须在 Linux CI 可用（release job 用
+/// build-linux 产物自签发布物），而 update 整体是 `#[cfg(windows)]`（自更新仅
+/// Windows 有语义）。签名格式 = ring 原生 fixed-width 64 字节 R||S，非 openssl
+/// DER——CI 用本二进制自签，验签用同一实现，不存在 DER 转换歧义。
+mod signing {
+    use std::path::Path;
+
+    use anyhow::{Context, Result, anyhow};
+    use ring::rand::SystemRandom;
+    // KeyPair trait 提供 public_key()（非压缩点 04||X||Y，与验签输入同格式）
+    use ring::signature::{
+        ECDSA_P256_SHA256_FIXED, ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair,
+        UnparsedPublicKey,
+    };
+    use sha2::{Digest, Sha256};
+
+    fn to_hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// hex 解码（容忍大小写与首尾空白）。必须先逐字节校验纯 ASCII hex 再按
+    /// 字节切片：多字节 UTF-8 输入（如被替换的 .sig 内容经 from_utf8_lossy
+    /// 产生 U+FFFD）若直接 `&s[i..i+2]` 会切在字符边界外 panic；all 校验顺带
+    /// 拒掉 from_str_radix 会接受的 `+`/`-` 符号前缀。错误文案固定、不回显
+    /// 输入片段（本函数也解 --key 私钥，CI 日志公开可见）。
+    fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
+        let s = s.trim();
+        if !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("输入含非 hex 字符（仅接受 0-9a-fA-F）".to_string());
+        }
+        if !s.len().is_multiple_of(2) {
+            return Err("hex 长度为奇数".to_string());
+        }
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| "hex 解码失败".to_string()))
+            .collect()
+    }
+
+    /// 解析公钥：非压缩点 04||X||Y（65 字节）——ring 验签的输入格式
+    /// （与 fedproto 取自证书 SPKI 的公钥点同格式）。
+    pub(crate) fn parse_pub_point(pub_point_hex: &str) -> Result<Vec<u8>, String> {
+        let point = hex_decode(pub_point_hex)?;
+        if point.len() != 65 || point[0] != 0x04 {
+            return Err(format!(
+                "公钥须为 65 字节非压缩点（04||X||Y），实际 {} 字节",
+                point.len()
+            ));
+        }
+        Ok(point)
+    }
+
+    /// 生成 ECDSA P-256 密钥对，返回 (PKCS#8 私钥 DER hex, 公钥点 hex)。
+    pub(crate) fn generate_keypair() -> Result<(String, String)> {
+        let pkcs8 =
+            EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &SystemRandom::new())
+                .map_err(|e| anyhow!("密钥对生成失败: {e:?}"))?;
+        // 公钥从重载的钥对取（generate_pkcs8 只返回私钥文档）
+        let kp = load_keypair(&to_hex(pkcs8.as_ref()))?;
+        Ok((to_hex(pkcs8.as_ref()), to_hex(kp.public_key().as_ref())))
+    }
+
+    /// 从 PKCS#8 私钥 DER hex 加载签名钥对（gen-signing-key 的产出格式）。
+    pub(crate) fn load_keypair(priv_hex: &str) -> Result<EcdsaKeyPair> {
+        let der = hex_decode(priv_hex).map_err(|e| anyhow!("私钥 hex 非法: {e}"))?;
+        EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &der, &SystemRandom::new())
+            .map_err(|e| anyhow!("私钥加载失败（须为 gen-signing-key 产出的 PKCS#8 hex）: {e:?}"))
+    }
+
+    /// 对字节签名，返回 hex（fixed-width 64 字节 R||S = 128 hex 字符）。
+    pub(crate) fn sign_bytes(kp: &EcdsaKeyPair, data: &[u8]) -> Result<String> {
+        let sig = kp
+            .sign(&SystemRandom::new(), data)
+            .map_err(|e| anyhow!("签名失败: {e:?}"))?;
+        Ok(to_hex(sig.as_ref()))
+    }
+
+    /// 验签：公钥点 hex + 数据 + 签名 hex。每一步失败都带可读原因返回 Err。
+    pub(crate) fn verify_signature(
+        pub_point_hex: &str,
+        data: &[u8],
+        sig_hex: &str,
+    ) -> Result<(), String> {
+        let point = parse_pub_point(pub_point_hex)?;
+        let sig = hex_decode(sig_hex)?;
+        if sig.len() != 64 {
+            return Err(format!("签名须为 64 字节 R||S，实际 {} 字节", sig.len()));
+        }
+        UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, &point)
+            .verify(data, &sig)
+            .map_err(|_| "ECDSA P-256 验签不通过".to_string())
+    }
+
+    /// 公钥指纹：公钥点字节的 SHA-256（发布页公示，供人工核对公钥未被调包）。
+    pub(crate) fn pubkey_fingerprint(pub_point_hex: &str) -> Result<String> {
+        let point = parse_pub_point(pub_point_hex).map_err(|e| anyhow!("{e}"))?;
+        Ok(format!("{:x}", Sha256::digest(&point)))
+    }
+
+    /// `aisafeguard gen-signing-key`：生成发布签名密钥对（维护者一次性操作）。
+    pub fn cmd_gen_signing_key() -> Result<()> {
+        let (priv_hex, pub_hex) = generate_keypair()?;
+        println!("已生成 ECDSA P-256 发布签名密钥对");
+        println!("私钥 hex（只进 GitHub Secret AISAFEGUARD_SIGNING_KEY，勿提交仓库/勿入日志）:");
+        println!("{priv_hex}");
+        println!("公钥 hex（填入 crates/aisafeguard-app/src/update.rs 的 SIGNING_PUBKEY_HEX）:");
+        println!("{pub_hex}");
+        println!("公钥指纹 SHA-256（发布页公示核对用）:");
+        println!("{}", pubkey_fingerprint(&pub_hex)?);
+        println!();
+        println!(
+            "⚠ 私钥只进 GitHub Secret，公钥将嵌入二进制；私钥丢失后无法再签出可被存量客户端验签的发布物"
+        );
+        Ok(())
+    }
+
+    /// `aisafeguard sign-manifest <文件> --key <私钥hex>`：对文件字节签名，
+    /// stdout 单行输出 hex 签名。CI 用法：
+    /// `aisafeguard sign-manifest dist/x.sha256 --key "$KEY" > dist/x.sha256.sig`。
+    pub fn cmd_sign_manifest(file: &Path, key_hex: &str) -> Result<()> {
+        let data = std::fs::read(file).with_context(|| format!("读取 {} 失败", file.display()))?;
+        let kp = load_keypair(key_hex)?;
+        println!("{}", sign_bytes(&kp, &data)?);
+        Ok(())
+    }
+
+    /// `aisafeguard verify-manifest <文件> --sig <签名hex> --pubkey <公钥hex>`：
+    /// 手动核验下载物（流程见 docs/RELEASE.md）。失败退出码 1。
+    pub fn cmd_verify_manifest(file: &Path, sig_hex: &str, pub_point_hex: &str) -> Result<()> {
+        let data = std::fs::read(file).with_context(|| format!("读取 {} 失败", file.display()))?;
+        match verify_signature(pub_point_hex, &data, sig_hex) {
+            Ok(()) => {
+                println!("✓ 发布签名验证通过（ECDSA P-256）");
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("✗ 发布签名验证失败: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// gen → load → sign → verify 完整往返（代码内生成 keypair，不依赖占位公钥）。
+        #[test]
+        fn gen_sign_verify_roundtrip() {
+            let (priv_hex, pub_hex) = generate_keypair().expect("生成密钥对");
+            let kp = load_keypair(&priv_hex).expect("加载私钥");
+            let manifest = b"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824  aisafeguard-windows-x64.zip\n";
+            let sig = sign_bytes(&kp, manifest).expect("签名");
+            assert_eq!(sig.len(), 128, "ring fixed-width R||S = 64 字节 / 128 hex");
+            verify_signature(&pub_hex, manifest, &sig).expect("同钥往返验签必须通过");
+        }
+
+        /// 同源替换攻击：manifest 被改、签名原样 → 必须失败。
+        #[test]
+        fn tampered_manifest_fails() {
+            let (priv_hex, pub_hex) = generate_keypair().unwrap();
+            let kp = load_keypair(&priv_hex).unwrap();
+            let sig = sign_bytes(&kp, b"sha256 of original zip").unwrap();
+            assert!(verify_signature(&pub_hex, b"sha256 of evil zip", &sig).is_err());
+        }
+
+        /// 签名被改 → 必须失败。
+        #[test]
+        fn tampered_signature_fails() {
+            let (priv_hex, pub_hex) = generate_keypair().unwrap();
+            let kp = load_keypair(&priv_hex).unwrap();
+            let sig = sign_bytes(&kp, b"data").unwrap();
+            let flip = |c: char| if c == '0' { '1' } else { '0' };
+            let bad = format!("{}{}", flip(sig.chars().next().unwrap()), &sig[1..]);
+            assert_ne!(bad, sig);
+            assert!(verify_signature(&pub_hex, b"data", &bad).is_err());
+        }
+
+        /// 换钥验签（B 私钥签、A 公钥验）→ 必须失败。
+        #[test]
+        fn wrong_key_fails() {
+            let (_, pub_a) = generate_keypair().unwrap();
+            let (priv_b, _) = generate_keypair().unwrap();
+            let sig = sign_bytes(&load_keypair(&priv_b).unwrap(), b"data").unwrap();
+            assert!(verify_signature(&pub_a, b"data", &sig).is_err());
+        }
+
+        /// 畸形输入（占位 64 个 '0' / 奇数 hex / 非法字符 / 签名长度不对）全部拒绝。
+        #[test]
+        fn malformed_inputs_rejected() {
+            let sig = "0".repeat(128);
+            assert!(verify_signature(&"0".repeat(64), b"data", &sig).is_err());
+            assert!(verify_signature("04abcd", b"data", &sig).is_err());
+            assert!(verify_signature("zz", b"data", &sig).is_err());
+            assert!(verify_signature("04", b"data", &"0".repeat(126)).is_err());
+        }
+
+        /// B1-2 回归：多字节 UTF-8 输入（被替换的 .sig 内容经 from_utf8_lossy
+        /// 会产生 U+FFFD）必须被拒绝而不是 panic（逐字节 all 校验先于按字节
+        /// 切片）；B1-3：from_str_radix 会接受的 '+/-' 符号前缀同样拒绝。
+        #[test]
+        fn non_ascii_and_sign_prefixed_hex_rejected() {
+            // 60 个 hex 字符 + U+FFFD（3 字节）：修复前 &s[60..62] 切在字符
+            // 边界外直接 panic
+            let evil = format!("{}\u{FFFD}", "0".repeat(60));
+            assert!(hex_decode(&evil).is_err());
+            assert!(hex_decode("0+40").is_err());
+            assert!(hex_decode("-040").is_err());
+            assert!(hex_decode("04 40").is_err()); // 内部空白非法（trim 只去首尾）
+            assert_eq!(hex_decode("04  \n").unwrap(), vec![0x04]); // 首尾空白容忍
+        }
+
+        /// 指纹 = 公钥点字节的 SHA-256。
+        #[test]
+        fn fingerprint_is_sha256_of_point() {
+            let (_, pub_hex) = generate_keypair().unwrap();
+            let point = parse_pub_point(&pub_hex).unwrap();
+            assert_eq!(
+                pubkey_fingerprint(&pub_hex).unwrap(),
+                format!("{:x}", Sha256::digest(&point))
+            );
+        }
+    }
+}
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, RwLock};
@@ -177,6 +404,73 @@ fn main() -> anyhow::Result<()> {
                         std::process::exit(2);
                     }
                 }
+            }
+            // P0-3 发布签名：gen-signing-key（无参）/ sign-manifest <文件> --key <hex>
+            "gen-signing-key" => command = Some(("gen-signing-key".into(), None)),
+            "sign-manifest" => {
+                i += 1;
+                let Some(file) = args.get(i).cloned() else {
+                    eprintln!("用法: aisafeguard sign-manifest <文件> --key <私钥hex>");
+                    std::process::exit(2);
+                };
+                let mut key = String::new();
+                let mut j = i + 1;
+                while let Some(a) = args.get(j) {
+                    if a == "--key" {
+                        key = args.get(j + 1).cloned().unwrap_or_default();
+                        j += 2;
+                    } else {
+                        eprintln!("未知参数: {a}");
+                        eprintln!("用法: aisafeguard sign-manifest <文件> --key <私钥hex>");
+                        std::process::exit(2);
+                    }
+                }
+                if key.trim().is_empty() {
+                    eprintln!("sign-manifest 需要 --key <私钥hex>");
+                    std::process::exit(2);
+                }
+                i = j.saturating_sub(1);
+                command = Some(("sign-manifest".into(), Some(format!("{file}\u{1}{key}"))));
+            }
+            "verify-manifest" => {
+                i += 1;
+                let Some(file) = args.get(i).cloned() else {
+                    eprintln!(
+                        "用法: aisafeguard verify-manifest <文件> --sig <签名hex> --pubkey <公钥hex>"
+                    );
+                    std::process::exit(2);
+                };
+                let mut sig = String::new();
+                let mut pub_key = String::new();
+                let mut j = i + 1;
+                while let Some(a) = args.get(j) {
+                    match a.as_str() {
+                        "--sig" => {
+                            sig = args.get(j + 1).cloned().unwrap_or_default();
+                            j += 2;
+                        }
+                        "--pubkey" => {
+                            pub_key = args.get(j + 1).cloned().unwrap_or_default();
+                            j += 2;
+                        }
+                        _ => {
+                            eprintln!("未知参数: {a}");
+                            eprintln!(
+                                "用法: aisafeguard verify-manifest <文件> --sig <签名hex> --pubkey <公钥hex>"
+                            );
+                            std::process::exit(2);
+                        }
+                    }
+                }
+                if sig.trim().is_empty() || pub_key.trim().is_empty() {
+                    eprintln!("verify-manifest 需要 --sig <签名hex> 与 --pubkey <公钥hex>");
+                    std::process::exit(2);
+                }
+                i = j.saturating_sub(1);
+                command = Some((
+                    "verify-manifest".into(),
+                    Some(format!("{file}\u{1}{sig}\u{1}{pub_key}")),
+                ));
             }
             "fed" => {
                 i += 1;
@@ -416,6 +710,15 @@ fn main() -> anyhow::Result<()> {
                     "      aisafeguard self-update [--check]                 (检查/一键升级，Windows)"
                 );
                 eprintln!(
+                    "      aisafeguard gen-signing-key                       (P0-3 生成发布签名密钥对)"
+                );
+                eprintln!(
+                    "      aisafeguard sign-manifest <文件> --key <私钥hex>    (对发布校验和签名，CI 用)"
+                );
+                eprintln!(
+                    "      aisafeguard verify-manifest <文件> --sig <hex> --pubkey <hex> (验发布签名)"
+                );
+                eprintln!(
                     "      aisafeguard --service                              (由服务管理器调用)"
                 );
                 std::process::exit(2);
@@ -458,6 +761,33 @@ fn main() -> anyhow::Result<()> {
                 };
                 let (cfg, cfg_path) = resolve_cfg(cfg_path, data_dir)?;
                 return backup::cmd_restore(Path::new(&dir), &cfg.data_dir(), &cfg_path);
+            }
+            "gen-signing-key" => return signing::cmd_gen_signing_key(),
+            "sign-manifest" => {
+                let Some(joined) = arg else {
+                    eprintln!("用法: aisafeguard sign-manifest <文件> --key <私钥hex>");
+                    std::process::exit(2);
+                };
+                let (file, key) = joined
+                    .split_once('\u{1}')
+                    .expect("参数解析阶段已保证 file\\u{1}key 两段");
+                return signing::cmd_sign_manifest(Path::new(file), key);
+            }
+            "verify-manifest" => {
+                let Some(joined) = arg else {
+                    eprintln!(
+                        "用法: aisafeguard verify-manifest <文件> --sig <签名hex> --pubkey <公钥hex>"
+                    );
+                    std::process::exit(2);
+                };
+                let parts: Vec<&str> = joined.split('\u{1}').collect();
+                let [file, sig, pub_key] = parts.as_slice() else {
+                    eprintln!(
+                        "用法: aisafeguard verify-manifest <文件> --sig <签名hex> --pubkey <公钥hex>"
+                    );
+                    std::process::exit(2);
+                };
+                return signing::cmd_verify_manifest(Path::new(file), sig, pub_key);
             }
             "self-update" => {
                 #[cfg(windows)]

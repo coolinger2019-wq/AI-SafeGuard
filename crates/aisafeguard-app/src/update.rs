@@ -9,6 +9,12 @@
 //! 单二进制设计：服务与 GUI 是同一个 exe——升级服务即升级程序本体。
 //! GUI 里的入口在「设置 → 关于 → 更新」；CLI 入口 `aisafeguard self-update [--check]`。
 //!
+//! 发布完整性（P0-3）：下载 .sha256 后再取同源 .sha256.sig，用嵌入的 ECDSA
+//! P-256 公钥（[`SIGNING_PUBKEY_HEX`]）验签——防 sha 清单与二进制同源被替换。
+//! 签名缺失（存量 release）跳过并告警；签名不符硬失败中止升级；签名时代
+//! （公钥已配置）连 .sha256 资产本身都缺失也硬失败——防删资产绕过信任链。
+//! 签发流程见 docs/RELEASE.md。
+//!
 //! 为什么由"新版 exe 自己"执行替换：正在运行的映像文件不可覆盖，但改名可以——
 //! 所以替换动作交给下载好的新版本（不在运行），旧 GUI 在发起后立即退出让位。
 
@@ -150,8 +156,36 @@ pub fn check_latest() -> Result<Option<Release>> {
     Ok(if new > cur { Some(rel) } else { None })
 }
 
-/// 下载 zip（+sha256 校验）并解出 aisafeguard.exe。progress 收到 0-100 的百分比。
-/// 解压走 PowerShell Expand-Archive（系统自带，不引 zip 依赖）。
+// ---------- 发布签名（P0-3：在 sha256 之上补 ECDSA P-256，防同源替换） ----------
+
+/// 发布签名公钥：ECDSA P-256 非压缩点（04||X||Y，65 字节 = 130 hex 字符），
+/// 由 `aisafeguard gen-signing-key` 生成。正式 keypair 由维护者生成：私钥只存
+/// GitHub Secret AISAFEGUARD_SIGNING_KEY（CI 用它签 .sha256.sig），公钥填到这里
+/// 随二进制分发（流程见 docs/RELEASE.md）。当前是占位（64 个 '0'，不是合法
+/// P-256 点）：占位时自更新跳过验签并告警，CI/本地测试不受影响；
+/// 正式发布前必须替换为真实公钥。
+const SIGNING_PUBKEY_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// 公钥是否可用（合法非压缩点）。占位/损坏 = false → 验签流程跳过并告警。
+fn pubkey_configured(pub_point_hex: &str) -> bool {
+    crate::signing::parse_pub_point(pub_point_hex).is_ok()
+}
+
+fn signing_configured() -> bool {
+    pubkey_configured(SIGNING_PUBKEY_HEX)
+}
+
+/// 用指定公钥验签发布物字节（.sha256 文件的原始字节 vs .sha256.sig 的 hex 签名）。
+/// Err = 硬失败（下载流程据此 bail）；"公钥未配置则跳过"的逻辑在调用方
+/// （signing_configured），测试用测试 keypair 的公钥走本函数、不依赖占位常量。
+fn verify_release_sig(pub_point_hex: &str, data: &[u8], sig_hex: &str) -> Result<(), String> {
+    crate::signing::verify_signature(pub_point_hex, data, sig_hex)
+}
+
+/// 下载 zip → sha256 校验 → 发布签名验签 → 解出 aisafeguard.exe。
+/// progress 收到 0-100 的百分比。解压走 PowerShell Expand-Archive（系统自带，
+/// 不引 zip 依赖）。签名时代（嵌入公钥已配置）缺 .sha256 资产也硬失败——
+/// 防删资产绕过信任链；占位公钥时代维持存量行为。
 /// 目前仅 Windows 有"应用内升级"语义：其他平台直接报错，不做无谓下载。
 pub fn download_and_prepare(
     rel: &Release,
@@ -167,29 +201,68 @@ pub fn download_and_prepare(
     download_to(&cli, &rel.zip_url, &zip_path, progress)?;
 
     // sha256 校验（.sha256 内容形如 "<hex>  <文件名>"，与 GitHub/Gitee 发布物一致）
-    if let Some(sha_url) = &rel.sha_url {
-        let sha_text = cli
-            .get(sha_url)
-            .send()
-            .and_then(|r| r.error_for_status())
-            .and_then(|r| r.text())
-            .context("下载校验文件失败")?;
-        let want = sha_text
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_lowercase();
-        let got = sha256_hex(&zip_path)?;
-        if want.len() == 64 && want != got {
-            bail!("SHA-256 校验失败：期望 {want}，实际 {got}");
+    let Some(sha_url) = &rel.sha_url else {
+        // P0-3 加固：嵌入公钥已配置（签名时代客户端）却拿不到 .sha256 资产 =
+        // 资产被删/同源被改——硬失败，防"删掉校验资产绕过整条信任链"。
+        // 占位公钥时代（存量 release 的客户端）维持原行为：跳过校验继续升级。
+        if signing_configured() {
+            bail!("release 缺少 .sha256 资产：签名已启用但无完整性校验凭据，已中止升级");
+        }
+        tracing::warn!("release 未提供 .sha256，跳过完整性校验（存量 release 兼容）");
+        return extract_downloaded_zip(&zip_path, workdir);
+    };
+    let sha_path = workdir.join(format!("{ZIP_NAME}.sha256"));
+    download_to(&cli, sha_url, &sha_path, &|_| {}).context("下载校验文件失败")?;
+    let sha_bytes = std::fs::read(&sha_path)?;
+    let want = String::from_utf8_lossy(&sha_bytes)
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    let got = sha256_hex(&zip_path)?;
+    if want.len() == 64 && want != got {
+        bail!("SHA-256 校验失败：期望 {want}，实际 {got}");
+    }
+
+    // P0-3 发布签名验签：.sha256.sig = CI 对 .sha256 文件字节的 ECDSA P-256 签名。
+    // 三态：404/不存在 = 存量 release 无签名 → 跳过并告警（兼容）；
+    //       存在但嵌入公钥仍是占位 → 跳过并告警（正式公钥未发布）；
+    //       存在且验签失败 = 硬退——sha 与签名同源被替换也伪造不出有效签名。
+    let sig_path = workdir.join(format!("{ZIP_NAME}.sha256.sig"));
+    match try_download(&cli, &format!("{sha_url}.sig"), &sig_path)? {
+        None => {
+            tracing::warn!("release 未提供 .sha256.sig，跳过发布签名验证（存量 release）");
+            println!("⚠ 此 release 未提供发布签名（.sha256.sig），跳过签名验证");
+        }
+        Some(()) => {
+            let sig_hex = String::from_utf8_lossy(&std::fs::read(&sig_path)?)
+                .trim()
+                .to_string();
+            if !signing_configured() {
+                tracing::warn!("SIGNING_PUBKEY_HEX 仍为占位值，跳过发布签名验证");
+                println!("⚠ 嵌入公钥未配置（占位），跳过发布签名验证");
+            } else if let Err(e) = verify_release_sig(SIGNING_PUBKEY_HEX, &sha_bytes, &sig_hex) {
+                bail!("发布签名验证失败（{e}）：.sha256 可能被同源替换，已中止升级");
+            } else {
+                println!("✓ 发布签名验证通过（ECDSA P-256）");
+            }
         }
     }
 
+    extract_downloaded_zip(&zip_path, workdir)
+}
+
+/// 解压 zip 并解出 aisafeguard.exe（校验全部通过后调用；无 .sha256 的存量
+/// release 兼容分支也直接走到这里）。
+fn extract_downloaded_zip(
+    zip_path: &std::path::Path,
+    workdir: &std::path::Path,
+) -> Result<std::path::PathBuf> {
     let dest = workdir.join("extracted");
     // ps_quote 自带单引号（并做 ' → '' 转义），这里不要再包一层
     let script = format!(
         "Expand-Archive -LiteralPath {} -DestinationPath {} -Force",
-        ps_quote(&zip_path),
+        ps_quote(zip_path),
         ps_quote(&dest)
     );
     let out = std::process::Command::new("powershell")
@@ -259,6 +332,23 @@ fn download_to(
     }
     file.flush()?;
     Ok(())
+}
+
+/// 下载可选文件（发布签名 .sig 在存量 release 上不存在）：404 → Ok(None)，
+/// 其余错误照常报——只有"明确没有"才允许跳过验签。
+fn try_download(
+    cli: &reqwest::blocking::Client,
+    url: &str,
+    dest: &std::path::Path,
+) -> Result<Option<()>> {
+    let resp = cli.get(url).send().context("下载失败")?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let mut resp = resp.error_for_status().context("下载失败")?;
+    let mut file = std::fs::File::create(dest).with_context(|| format!("创建 {dest:?} 失败"))?;
+    std::io::copy(&mut resp, &mut file).context("下载中断")?;
+    Ok(Some(()))
 }
 
 fn sha256_hex(path: &std::path::Path) -> Result<String> {
@@ -473,6 +563,40 @@ mod tests {
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------- P0-3 发布签名 ----------
+
+    /// 用测试 keypair 走"签名→验签通过"与"篡改→硬失败"两条路
+    /// （gen/sign 原语在 crate::signing；update.rs 这层的验签入口收口行为）。
+    #[test]
+    fn release_sig_valid_and_tampered() {
+        let (priv_hex, pub_hex) = crate::signing::generate_keypair().unwrap();
+        let kp = crate::signing::load_keypair(&priv_hex).unwrap();
+        let sha_file = b"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824  aisafeguard-windows-x64.zip\n";
+        let sig = crate::signing::sign_bytes(&kp, sha_file).unwrap();
+
+        // 合法签名通过
+        verify_release_sig(&pub_hex, sha_file, &sig).expect("合法签名必须通过");
+
+        // 同源替换攻击：.sha256 内容被改、签名原样 → 硬失败（下载流程据此 bail）
+        assert!(verify_release_sig(&pub_hex, b"deadbeef  evil.zip\n", &sig).is_err());
+
+        // 签名被改 → 硬失败
+        let flip = |c: char| if c == '0' { '1' } else { '0' };
+        let bad_sig = format!("{}{}", flip(sig.chars().next().unwrap()), &sig[1..]);
+        assert!(verify_release_sig(&pub_hex, sha_file, &bad_sig).is_err());
+    }
+
+    /// 占位公钥（64 个 '0'，32 字节）按"未配置"处理 → 流程跳过验签并告警。
+    /// 刻意断言 pubkey_configured 而非 signing_configured：维护者把真实公钥填进
+    /// SIGNING_PUBKEY_HEX 后后者会变 true，前者与常量值无关、测试不会翻车。
+    #[test]
+    fn placeholder_pubkey_is_not_configured() {
+        assert!(!pubkey_configured(&"0".repeat(64)));
+        assert!(pubkey_configured(
+            &crate::signing::generate_keypair().unwrap().1
+        ));
     }
 
     /// 下载 → sha256 校验 → 解压 → 解出的 exe 能跑 --version 的全链路。

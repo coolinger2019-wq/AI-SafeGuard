@@ -108,14 +108,42 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # P0-3 发布签名：用 build-linux 产物里的 aisafeguard 对每个 .sha256 逐文件
+      # 签出 .sha256.sig（ECDSA P-256，ring fixed-width R||S——用自家二进制自签，
+      # 不引 openssl、无 DER 转换歧义）。私钥在 GitHub Secret
+      # AISAFEGUARD_SIGNING_KEY（aisafeguard gen-signing-key 生成，见 docs/RELEASE.md）；
+      # secret 未配置（首次发布/轮换期）时告警并跳过签名——客户端对缺 .sig 的
+      # release 也跳过验签，Release 照常发布（上传列表按实际产物拼装，
+      # 缺 .sig 不会触发 fail_on_unmatched_files）。
+      - name: 签名发布校验和（ECDSA P-256）
+        env:
+          SIGNING_KEY: ${{ secrets.AISAFEGUARD_SIGNING_KEY }}
+        run: |
+          chmod +x dist/aisafeguard
+          KEY="$(printf '%s' "$SIGNING_KEY" | tr -d '[:space:]')"
+          {
+            echo "RELEASE_FILES<<EOF"
+            echo "dist/aisafeguard"
+            echo "dist/aisafeguard.sha256"
+            echo "dist/aisafeguard_xdp.o"
+            echo "dist/aisafeguard_xdp.o.sha256"
+            echo "dist/aisafeguard-windows-x64.zip"
+            echo "dist/aisafeguard-windows-x64.zip.sha256"
+            if [ -n "$KEY" ]; then
+              for f in dist/aisafeguard.sha256 dist/aisafeguard_xdp.o.sha256 dist/aisafeguard-windows-x64.zip.sha256; do
+                ./dist/aisafeguard sign-manifest "$f" --key "$KEY" > "$f.sig"
+                echo "已签名 $f.sig"
+                echo "$f.sig"
+              done
+            else
+              echo "::warning::AISAFEGUARD_SIGNING_KEY 未配置，跳过发布签名（配置见 docs/RELEASE.md）"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+
       - uses: softprops/action-gh-release@v2
         with:
           # 缺件即失败：宁可 Release 不更新，也不发半套产物
+          # （列表在签名步骤按实际产物拼装：有 secret 时含三个 .sha256.sig）
           fail_on_unmatched_files: true
-          files: |
-            dist/aisafeguard
-            dist/aisafeguard.sha256
-            dist/aisafeguard_xdp.o
-            dist/aisafeguard_xdp.o.sha256
-            dist/aisafeguard-windows-x64.zip
-            dist/aisafeguard-windows-x64.zip.sha256
+          files: ${{ env.RELEASE_FILES }}
