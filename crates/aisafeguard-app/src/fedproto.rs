@@ -169,6 +169,12 @@ fn pem_private_key_der(key_pem: &str) -> Result<Vec<u8>, String> {
 }
 
 fn hex_decode(s: &str) -> Result<Vec<u8>, ()> {
+    // 先做 ASCII-hex 白名单校验：&s[i..i+2] 按字节切片，多字节 UTF-8 字符
+    // （如被替换 sig 里的 U+FFFD）会让切片落在字符边界内直接 panic——
+    // 该函数处理已认证联邦节点的请求体，输入不可信（与 main.rs signing 同款防线）
+    if !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(());
+    }
     if !s.len().is_multiple_of(2) {
         return Err(());
     }

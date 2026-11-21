@@ -3,7 +3,8 @@
 #
 # 背景：Gitee 与 GitHub 的 Release 完全独立，tag 推送只同步 git 对象，
 # 不会带附件；Gitee 也不支持 /releases/latest/download/ 别名。
-# 本脚本按 tag 下载 GitHub 产物 → 校验和 → 创建/复用 Gitee Release → 上传附件。
+# 本脚本按 tag 下载 GitHub 产物（含 .sha256 与其 ECDSA 签名 .sig）→ 校验和 →
+# 创建/复用 Gitee Release → 上传附件（客户端在 Gitee 源同样走发布验签）。
 #
 # 前提：export GITEE_TOKEN=<Gitee 私人令牌，需 projects 权限>
 # 用法：bash scripts/gitee-release.sh v0.8.0
@@ -18,11 +19,20 @@ GH="https://github.com/coolinger2019-wq/AI-SafeGuard/releases/download/$TAG"
 FILES=(
     aisafeguard
     aisafeguard.sha256
+    aisafeguard.sha256.sig
     aisafeguard_xdp.o
     aisafeguard_xdp.o.sha256
+    aisafeguard_xdp.o.sha256.sig
     aisafeguard-windows-x64.zip
     aisafeguard-windows-x64.zip.sha256
+    aisafeguard-windows-x64.zip.sha256.sig
 )
+# .sha256.sig = CI（build.yml release job）对 .sha256 的 ECDSA P-256 签名。
+# 必须镜像：Gitee 是 self-update 的首选源，缺 .sig 客户端会走"存量 release"
+# 分支永远跳过验签，签名功能在国内主路径失效。镜像顺序：先等 GitHub CI
+# 签名完成，再跑本脚本（.sig 直接从 GitHub Release 拿到）。
+# 完整性：.sig 无伴随 .sha256（.sha256 不给签名再签名），走 fetch_cached 的
+# 大小校验分支（HEAD content-length 对比）。
 
 : "${GITEE_TOKEN:?请先 export GITEE_TOKEN=<Gitee 私人令牌（projects 权限）>}"
 TOKEN_Q="access_token=$GITEE_TOKEN"
@@ -65,8 +75,9 @@ fetch_cached() { # 本地校验通过则复用；否则续传到 .part，校验�
         return 0
     fi
     # 远端大小：代理 TLS 抖动时不能中断脚本（set -e + pipefail），失败置空继续
+    # HEAD 多跳重定向会有多个 content-length（302 跳的 0 + 末跳真值）——只取最后一跳
     want=$(curl -fsSIL --max-time 30 "$url" 2>/dev/null \
-        | awk 'tolower($1)=="content-length:"{print $2}' | tr -d '\r' || true)
+        | awk 'tolower($1)=="content-length:"{v=$2} END{print v}' | tr -d '\r' || true)
     # 无 sha 伴随的文件（sha 文件自身）只能按大小判断完整性
     if [ -s "$dst" ] && [ ! -e "$CACHE/$1.sha256" ] && [ -n "$want" ] \
         && [ "$want" = "$(wc -c < "$dst")" ]; then
