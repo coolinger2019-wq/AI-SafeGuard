@@ -68,3 +68,61 @@ aisafeguard verify-manifest aisafeguard-windows-x64.zip.sha256 \
 ```
 
 `verify-manifest` 退出码 0 = 通过；非 0 = 清单或签名被替换，请勿使用该发布物。
+
+## musl 静态链接 spike（2026-11-21，只出数据不实施）
+
+plan 0.9-B 项。v0.8.3 glibc 前向不兼容事故（LESSONS 2026-11-15：runner 漂到
+glibc 2.43、24.04 部署机 2.39，二进制启动即崩防护下线）的终极解验证——
+当前解法是钉 `runs-on: ubuntu-24.04`，musl 若可行则连这个对 runner 漂移的
+信任都可以去掉。spike 在生产 VPS（Ubuntu 24.04.5，1 核）/tmp 内完成，
+未触碰生产服务与二进制；musl-tools 与 rustup target 留存无害。
+
+### 构建结果：一次通过，零代码改动，零 CC 配置
+
+环境：rustc 1.99.0 / musl-gcc（gcc 13.3.0 wrapper）。仓库原样浅克隆，
+`cargo build --release --target x86_64-unknown-linux-musl --bin aisafeguard`
+直接成功（23m08s，1 核 VPS；CI runner 会显著更快），未设任何 `CC*` 环境变量，
+cc crate 自动找到 musl 工具链。预判的坑点全部没踩：
+
+| 风险点 | 结果 |
+|---|---|
+| ring 0.17（rustls/rcgen/签名同栈） | musl 编译通过 |
+| aya 0.13（XDP/eBPF，Linux 目标必编） | 编译通过 |
+| rusqlite bundled（libsqlite3-sys C 编译） | 编译通过，运行正常 |
+| eframe/egui/winit/accesskit（无 gui gate，无条件编入） | 全栈编译通过 |
+| rfd / russh(ring) / rustls / reqwest(rustls) / notify / sysinfo | 编译通过 |
+
+### 体积与静态性
+
+- musl 产物 40,484,512 字节（40.48 MB）vs 生产 gnu 0.8.3 二进制 40,500,880
+  字节（40.5 MB）——几乎持平（strip + thin LTO 两者同开）。
+- `file`：static-pie linked；`ldd`：statically linked；`readelf -d`：
+  无任何 NEEDED 条目。全静态 + PIE，ASLR 保留。
+- 构建中间产物 target/ 约 1.6G（CI 缓存口径参考）。
+
+### 运行验证（VPS 实测）
+
+- `aisafeguard --version`：正常输出 0.8.3，exit 0。
+- `aisafeguard verify-log --data-dir <空目录>`：exit 0，「哈希链完整：
+  0/0 条事件校验通过」，并自动建库——bundled SQLite 链接与运行时行为正常。
+
+### 注意点
+
+- **DNS 解析**：musl 用内置 resolver，直读 `/etc/resolv.conf` 与 `/etc/hosts`，
+  不走 nsswitch——静态链接二进制本来也不能 dlopen glibc NSS 模块，所以这不是
+  musl 新增的限制。本项目只做普通 A/AAAA 查询（AI 端点、GitHub/Gitee、fed 节点
+  域名），行为无差异；若未来遇到 systemd-resolved 通配域、LDAP/mDNS 类企业
+  解析需求才需要重新评估。
+- **与 gui gate（P2-10）的关系**：本 spike 未依赖 gui gate，egui 树在 musl 下
+  完整编译通过——两件事正交。若日后实施 gui gate（headless 314 包 vs 全量
+  417 包），musl 产物还能再瘦一圈。
+- 静态二进制对 systemd 部署、deploy.sh 回滚逻辑、CI 签名流程均无影响。
+
+### 结论：建议正式 Release 构建切 musl
+
+零代码改动、体积持平、全静态彻底消除「构建机 glibc ≥ 部署机」这一整类供应链
+漂移事故，运行验证通过。CI 落地步骤（不是零配置）：build.yml Linux job 需加
+`apt install musl-tools` + `rustup target add x86_64-unknown-linux-musl` +
+`--target` 参数（runner 镜像默认没有 musl-tools——spike 第一步就是装它）。
+切换后 ubuntu-24.04 的 runs-on 钉版从"必要守门"降级为"可松绑的偏好"。
+落地属于 0.9-B 实施（build.yml 双平台矩阵 + 验证一轮发布产物），本 spike 不实施。

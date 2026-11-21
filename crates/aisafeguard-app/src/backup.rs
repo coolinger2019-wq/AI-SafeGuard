@@ -631,6 +631,39 @@ mod tests {
                 "{evil} 有文件落盘"
             );
         }
+
+        // 反斜杠与混合分隔符变体：Windows 的 components() 把 \ 也当分隔符，
+        // 两条路径都含父级分量必须拒；Linux 上 \ 是合法文件名字符，路径 join
+        // 后只是 data_dir 内的普通名字（不逃逸）——校验放行，restore 推进到
+        // 完整性校验、因备份里没有该字面文件名而报「备份文件缺失」。按平台
+        // 分别断言（两条变体在任一平台都不落盘、不逃出目标目录）。
+        for (i, evil) in ["fed\\..\\..\\outside.db", "fed/..\\..\\outside.db"]
+            .into_iter()
+            .enumerate()
+        {
+            let mut v: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+            v["files"][0]["path"] = evil.into();
+            std::fs::write(&manifest_path, serde_json::to_string(&v).unwrap()).unwrap();
+            let rdata = dir.join(format!("restored-bs-{i}"));
+            std::fs::create_dir_all(&rdata).unwrap();
+            let err = cmd_restore(&out, &rdata, &dir.join("evil-cfg.toml")).unwrap_err();
+            if cfg!(windows) {
+                // \ 视为分隔符：父级分量被校验拒绝
+                assert!(
+                    err.to_string().contains("manifest 路径非法"),
+                    "{evil}: {err}"
+                );
+            } else {
+                // \ 是合法文件名：校验放行，完整性校验因缺文件中止（非路径拒绝）
+                assert!(err.to_string().contains("备份文件缺失"), "{evil}: {err}");
+            }
+            assert!(
+                std::fs::read_dir(&rdata).unwrap().next().is_none(),
+                "{evil} 有文件落盘"
+            );
+            assert!(!dir.join("outside.db").exists(), "{evil} 逃逸出目标目录");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

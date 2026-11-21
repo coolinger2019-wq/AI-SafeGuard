@@ -346,3 +346,24 @@ cargo tree 把两边量化清楚，结论是**现在不做**，数据存档待�
 4. 触发条件（满足其一再动手，半天落地）：① musl 静态链接落地；② 出现合规/
    体积硬需求（服务器版必须零 GUI 代码）；③ egui 大版本升级导致 Windows 构建
    面出问题时，headless 变体可作降级构建面。
+
+## ring -Brepro 本机构建失败（2026-11-21 实测）
+
+- **现象**：本机（Windows，VS MSVC 14.44.35207）在**全新 CARGO_TARGET_DIR** 下
+  构建 ring 0.17.14 报 `cl : Command line error D8050 : cannot execute c1.dll:
+  failed to get command line into debug records`——ring 给 C 编译传 `-Brepro`，
+  与 `/Z7` 组合把命令行写进调试记录时炸掉。换更短的目标目录名无效、`-j1` 无效；
+  **主 target 目录已有缓存则完全不受影响**（增量验证照常通过）。
+- **排除本机因素**：GitHub ubuntu/windows runner 实测均正常（v0.8.3 及后续多次
+  构建，同一 lockfile）。判定为本机工具链环境问题，不是代码/依赖问题。
+- **应对**：本机增量验证继续用既有 target 目录；需要全新全量构建（clean build、
+  从零可复现验证）一律走 CI，别在本机烧时间。
+- **顺带记录现状（避免误读，2026-11-21 复核实况）**：`C:\code\AI-safe\target\release`
+  里的旧 aisafeguard.exe（0.6.0）**至今仍被注册为 Windows 服务 AISafeGuard 的二进制
+  路径**（服务 Running，`sc qc` BINARY_PATH_NAME = `C:\code\AI-safe\target\release\
+  aisafeguard.exe --service`），该 exe 被运行中服务写锁——`cargo build --release`
+  现在仍会因文件占用失败，迁移到 Program Files 是**待办**（本地升级到 0.8.x 时一并
+  做）。教训与 0.2 服务化批次同款：服务二进制永远别注册到 target 目录里。
+- **归因精确化**：-Brepro 是 cc crate 对 MSVC 无条件传入的（cc-1.5.1:2597），不是
+  ring 自己加的；D8050 在全工作区 fresh 构建下触发，ring 单包定点构建未复现——
+  复现条件以"全新 CARGO_TARGET_DIR + 全工作区 build"为准。

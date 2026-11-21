@@ -543,9 +543,15 @@ async function geoQuery(ip) {
   if (geoPending.has(ip)) return;
   geoPending.add(ip);
   paintGeo(ip);
-  await geoLookup(ip); // 内部已捕获全部错误并缓存，不会 reject
-  geoPending.delete(ip);
-  paintGeo(ip);
+  try {
+    // 网络错误已被 geoLookup 内部消化；但极端场景仍可能 reject
+    // （asg_geo 被篡成非对象时 geoCache 成为基元，赋值抛 TypeError）——
+    // finally 保证占位必清，绝不永久卡「查询中…」
+    await geoLookup(ip);
+  } finally {
+    geoPending.delete(ip);
+    paintGeo(ip);
+  }
 }
 
 /* ---------- 登录 ---------- */
