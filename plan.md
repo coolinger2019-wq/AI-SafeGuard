@@ -40,7 +40,7 @@ v0.8.3 发布事故（runner glibc 前向不兼容 → 防护静默下线）实�
     GUI/API 这类可容忍丢失的消费者）
   - 工作量 1-2 天（专用队列含回归 2-3 天），风险中
 
-- [ ] **P0-3 发布物与自更新签名**
+- [x] **P0-3 发布物与自更新签名** ✅ 2026-11-21（ECDSA P-256 ring：gen-signing-key/sign-manifest/verify-manifest 三子命令 + update.rs 三态验签 + build.yml release 签名 + Gitee 镜像 .sig 同路径；审查两轮，修复 hex_decode 多字节 panic 与 Gitee .sig 镜像缺失。**用户一步**：gen-signing-key → 私钥配 GitHub Secret `AISAFEGUARD_SIGNING_KEY` → 公钥填 update.rs `SIGNING_PUBKEY_HEX`，之后 tag 即自动签名）
   - 现状：update.rs 双源下载 + 同源 sha256，sha 可被同源替换；
     ROADMAP.md:52 的签名条目悬置 4 个月
   - 方案：ECDSA P-256 签名发布 manifest（ring 已在依赖树，复用 F100 fed
@@ -49,7 +49,7 @@ v0.8.3 发布事故（runner glibc 前向不兼容 → 防护静默下线）实�
 
 ### P1（架构健康）
 
-- [ ] **P1-4 store/lib.rs 按表域拆分 + 迁移容错收窄**
+- [x] **P1-4 store/lib.rs 按表域拆分** ✅ 2026-11-21（3,377→lib.rs 1,742+11 模块，pub 签名 100 条拆前后 diff 空、104 函数守恒、迁移一行未改、渐进式每域即测，workspace 336 测试全绿；审查 PASS 独立复验签名守恒。容错收窄=后续独立任务未动）
   - 现状：单文件 3,377 行；lib.rs:538 对迁移错误**无差别忽略**——磁盘满/
     锁死/损坏同样被吞，只留半迁移状态
   - 方案：按表域拆五模块（events含链/rules/proposals/fed_members+org/intel）；
@@ -57,26 +57,26 @@ v0.8.3 发布事故（runner glibc 前向不兼容 → 防护静默下线）实�
     **不引入迁移框架**（AGENTS 第 2 条，枚举式幂等迁移是当前正确选择）
   - 工作量 2-3 天，风险低
 
-- [ ] **P1-5 fed 域抽 aisafeguard-fed crate**
+- [ ] **P1-5 fed 域抽 aisafeguard-fed crate（按 plan 时机暂缓：下次动 fed 协议时顺手做，Rule of Three 已满足）**
   - 现状：app/src/fed.rs 2,941 行 = 协议 + mTLS 服务端 + agent 客户端 + PKI CLI
   - 方案：收编 fed.rs + fedproto.rs + corroboration.rs + stix.rs；app 只留装配。
     时机：**下次动 fed 协议时顺手做**（Rule of Three 已满足）
   - 工作量 3-5 天，风险中（Console trait 与 FedPanel 类型归属需重新切线）
 
-- [ ] **P1-6 /api/metrics + 防护存活外显**
+- [x] **P1-6 /api/metrics + 防护存活外显** ✅ 2026-11-21（text/plain 零依赖 Prometheus 风格、Bearer 同口径受保护、14 指标含 bus_lag/listener_up 逐项/db_size/xdp_attached；deploy.sh 健康检查消费留待下次部署时切换；cron+curl 心跳配方待补进文档）
   - 现状：无 metrics；v0.8.3 事故形态正是"防护下线无人知"
   - 方案：text/plain 输出 events_total/detections_total/auto_block_total/
     bus_lag/listener_up(11)/db_size/xdp_attached；deploy.sh 健康检查改消费它；
     文档给 cron+curl 心跳外发配方（配合既有 webhook）
   - 工作量 2-3 天，风险低
 
-- [ ] **P1-7 `aisafeguard backup` / `restore` 子命令（A.8.13 收口）**
+- [x] **P1-7 `aisafeguard backup` / `restore` 子命令（A.8.13 收口）** ✅ 2026-11-21（VACUUM INTO 在线快照含 WAL、restore 整体 sha256 校验不做半恢复 + zip-slip 全形态拒绝（Windows 实测）+ .restore-bak 留痕 + 恢复后自动 verify-log + 跨机 data_dir 告警 + canary.key 收录；6 单测）
   - 现状：COMPLIANCE.md:36 唯一从 0.2 拖到现在的 P0 合规项
   - 方案：一条命令打包 config.toml + DB 快照 + credentials.db + fed 证书目录；
     restore 反向；不做加密不做云上传（输出 manifest + sha256，保管是运营者的事）
   - 工作量 2-3 天，风险低
 
-- [ ] **P1-8 快路径容量预留（只记录，不动手）**
+- [x] **P1-8 快路径容量预留（只记录，不动手）** ✅ 2026-11-21（NGFW_EVOLUTION.md 容量适应度函数小节：两条触发线 20 万次/日 与 p99>100ms、既定方案、观测走 /api/metrics；审查核实行号属实）
   - 现状：handle_detection 热路径同步 3 次 SQLite 查询（engine.rs:1415-1443）；
     FreqEngine 全局单锁（detect/lib.rs:63）
   - 方案：写两条适应度函数进 NGFW_EVOLUTION.md §2.4 附注——蜜罐命中 > 20 万/日
@@ -86,13 +86,13 @@ v0.8.3 发布事故（runner glibc 前向不兼容 → 防护静默下线）实�
 
 ### P2（体验与效率）
 
-- [ ] **P2-9 Web 控制台加固收尾**
+- [x] **P2-9 Web 控制台加固收尾** ✅ 2026-11-21（esc 34→52 处 + 全文件核查；geo 查询默认不查、ipwho.is https 显式按钮、第三方响应仅 textContent；**顺带修复 F802 引入的 refreshDash 双 const top 白屏致命 bug**（node --check 复现）；geoQuery try/finally 已补）
   - index.html:1011 三处字段未 esc()；index.html:492-510 默认向第三方
     `http://ip-api.com` 明文查询攻击者 IP（顺带外泄运营者查询行为）
   - 方案：补 esc；geo 查询加显式开关（默认关或走 https）；esc 强制约定写进 LESSONS
   - 工作量 0.5-1 天，风险低
 
-- [ ] **P2-10 构建面钉版本与 GUI 隔离评估**
+- [x] **P2-10 构建面钉版本与 GUI 隔离评估** ✅ 2026-11-21（build-windows 钉 windows-2022；gui gate 评估入 LESSONS：cargo tree 量化 gui-only 103 包/24.7% 包数、wgpu-glow 链拆不掉、CI 分钟近翻倍——结论暂缓到 musl 落地一并重评估）
   - build.yml:68 Windows 产物仍在 `windows-latest`（漂移 runner）——
     LESSONS 的教训只钉了 Linux 侧
   - 方案：Windows 钉 `windows-2022`；feature gate `gui` 做评估 spike
@@ -116,10 +116,10 @@ v0.8.3 发布事故（runner glibc 前向不兼容 → 防护静默下线）实�
       验证 sockopt 行为后合并（已留言暂缓）
 - [ ] **PR #6 softprops v3**：release job 只在 tag 时跑——下次发版前验证 v3 兼容
       （已留言暂缓）
-- [ ] **musl 静态链接 spike**：v0.8.3 glibc 前向不兼容事故的终极解（已进 0.9-B）
+- [x] **musl 静态链接 spike** ✅ 2026-11-21（VPS 实测：一次通过零代码改动、static-pie 40.48MB 体积持平、运行验证 OK；结论：正式 Release 切 musl（CI 需装 musl-tools + target + --target，RELEASE.md 有全量数据与落地步骤）；与 gui gate 正交。**0.9-B 实施待做**
 - [ ] **IP 决策**：观察期已过（11-20），IPv4 渐解封 + 工单已暂缓——是否行使 $3
       换 IP 由用户决定；决定后更新本条
-- [ ] **#42 后观察**：slow_scan 上线后 RDP 面转化率变化（下轮桥报看数据）
+- [ ] **#42 后观察**：slow_scan 上线后 RDP 面转化率变化（下轮桥报看数据——F809 上线 4 天已 7 判定/4 源）
 
 ## 验收口径
 
