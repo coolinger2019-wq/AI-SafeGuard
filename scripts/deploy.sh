@@ -21,7 +21,7 @@ echo "[2/8] sha256 校验..."
 "${SSH[@]}" "$VPS" "cd /tmp && printf '%s  %s\n' \"\$(cut -d' ' -f1 aisafeguard.sha256)\" aisafeguard.new | sha256sum -c -"
 
 echo "[3/8] 新二进制预检（目标机冷启动 --version；glibc 不兼容在此拦截，未动服务无需回滚）..."
-"${SSH[@]}" "$VPS" '/tmp/aisafeguard.new --version || { echo "✗ 新二进制在目标机 --version 失败（典型: 构建机 glibc 比目标机新）。服务未动，无需回滚。" >&2; exit 1; }'
+"${SSH[@]}" "$VPS" 'chmod +x /tmp/aisafeguard.new && /tmp/aisafeguard.new --version || { echo "✗ 新二进制在目标机 --version 失败（典型: 构建机 glibc 比目标机新）。服务未动，无需回滚。" >&2; exit 1; }'
 
 echo "[4/8] 备份当前二进制..."
 "${SSH[@]}" "$VPS" "cp -f /usr/local/bin/aisafeguard /tmp/aisafeguard.prev && echo 备份: /tmp/aisafeguard.prev"
