@@ -76,7 +76,7 @@ anyhow = "1"
 # H101：russh SSH 服务端（蜜罐中交互）。默认特性是 aws-lc-rs——Windows 构建要
 # CMake/NASM，feature 合并会悄悄引入（0.3.6 rustls 同款坑），必须关默认特性显式选
 # ring（与 rustls/rcgen 同一加密栈）。rsa/flate2 等可选特性按需再加。
-russh = { version = "0.63", default-features = false, features = ["ring"] }
+russh = { version = "0.65", default-features = false, features = ["ring"] }
 # 版本必须与 russh 内部一致（其依赖树是 rand 0.10 / rand_core 0.10），否则
 # PrivateKey::random 的 Rng 泛型不匹配。
 rand = "0.10"
