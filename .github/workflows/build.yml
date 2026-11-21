@@ -65,7 +65,12 @@ jobs:
           path: dist/
 
   build-windows:
-    runs-on: windows-latest
+    # 固定 2022：Windows 产物无 glibc 前向兼容问题，但 windows-latest 迁镜像大
+    # 版本（2025→2027）时 MSVC/Windows SDK 随之升级——工具链静默变化对发版
+    # 构建是供应链漂移（与 LESSONS v0.8.3 Linux 侧 runner 漂移同根因，那次砸的
+    # 是 glibc，这里砸的是编译器行为/依赖构建假设）。发版构建钉死 runner，
+    # 工具链升级 = 手动换钉 + 发版全量验证，不做自动漂移升级。
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v7
 

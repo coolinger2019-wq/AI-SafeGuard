@@ -285,3 +285,64 @@
   ②runner 漂移是供应链，构建环境要么钉版本要么静态链接（musl 目标是终极解，
   需要时再做）；③deploy 脚本在 systemctl restart 后必须轮询等待而不是 sleep 5
   ——"activating"阶段的 is-active 是非零退出，set -e 会静默中断脚本
+
+## P2-10 spike：gui feature gate 评估（2026-11-21，只出数据不实施）
+
+**背景**：plan 0.9 立项讨论"给 aisafeguard-app 加 `[features] gui` 把 egui 树从
+headless 构建里拆出去"——headless 瘦身 + 审计面收窄 vs CI 矩阵翻倍。本节用
+cargo tree 把两边量化清楚，结论是**现在不做**，数据存档待触发条件出现。
+
+**(a) headless 能省哪些分支（cargo tree 实测，Windows host normal-dep 图）**
+
+- app 全量 417 包；把 eframe/egui/egui_extras/rfd 四个根的边删掉后 headless
+  只剩 314 包；gui 子树并集 177 包，其中 **103 包 gui-only（24.7%）**，74 包
+  是重叠（headless 仍要编）。重叠包 = proc-macro 基建（syn/quote）、thiserror、
+  tracing、url/icu（reqwest 同需）、windows 系（firewall/windows-service 同需）
+  ——feature gate 只能省掉真正的 gui-only 那一层。
+- gui-only 大件（Windows host）：wgpu 家族 6 包（wgpu/wgpu-core/
+  wgpu-core-deps-windows-linux-android/wgpu-hal/wgpu-naga-bridge/wgpu-types，
+  v30）+ naga/naga-types + egui-wgpu + egui-winit + glow + winit 0.30 +
+  accesskit 4 包 + arboard（连带 image 0.25，剪贴板图片支持）+ rfd +
+  windows-sys v0.52（rfd 专用旧版）+ ahash。**wgpu/naga 是编译时间大头**。
+- 无"关 wgpu 留 glow"的捷径：wgpu 30 时代 glow 后端本身压在 wgpu-hal 上
+  （glow ← wgpu-hal ← wgpu ← egui-wgpu ← eframe），eframe 0.36 拆不掉。
+- Linux host 的 gui-only 集合只会更多（x11/wayland/accesskit_unix 等）。
+- 体积参照：现 release 产物（含 GUI，strip+thin LTO）33.0 MB。24.7% 是**包数**
+  占比不是体积占比，headless 二进制的实际缩小量需 feature 落地后实测。
+
+**(b) 改造成本（低，半天级）**
+
+- **Console trait 已经隔离好了**：gui/mod.rs 只吃 `crate::console::{Console,
+  LiveEvent}` + 纯数据类型（engine::StatusReport、explain::RuleExplain、store
+  行、core config），依赖方向 gui→engine 单向；非 gui 代码引用 gui 的只有
+  main.rs 末尾一处 `gui::run(console)`；rfd 全仓只有 gui/org_tab.rs 4 处调用；
+  egui/eframe/egui_extras 出现在 gui/ 之外的非注释代码为零。
+- 落点：4 个依赖 `optional = true` + `[features] gui = ["dep:eframe", …]`（gui
+  设为 default 保持现状）；main.rs `#[cfg(feature = "gui")] mod gui;` + 末尾
+  else 分支整体 cfg 化（remote/UAC/内嵌 console 逻辑都在该分支内，一起门控；
+  remote.rs 本体保留——service.rs 用 service_data_dir）。gui/ 共 5,867 行只动
+  门不动内容。
+- 注意测试面：gui 内部 #[cfg(test)]（theme/help_tab 等）随 feature 消失，
+  headless 变体跑不到 GUI 测试——CI 必须双变体各跑一遍才算覆盖。
+
+**(c) CI 矩阵翻倍的代价（持续性成本）**
+
+- 现状：ci test 2 OS + build.yml 2 OS + sbom 1 windows。双变体后：test 4 job、
+  build 4 job（若桌面/服务器两版都发产物，release 产物与签名件也 ×2）、
+  sbom 2 job。
+- Swatinem/rust-cache 按 job 名键控、跨 job 不共享：314 个公共包每平台每 job
+  各编一遍；headless job 单次省 103 包（含 wgpu/naga 大件），但 gui job 全款
+  照付——总 CI 分钟数接近翻倍（本 spike 未实测计时，落地前先跑一次双变体
+  构建计时再定）。
+
+**(d) 结论：现在不做，挂到 0.9-B musl spike 之后**
+
+1. GUI 是主要交付形态：桌面用户下载的就是含 GUI 的二进制，headless 省的是
+   服务器部署场景的体积/攻击面，收益对象是少数部署。
+2. Linux 服务端的产物形态问题已有 musl 静态链接 spike 在排队（0.9-B，v0.8.3
+   事故后"需要时再做"已到"需要时"）——musl 落地时产物天然分叉，届时 GUI
+   分支的存在意义与发版矩阵一起重新评估，避免两次动 CI。
+3. CI 分钟翻倍是每次 push 的持续成本，换一次性省 103 包编译，不划算。
+4. 触发条件（满足其一再动手，半天落地）：① musl 静态链接落地；② 出现合规/
+   体积硬需求（服务器版必须零 GUI 代码）；③ egui 大版本升级导致 Windows 构建
+   面出问题时，headless 变体可作降级构建面。
