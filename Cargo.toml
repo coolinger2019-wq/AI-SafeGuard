@@ -49,7 +49,7 @@ tracing-appender = "0.2"
 rusqlite = { version = "0.37", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 keyring = { version = "3", default-features = false, features = ["windows-native"] }
-sha2 = "0.10"
+sha2 = "0.11"
 # 组织协同 mTLS（0.3.6）：rcgen 签发组织 CA 与节点证书（ring 后端与 reqwest 的
 # rustls-tls 同一加密栈）；tokio-rustls 手写 accept 循环做 /fed 独立 mTLS 面。
 # 注意：不走 axum-server 的 tls-rustls 特性——rustls 默认 provider 是 aws-lc-rs
