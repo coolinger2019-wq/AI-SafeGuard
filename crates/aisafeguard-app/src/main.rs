@@ -87,7 +87,7 @@ WantedBy=multi-user.target
 mod remote;
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -906,29 +906,10 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
     let token = load_or_create_token(&data_dir)?;
 
     // 事件流水 → SQLite（含哈希链计算，失败只记日志不拖垮总线）。
-    // F310：stix 导入的 IOC 命中本地事件流时打 ioc-hit 标签（只告警不改行为）
-    {
-        let bus = bus.clone();
-        let store = store.clone();
-        rt.spawn(async move {
-            let mut rx = bus.subscribe();
-            let mut ioc_cache: (i64, std::collections::HashSet<String>) = (0, Default::default());
-            loop {
-                match rx.recv().await {
-                    Ok(mut ev) => {
-                        engine::tag_ioc_hit(&store, &mut ioc_cache, &mut ev);
-                        if let Err(e) = store.insert_event(&ev) {
-                            tracing::error!("事件入库失败: {e}");
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("事件入库通道落后 {n} 条");
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-    }
+    // F310：stix 导入的 IOC 命中本地事件流时打 ioc-hit 标签（只告警不改行为）。
+    // P0-2：先在此订阅占住起点（启动期事件不丢），任务在 EngineHandle 建好后
+    // 拉起——lag 要走 engine::handle_bus_lag，需要引用共享计数器
+    let mut persist_rx = bus.subscribe();
 
     let honeypot = rt.block_on(async {
         aisafeguard_honeypot::start(&cfg.honeypot, bus.clone(), &cfg.data_dir())
@@ -955,6 +936,7 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
         rt: rt.handle().clone(),
         started: Instant::now(),
         ai_running: Arc::new(AtomicBool::new(false)),
+        bus_lag_total: AtomicU64::new(0),
         honeypot,
         local_accounts: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
         credentials,
@@ -966,6 +948,29 @@ fn assemble_engine(cfg: AppConfig, cfg_path: PathBuf) -> anyhow::Result<EngineBu
         token,
         version: VERSION,
     });
+
+    // 持久化消费者（订阅点在上面）：事件入库 + IOC 打标；lag 走 handle_bus_lag
+    // （计数 + error 留痕 + 空窗事件回流总线，经本消费者入库 = 哈希链留痕）
+    {
+        let eng = Arc::clone(&engine);
+        rt.spawn(async move {
+            let mut ioc_cache: (i64, std::collections::HashSet<String>) = (0, Default::default());
+            loop {
+                match persist_rx.recv().await {
+                    Ok(mut ev) => {
+                        engine::tag_ioc_hit(&eng.store, &mut ioc_cache, &mut ev);
+                        if let Err(e) = eng.store.insert_event(&ev) {
+                            tracing::error!("事件入库失败: {e}");
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        engine::handle_bus_lag(&eng, "persist", n);
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
 
     // 快路径频次检测 + TTL 自动解封
     engine::spawn_detect_task(&engine);

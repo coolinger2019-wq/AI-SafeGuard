@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -154,6 +154,9 @@ pub struct EngineHandle {
     pub rt: tokio::runtime::Handle,
     pub started: Instant,
     pub ai_running: Arc<AtomicBool>,
+    /// P0-2：事件总线消费者 lag 累计丢失事件数（persist+detect+creds 共享，
+    /// 重启清零）。lag=证据空窗，对哈希链审计是必须可见的故障
+    pub bus_lag_total: AtomicU64,
     pub honeypot: aisafeguard_honeypot::HoneypotHandle,
     /// 本机账号名快照（0.5.10 H200）：小写用户名集合，快照任务写、凭证任务读；
     /// 只存用户名，绝不触碰真实口令数据
@@ -261,6 +264,9 @@ pub struct StatusReport {
     pub funnel_7d: aisafeguard_store::FunnelStats,
     /// 情报订阅状态（订阅反馈：在库条数 + 上次拉取结果）
     pub intel: IntelStatus,
+    /// P0-2：事件总线消费者 lag 累计丢失事件数（证据空窗可观测；重启清零）
+    #[serde(default)]
+    pub bus_lag_total: u64,
 }
 
 /// 情报订阅状态（GUI 设置页反馈；last_fetch None = 启动后从未拉取）。
@@ -435,6 +441,7 @@ impl EngineHandle {
                 }
             },
             org_metrics: self.store.org_metrics_since(since).unwrap_or_default(),
+            bus_lag_total: self.bus_lag_total.load(Ordering::Relaxed),
             intel: {
                 let meta = self
                     .store
@@ -1529,6 +1536,19 @@ pub fn tag_ioc_hit(
     }
 }
 
+/// P0-2 证据空窗可观测：证据类总线消费者（persist/detect/creds）lag 时累加
+/// 共享计数、error 级留痕，并向总线发一条 engine error 事件——持久化消费者
+/// 会将其入库，空窗本身进哈希链留痕。publish 同步非阻塞（broadcast send），
+/// 无重入风险。注意：console 实时直播流是纯展示，lag 即 continue，不在此口径。
+pub fn handle_bus_lag(eng: &EngineHandle, consumer: &str, missed: u64) {
+    eng.bus_lag_total.fetch_add(missed, Ordering::Relaxed);
+    tracing::error!("事件总线 lag：{consumer} 丢弃 {missed} 条（证据空窗）");
+    eng.bus.publish(SecurityEvent::engine(
+        "error",
+        format!("事件总线 lag：{consumer} 丢弃 {missed} 条（证据空窗）"),
+    ));
+}
+
 /// 快路径：消费蜜罐命中事件，产出 Detection 判定；
 /// auto_block 开启时自动封禁（TTL + 内网保护），全程留痕。
 /// 0.5.0 F4：规则子集引擎在蜜罐 payload 全窗上匹配（enabled 时）。
@@ -1649,7 +1669,7 @@ pub fn spawn_detect_task(eng: &Arc<EngineHandle>) {
                 }
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!("频次检测通道落后 {n} 条");
+                    handle_bus_lag(&eng, "detect", n);
                 }
                 Err(_) => break,
             }
@@ -1848,7 +1868,7 @@ pub fn spawn_credential_task(eng: &Arc<EngineHandle>) {
                 }
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!("凭证采集通道落后 {n} 条");
+                    handle_bus_lag(&eng, "creds", n);
                 }
                 Err(_) => break,
             }
@@ -3503,6 +3523,94 @@ mod tests {
         assert!(!same_element(&t, &rule("1.2.3.4", "in", "tcp", Some(8082))));
         // 空 IP 的规则不构成覆盖
         assert!(!same_element(&rule("", "in", "any", None), &a));
+    }
+
+    /// P0-2：总线 lag 可观测——计数器累计丢失条数，且空窗事件以 engine error
+    /// 进总线（可被订阅者收到并入库）。
+    #[test]
+    fn bus_lag_counts_and_publishes_engine_error() {
+        let dir = std::env::temp_dir().join(format!("asg-lag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("临时目录");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("测试 runtime");
+        rt.block_on(async {
+            let bus = EventBus::new(16);
+            let mut rx = bus.subscribe();
+            let eng = Arc::new(EngineHandle {
+                cfg: RwLock::new(AppConfig::default()),
+                cfg_path: PathBuf::new(),
+                store: Arc::new(Store::open(&dir.join("t.db")).expect("临时库")),
+                bus: bus.clone(),
+                firewall: aisafeguard_firewall::create_backend(),
+                detect: Arc::new(aisafeguard_detect::FreqEngine::new()),
+                capture: Arc::new(CaptureState::default()),
+                rules: Arc::new(RulesState::default()),
+                xdp: None,
+                rt: tokio::runtime::Handle::current(),
+                started: Instant::now(),
+                ai_running: Arc::new(AtomicBool::new(false)),
+                bus_lag_total: AtomicU64::new(0),
+                // 蜜罐整体关闭且无监听行：避免测试真绑端口
+                honeypot: aisafeguard_honeypot::start(
+                    &aisafeguard_core::config::HoneypotConfig {
+                        enabled: false,
+                        listeners: Vec::new(),
+                        ..Default::default()
+                    },
+                    bus.clone(),
+                    &dir,
+                ),
+                local_accounts: Arc::new(RwLock::new(std::collections::HashSet::new())),
+                credentials: Arc::new(
+                    CredentialStore::open(&dir.join("creds.db")).expect("凭证库"),
+                ),
+                corroboration: Arc::new(Mutex::new(
+                    crate::corroboration::CorroborationEngine::default(),
+                )),
+                fed_stats: Some(Arc::new(crate::fed::FedStats::default())),
+                token: String::new(),
+                version: "test",
+            });
+
+            handle_bus_lag(&eng, "persist", 3);
+            handle_bus_lag(&eng, "detect", 2);
+            assert_eq!(
+                5,
+                eng.bus_lag_total.load(Ordering::Relaxed),
+                "lag 计数累计丢失条数"
+            );
+
+            // 两条 lag 留痕事件都在总线上（Engine level=error）；构造期蜜罐禁用
+            // 的 info 事件也在队列里，逐条过滤到齐为止。recv 带 2 秒超时：
+            // publish 路径回归时快速失败而非挂死
+            let mut lag_msgs = Vec::new();
+            while lag_msgs.len() < 2 {
+                let ev = match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+                    Ok(res) => res.expect("总线事件"),
+                    Err(_) => {
+                        panic!("lag 留痕事件发布路径回归：2 秒内未收到事件，已收到: {lag_msgs:?}")
+                    }
+                };
+                if let SecurityEvent::Engine { level, message, .. } = ev
+                    && message.contains("事件总线 lag")
+                {
+                    assert_eq!("error", level);
+                    lag_msgs.push(message);
+                }
+            }
+            assert!(
+                lag_msgs.iter().any(|m| m.contains("persist 丢弃 3 条")),
+                "persist lag 事件缺失: {lag_msgs:?}"
+            );
+            assert!(
+                lag_msgs.iter().any(|m| m.contains("detect 丢弃 2 条")),
+                "detect lag 事件缺失: {lag_msgs:?}"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// auto_apply 证据门控（F791 补全）：三层证据/豁免/日限额的完整分支覆盖。
